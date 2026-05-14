@@ -1,0 +1,109 @@
+import type { PaymentRail } from "../types.js";
+
+export type AdapterStatus = "ready" | "stubbed" | "planned";
+export type AdapterRole = "staff_terminal" | "checkout_handoff" | "payment_proof" | "receipt_memory";
+
+export type SellerAgentAdapter = {
+  id: string;
+  role: AdapterRole;
+  label: string;
+  status: AdapterStatus;
+  supportedRails: PaymentRail[];
+  responsibilities: string[];
+  requiredEnv: string[];
+};
+
+const adapters: SellerAgentAdapter[] = [
+  {
+    id: "telegram-staff-terminal",
+    role: "staff_terminal",
+    label: "Telegram staff terminal",
+    status: "ready",
+    supportedRails: ["counter", "telegram_staff"],
+    responsibilities: [
+      "notify staff about incoming orders",
+      "let staff confirm paid and done",
+      "turn a completed pickup into receipt proof",
+    ],
+    requiredEnv: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_STAFF_CHAT_ID"],
+  },
+  {
+    id: "shopify-checkout",
+    role: "checkout_handoff",
+    label: "Shopify checkout adapter",
+    status: "stubbed",
+    supportedRails: ["shopify"],
+    responsibilities: [
+      "map merchant catalog items to Shopify products",
+      "create checkout handoff links",
+      "normalize Shopify payment webhooks into SLL-R payment proof",
+    ],
+    requiredEnv: ["SHOPIFY_SHOP_DOMAIN", "SHOPIFY_ADMIN_ACCESS_TOKEN", "SHOPIFY_WEBHOOK_SECRET"],
+  },
+  {
+    id: "moonpay-commerce",
+    role: "payment_proof",
+    label: "MoonPay Commerce webhook adapter",
+    status: "stubbed",
+    supportedRails: ["moonpay", "solana_pay"],
+    responsibilities: [
+      "accept MoonPay Commerce checkout events",
+      "verify payment amount and merchant order binding",
+      "promote a paid order into Jiagon receipt memory",
+    ],
+    requiredEnv: ["MOONPAY_COMMERCE_WEBHOOK_SECRET"],
+  },
+  {
+    id: "stripe-agentic-payments",
+    role: "payment_proof",
+    label: "Stripe agentic payments adapter",
+    status: "planned",
+    supportedRails: ["stripe"],
+    responsibilities: [
+      "accept Stripe payment intent events",
+      "bind buyer-agent authorization to merchant order proof",
+    ],
+    requiredEnv: ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"],
+  },
+  {
+    id: "solana-pay-reference",
+    role: "payment_proof",
+    label: "Solana Pay reference verification",
+    status: "planned",
+    supportedRails: ["solana_pay"],
+    responsibilities: [
+      "verify Solana Pay reference transactions",
+      "bind crypto payment proof to an SLL-R order",
+    ],
+    requiredEnv: ["SOLANA_RPC_URL", "JIAGON_SOLANA_PAY_RECIPIENT"],
+  },
+  {
+    id: "jiagon-receipts",
+    role: "receipt_memory",
+    label: "Jiagon receipt memory handoff",
+    status: process.env.JIAGON_RECEIPT_API_URL ? "ready" : "stubbed",
+    supportedRails: ["counter", "telegram_staff", "shopify", "moonpay", "stripe", "solana_pay"],
+    responsibilities: [
+      "issue portable receipt memory",
+      "prepare Solana cNFT mint metadata",
+      "return claim URLs for buyer agents and wallets",
+    ],
+    requiredEnv: ["JIAGON_RECEIPT_API_URL", "JIAGON_RECEIPT_API_KEY"],
+  },
+];
+
+export function listAdapters() {
+  return adapters;
+}
+
+export function adapterManifest() {
+  return adapters.map((adapter) => ({
+    id: adapter.id,
+    role: adapter.role,
+    label: adapter.label,
+    status: adapter.status,
+    supportedRails: adapter.supportedRails,
+    responsibilities: adapter.responsibilities,
+    requiredEnv: adapter.requiredEnv,
+  }));
+}

@@ -1,0 +1,20 @@
+{
+  "name": "sll-r",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Installable seller-side operating agent for merchants in the agent economy.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "pnpm build && node dist/server.js",
+    "smoke": "pnpm build && node dist/scripts/smoke.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "typescript": "^5.8.3"
+  }
+}
