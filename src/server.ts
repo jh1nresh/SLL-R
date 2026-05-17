@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
-import { createOrder } from "./core/orders.js";
+import { acceptOrder, createOrder, fulfillOrder, getOrder, listOrders, rejectOrder } from "./core/orders.js";
 import { quoteOrder } from "./core/quote.js";
 import { merchantForId, merchantProfiles } from "./merchants/profiles.js";
 import { sllrManifest } from "./manifest.js";
@@ -76,6 +76,40 @@ export function createSllrServer() {
           order: result.order,
           next: "Attach payment or fulfillment proof to issue Jiagon receipt memory.",
         });
+      }
+      if (request.method === "GET" && url.pathname === "/orders") {
+        return json(response, 200, {
+          product: "SLL-R merchant terminal",
+          orders: listOrders({
+            merchantId: url.searchParams.get("merchantId") || undefined,
+            status: url.searchParams.get("status") as never || undefined,
+          }),
+        });
+      }
+      const orderRoute = url.pathname.match(/^\/orders\/([^/]+)(?:\/([^/]+))?$/);
+      if (orderRoute) {
+        const [, orderId, action] = orderRoute;
+        if (request.method === "GET" && !action) {
+          const order = getOrder(orderId);
+          return json(response, order ? 200 : 404, order ? { product: "SLL-R merchant terminal", order } : { error: `Unknown order: ${orderId}` });
+        }
+        if (request.method === "POST" && action === "accept") {
+          const order = acceptOrder(orderId, await body(request) as never);
+          return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
+        }
+        if (request.method === "POST" && action === "reject") {
+          const order = rejectOrder(orderId, await body(request) as never);
+          return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
+        }
+        if (request.method === "POST" && action === "fulfill") {
+          const order = await fulfillOrder(orderId, await body(request) as never);
+          return json(response, 200, {
+            product: "SLL-R merchant terminal",
+            status: order.status,
+            proofLevel: order.proofLevel,
+            order,
+          });
+        }
       }
       if (request.method === "POST" && url.pathname === "/webhooks/payment") {
         const order = await attachPaymentProof(await body(request) as never);

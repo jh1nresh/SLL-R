@@ -76,7 +76,7 @@ export type SellerOrder = {
   merchantName: string;
   agentId: string;
   customerLabel: string;
-  status: "pending_payment" | "payment_backed" | "fulfilled" | "receipt_issued";
+  status: "pending_payment" | "accepted" | "rejected" | "payment_backed" | "fulfilled" | "receipt_issued";
   proofLevel: ProofLevel;
   item: NonNullable<QuoteResult["item"]>;
   payment: {
@@ -85,9 +85,26 @@ export type SellerOrder = {
     provider: PaymentRail | null;
     paymentId: string | null;
   };
+  terminal: {
+    status: "requested" | "accepted" | "rejected" | "fulfilled";
+    actor: string | null;
+    note: string | null;
+    updatedAt: string | null;
+  };
   receipt: ReceiptHandoff | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type MerchantOrderFilter = {
+  merchantId?: string;
+  status?: SellerOrder["status"];
+};
+
+export type MerchantActionRequest = {
+  merchantId: string;
+  actor?: string;
+  note?: string;
 };
 
 export type PaymentWebhook = {

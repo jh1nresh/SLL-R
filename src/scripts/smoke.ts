@@ -46,6 +46,39 @@ async function main() {
       throw new Error(`Unexpected Raposa Coffee quote: ${JSON.stringify(pickupQuote)}`);
     }
 
+    const pickupOrder = await postJson(origin, "/orders", {
+      merchantId: "raposa-coffee",
+      agentId: "buy-r-smoke",
+      userIntent: "Get me an iced latte under $10 in 15 minutes",
+      maxSpendUsd: "10.00",
+      deadlineMinutes: 15,
+      paymentMode: "counter",
+    }) as { order?: { id?: string } };
+    if (!pickupOrder.order?.id) throw new Error(`Pickup order was not created: ${JSON.stringify(pickupOrder)}`);
+
+    const terminalList = await fetch(`${origin}/orders?merchantId=raposa-coffee`).then((response) => response.json()) as { orders?: Array<{ id?: string }> };
+    if (!terminalList.orders?.some((order) => order.id === pickupOrder.order?.id)) {
+      throw new Error(`Merchant terminal did not list pickup order: ${JSON.stringify(terminalList)}`);
+    }
+
+    const accepted = await postJson(origin, `/orders/${pickupOrder.order.id}/accept`, {
+      merchantId: "raposa-coffee",
+      actor: "raposa-staff",
+      note: "Can make it before pickup window.",
+    }) as { status?: string; order?: { terminal?: { status?: string } } };
+    if (accepted.status !== "accepted" || accepted.order?.terminal?.status !== "accepted") {
+      throw new Error(`Merchant accept failed: ${JSON.stringify(accepted)}`);
+    }
+
+    const fulfilled = await postJson(origin, `/orders/${pickupOrder.order.id}/fulfill`, {
+      merchantId: "raposa-coffee",
+      actor: "raposa-staff",
+      note: "Paid at counter and handed off.",
+    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } };
+    if (fulfilled.proofLevel !== "receipt_memory_issued" || !fulfilled.order?.receipt?.receiptHash) {
+      throw new Error(`Merchant fulfillment did not issue receipt handoff: ${JSON.stringify(fulfilled)}`);
+    }
+
     const orderResult = await postJson(origin, "/orders", {
       merchantId: "raposa-shop",
       agentId: "buy-r-smoke",

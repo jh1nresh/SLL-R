@@ -85,6 +85,11 @@ GET  /.well-known/sllr-agent.json
 GET  /capabilities?merchantId=raposa-coffee
 POST /quote
 POST /orders
+GET  /orders?merchantId=raposa-coffee
+GET  /orders/{orderId}
+POST /orders/{orderId}/accept
+POST /orders/{orderId}/reject
+POST /orders/{orderId}/fulfill
 POST /webhooks/payment
 ```
 
@@ -127,6 +132,32 @@ curl -X POST http://localhost:3100/webhooks/payment \
     "provider": "moonpay",
     "amountUsd": "17.95",
     "paymentId": "pay_demo"
+  }'
+```
+
+## Example Merchant Terminal
+
+```bash
+curl "http://localhost:3100/orders?merchantId=raposa-coffee"
+```
+
+```bash
+curl -X POST http://localhost:3100/orders/ord_.../accept \
+  -H "content-type: application/json" \
+  -d '{
+    "merchantId": "raposa-coffee",
+    "actor": "raposa-staff",
+    "note": "Can make it before pickup window."
+  }'
+```
+
+```bash
+curl -X POST http://localhost:3100/orders/ord_.../fulfill \
+  -H "content-type: application/json" \
+  -d '{
+    "merchantId": "raposa-coffee",
+    "actor": "raposa-staff",
+    "note": "Paid at counter and handed off."
   }'
 ```
 

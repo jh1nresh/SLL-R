@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { merchantForId } from "../merchants/profiles.js";
-import type { OrderRequest, PaymentWebhook, SellerOrder } from "../types.js";
+import type { MerchantActionRequest, MerchantOrderFilter, OrderRequest, PaymentWebhook, SellerOrder } from "../types.js";
 import { issueJiagonReceipt } from "../adapters/jiagonReceipts.js";
 import { centsFromUsd } from "./money.js";
 import { quoteOrder } from "./quote.js";
@@ -35,6 +35,12 @@ export function createOrder(input: OrderRequest) {
       provider: null,
       paymentId: null,
     },
+    terminal: {
+      status: "requested",
+      actor: null,
+      note: null,
+      updatedAt: null,
+    },
     receipt: null,
     createdAt: now,
     updatedAt: now,
@@ -45,6 +51,86 @@ export function createOrder(input: OrderRequest) {
 
 export function getOrder(orderId: string) {
   return orders.get(orderId) || null;
+}
+
+export function listOrders(filter: MerchantOrderFilter = {}) {
+  return Array.from(orders.values())
+    .filter((order) => !filter.merchantId || order.merchantId === filter.merchantId)
+    .filter((order) => !filter.status || order.status === filter.status)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function requireOrderForMerchant(orderId: string, input: MerchantActionRequest) {
+  const order = getOrder(orderId);
+  if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
+  if (order.merchantId !== input.merchantId) {
+    throw Object.assign(new Error(`Merchant ${input.merchantId} cannot operate order for ${order.merchantId}.`), { status: 409 });
+  }
+  return order;
+}
+
+function terminalUpdate(input: MerchantActionRequest, status: SellerOrder["terminal"]["status"]) {
+  return {
+    status,
+    actor: input.actor || "merchant",
+    note: input.note || null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function acceptOrder(orderId: string, input: MerchantActionRequest) {
+  const order = requireOrderForMerchant(orderId, input);
+  if (order.status === "rejected") {
+    throw Object.assign(new Error("Rejected orders cannot be accepted."), { status: 409 });
+  }
+  if (order.status === "receipt_issued") return order;
+
+  const updated: SellerOrder = {
+    ...order,
+    status: order.payment.status === "verified" ? "payment_backed" : "accepted",
+    terminal: terminalUpdate(input, "accepted"),
+    updatedAt: new Date().toISOString(),
+  };
+  orders.set(updated.id, updated);
+  return updated;
+}
+
+export function rejectOrder(orderId: string, input: MerchantActionRequest) {
+  const order = requireOrderForMerchant(orderId, input);
+  if (order.status === "payment_backed" || order.status === "fulfilled" || order.status === "receipt_issued") {
+    throw Object.assign(new Error("Orders with payment, fulfillment, or receipt proof cannot be rejected."), { status: 409 });
+  }
+
+  const updated: SellerOrder = {
+    ...order,
+    status: "rejected",
+    terminal: terminalUpdate(input, "rejected"),
+    updatedAt: new Date().toISOString(),
+  };
+  orders.set(updated.id, updated);
+  return updated;
+}
+
+export async function fulfillOrder(orderId: string, input: MerchantActionRequest) {
+  const order = requireOrderForMerchant(orderId, input);
+  if (order.status === "rejected") {
+    throw Object.assign(new Error("Rejected orders cannot be fulfilled."), { status: 409 });
+  }
+  if (order.status === "receipt_issued") return order;
+
+  const fulfilled: SellerOrder = {
+    ...order,
+    status: "fulfilled",
+    proofLevel: "fulfilled",
+    terminal: terminalUpdate(input, "fulfilled"),
+    updatedAt: new Date().toISOString(),
+  };
+  fulfilled.receipt = await issueJiagonReceipt(fulfilled);
+  fulfilled.status = "receipt_issued";
+  fulfilled.proofLevel = "receipt_memory_issued";
+  fulfilled.updatedAt = new Date().toISOString();
+  orders.set(fulfilled.id, fulfilled);
+  return fulfilled;
 }
 
 export async function attachPaymentProof(input: PaymentWebhook) {
