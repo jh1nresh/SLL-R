@@ -6,6 +6,10 @@ It lets buyer agents place real-world orders with a merchant, checks merchant
 constraints, routes checkout through existing systems, and hands completed
 orders to Jiagon for verified receipt memory.
 
+The current product goal is not a hackathon-only demo. The goal is to list SLL-R
+on Dojo as a reusable agent service and onboard Raposa / SOLYD as the first
+merchant pilots.
+
 ```text
 BUY-R / Hermes / ChatGPT
 -> SLL-R
@@ -23,6 +27,27 @@ BUY-R / Hermes / ChatGPT
 
 SLL-R is not a full POS replacement. It operates the merchant's existing checkout
 and staff workflows.
+
+## Current MVP Goal
+
+SLL-R should be useful when a merchant wants agents to order from them without
+building a custom agent stack from scratch.
+
+Target users:
+
+- Raposa Coffee: pickup orders and online coffee product orders.
+- SOLYD: online product quotes, checkout handoff, and payment-backed receipts.
+- Dojo builders: reusable seller-agent template for their own merchants.
+
+MVP success means:
+
+- SLL-R has a stable agent manifest that Dojo can index.
+- A buyer agent can ask for a quote and create an order through the API.
+- The merchant can use a simple terminal or existing checkout flow to complete
+  the order.
+- A payment or fulfillment proof can become Jiagon receipt memory.
+- Raposa / SOLYD can understand what they need to configure in less than one
+  meeting.
 
 ## Adapter Contract
 
@@ -126,3 +151,8 @@ SLL-R gives merchants an installable seller agent that buyer agents can quote,
 order, and pay through. After payment or fulfillment proof, SLL-R calls Jiagon to
 issue verified receipt memory.
 ```
+
+## Pilot Docs
+
+- [Dojo listing spec](./docs/dojo-listing.md)
+- [Raposa / SOLYD pilot runbook](./docs/merchant-pilot-runbook.md)
