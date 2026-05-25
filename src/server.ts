@@ -5,10 +5,16 @@ import { quoteOrder } from "./core/quote.js";
 import { merchantForId, merchantProfiles } from "./merchants/profiles.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
+import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(payload, null, 2));
+}
+
+function html(response: ServerResponse, status: number, payload: string) {
+  response.writeHead(status, { "content-type": "text/html; charset=utf-8" });
+  response.end(payload);
 }
 
 async function body(request: IncomingMessage) {
@@ -52,6 +58,12 @@ export function createSllrServer() {
 
       if (request.method === "GET" && url.pathname === "/health") {
         return json(response, 200, { ok: true, product: "SLL-R" });
+      }
+      if (request.method === "GET" && url.pathname === "/raposa") {
+        return html(response, 200, raposaTerminalPage(originFrom(request)));
+      }
+      if (request.method === "GET" && url.pathname === "/raposa/order") {
+        return html(response, 200, raposaOrderPage());
       }
       if (request.method === "GET" && url.pathname === "/.well-known/sllr-agent.json") {
         return json(response, 200, sllrManifest(originFrom(request)));

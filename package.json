@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "check": "pnpm build && pnpm smoke",
     "start": "node dist/server.js",
     "dev": "pnpm build && node dist/server.js",
     "smoke": "pnpm build && node dist/scripts/smoke.js"

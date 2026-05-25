@@ -26,6 +26,16 @@ async function main() {
     const manifest = await fetch(`${origin}/.well-known/sllr-agent.json`).then((response) => response.json()) as { name?: string };
     if (manifest.name !== "SLL-R by Jiagon") throw new Error("Manifest did not identify SLL-R.");
 
+    const raposaTerminal = await fetch(`${origin}/raposa`).then((response) => response.text());
+    if (!raposaTerminal.includes("Raposa Order Terminal") || !raposaTerminal.includes("/raposa/order")) {
+      throw new Error("Raposa terminal page did not render expected staff controls.");
+    }
+
+    const raposaOrderPage = await fetch(`${origin}/raposa/order`).then((response) => response.text());
+    if (!raposaOrderPage.includes("Order from Raposa") || !raposaOrderPage.includes("Send order to Raposa")) {
+      throw new Error("Raposa customer order page did not render expected order form.");
+    }
+
     const quote = await postJson(origin, "/quote", {
       merchantId: "raposa-shop",
       userIntent: "Ship me Raposa Nitro Cold Brew Caramel Latte under $20 this week",

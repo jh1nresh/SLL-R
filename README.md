@@ -82,6 +82,8 @@ http://localhost:3100
 
 ```text
 GET  /.well-known/sllr-agent.json
+GET  /raposa
+GET  /raposa/order
 GET  /capabilities?merchantId=raposa-coffee
 POST /quote
 POST /orders
@@ -92,6 +94,24 @@ POST /orders/{orderId}/reject
 POST /orders/{orderId}/fulfill
 POST /webhooks/payment
 ```
+
+## Raposa Pilot Pages
+
+Staff terminal:
+
+```text
+http://localhost:3100/raposa
+```
+
+Customer QR / order page:
+
+```text
+http://localhost:3100/raposa/order
+```
+
+The Raposa pilot keeps payment at the counter. SLL-R captures the order, lets
+staff accept or reject it, and issues receipt memory after staff marks the order
+fulfilled.
 
 ## Example Quote
 
