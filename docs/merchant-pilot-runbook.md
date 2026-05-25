@@ -25,7 +25,7 @@ What Raposa gets:
 - pickup ETA / availability logic
 - Telegram or simple merchant terminal for staff
 - verified receipt memory for customers
-- future compatibility with buyer agents on Dojo
+- future compatibility with buyer agents on AgentShack
 
 Initial config:
 
@@ -52,7 +52,7 @@ What SOLYD gets:
 - agent-readable product catalog
 - quote/order API without rebuilding checkout
 - payment-backed receipt memory
-- future Dojo distribution as an agent-ready merchant
+- future AgentShack distribution as an agent-ready merchant
 
 Initial config:
 

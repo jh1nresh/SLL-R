@@ -3,6 +3,7 @@ import { URL } from "node:url";
 import { acceptOrder, createOrder, fulfillOrder, getOrder, listOrders, rejectOrder } from "./core/orders.js";
 import { quoteOrder } from "./core/quote.js";
 import { merchantForId, merchantProfiles } from "./merchants/profiles.js";
+import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
@@ -75,6 +76,11 @@ export function createSllrServer() {
           product: "SLL-R seller operating agent",
           merchants: merchant ? [merchant] : Object.values(merchantProfiles),
         });
+      }
+      if (request.method === "GET" && url.pathname === "/pilot-kit") {
+        const merchantId = url.searchParams.get("merchantId") || "";
+        const kit = merchantId ? pilotKitForMerchant(merchantId, originFrom(request)) : null;
+        return json(response, kit ? 200 : 404, kit || { error: `Unknown merchant: ${merchantId || "(missing merchantId)"}` });
       }
       if (request.method === "POST" && url.pathname === "/quote") {
         return json(response, 200, { product: "SLL-R quote", quote: quoteOrder(await body(request) as never) });

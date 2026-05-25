@@ -23,8 +23,30 @@ async function main() {
   const origin = `http://127.0.0.1:${address.port}`;
 
   try {
-    const manifest = await fetch(`${origin}/.well-known/sllr-agent.json`).then((response) => response.json()) as { name?: string };
+    const manifest = await fetch(`${origin}/.well-known/sllr-agent.json`).then((response) => response.json()) as {
+      name?: string;
+      agentShack?: { type?: string; evaluator?: { policy?: string } };
+    };
     if (manifest.name !== "SLL-R by Jiagon") throw new Error("Manifest did not identify SLL-R.");
+    if (manifest.agentShack?.type !== "merchant_agent" || manifest.agentShack.evaluator?.policy !== "order-fulfillment-v0") {
+      throw new Error(`Manifest did not expose AgentShack merchant listing schema: ${JSON.stringify(manifest)}`);
+    }
+
+    const raposaKit = await fetch(`${origin}/pilot-kit?merchantId=raposa-coffee`).then((response) => response.json()) as {
+      merchant?: { id?: string };
+      apiExamples?: { quote?: { body?: { merchantId?: string } } };
+    };
+    if (raposaKit.merchant?.id !== "raposa-coffee" || raposaKit.apiExamples?.quote?.body?.merchantId !== "raposa-coffee") {
+      throw new Error(`Raposa pilot kit was not generated: ${JSON.stringify(raposaKit)}`);
+    }
+
+    const solydKit = await fetch(`${origin}/pilot-kit?merchantId=solyd`).then((response) => response.json()) as {
+      merchant?: { id?: string };
+      pilot?: { buyerPrompt?: string };
+    };
+    if (solydKit.merchant?.id !== "solyd" || !solydKit.pilot?.buyerPrompt?.includes("SOLYD")) {
+      throw new Error(`SOLYD pilot kit was not generated: ${JSON.stringify(solydKit)}`);
+    }
 
     const raposaTerminal = await fetch(`${origin}/raposa`).then((response) => response.text());
     if (!raposaTerminal.includes("Raposa Order Terminal") || !raposaTerminal.includes("/raposa/order")) {

@@ -7,8 +7,8 @@ constraints, routes checkout through existing systems, and hands completed
 orders to Jiagon for verified receipt memory.
 
 The current product goal is not a hackathon-only demo. The goal is to list SLL-R
-on Dojo as a reusable agent service and onboard Raposa / SOLYD as the first
-merchant pilots.
+on AgentShack as a reusable merchant-agent service and onboard Raposa / SOLYD as
+the first merchant pilots.
 
 ```text
 BUY-R / Hermes / ChatGPT
@@ -23,7 +23,7 @@ BUY-R / Hermes / ChatGPT
 - **SLL-R**: seller agent runtime for merchants.
 - **Jiagon**: proof, receipt memory, and Solana cNFT system.
 - **POS adapters**: internal SLL-R tools for Shopify, MoonPay, Telegram staff flow, Browser Use, Stripe, or future POS systems.
-- **BUY-R**: buyer-side agent caller. This can be Hermes, ChatGPT, Telegram, Dojo, or another personal agent.
+- **BUY-R**: buyer-side agent caller. This can be Hermes, ChatGPT, Telegram, AgentShack, or another personal agent.
 
 SLL-R is not a full POS replacement. It operates the merchant's existing checkout
 and staff workflows.
@@ -37,11 +37,11 @@ Target users:
 
 - Raposa Coffee: pickup orders and online coffee product orders.
 - SOLYD: online product quotes, checkout handoff, and payment-backed receipts.
-- Dojo builders: reusable seller-agent template for their own merchants.
+- AgentShack builders: reusable seller-agent template for their own merchants.
 
 MVP success means:
 
-- SLL-R has a stable agent manifest that Dojo can index.
+- SLL-R has a stable agent manifest that AgentShack can index.
 - A buyer agent can ask for a quote and create an order through the API.
 - The merchant can use a simple terminal or existing checkout flow to complete
   the order.
@@ -64,10 +64,36 @@ metadata in `GET /.well-known/sllr-agent.json`. Real merchant integrations can
 replace the mock catalog and stubbed adapters without changing the quote/order
 API contract.
 
+## AgentShack Listing Shape
+
+SLL-R is packaged as an AgentShack `merchant_agent`:
+
+```text
+customer intent
+-> structured order
+-> merchant accept / reject / fulfill
+-> payment or fulfillment proof
+-> receipt memory
+-> reputation update
+```
+
+The public manifest includes:
+
+- `type`: `merchant_agent`
+- `category`: `local_commerce`
+- `modes`: `one_time_call`, `subscription`, `fork`
+- `evaluator.policy`: `order-fulfillment-v0`
+- `reputation.subjects`: `merchant`, `customer`, `agent`, `evaluator`
+
+Use `GET /pilot-kit?merchantId=raposa-coffee` or
+`GET /pilot-kit?merchantId=solyd` to generate a merchant-specific onboarding
+package for the first pilot meeting.
+
 ## Run Locally
 
 ```bash
 pnpm install
+pnpm check
 pnpm smoke
 pnpm dev
 ```
@@ -85,6 +111,7 @@ GET  /.well-known/sllr-agent.json
 GET  /raposa
 GET  /raposa/order
 GET  /capabilities?merchantId=raposa-coffee
+GET  /pilot-kit?merchantId=raposa-coffee
 POST /quote
 POST /orders
 GET  /orders?merchantId=raposa-coffee
@@ -124,6 +151,16 @@ curl -X POST http://localhost:3100/quote \
     "maxSpendUsd": "20.00",
     "deliverByDays": 7
   }'
+```
+
+## Example Pilot Kit
+
+```bash
+curl "http://localhost:3100/pilot-kit?merchantId=raposa-coffee"
+```
+
+```bash
+curl "http://localhost:3100/pilot-kit?merchantId=solyd"
 ```
 
 ## Example Order
@@ -181,7 +218,7 @@ curl -X POST http://localhost:3100/orders/ord_.../fulfill \
   }'
 ```
 
-## Dojo Listing
+## AgentShack Listing
 
 Name:
 
@@ -205,5 +242,6 @@ issue verified receipt memory.
 
 ## Pilot Docs
 
-- [Dojo listing spec](./docs/dojo-listing.md)
+- [AgentShack listing spec](./docs/dojo-listing.md)
 - [Raposa / SOLYD pilot runbook](./docs/merchant-pilot-runbook.md)
+- [AgentShack merchant pilot](./docs/agentshack-merchant-pilot.md)

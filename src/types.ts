@@ -1,6 +1,8 @@
 export type FulfillmentMode = "pickup" | "shipping";
 export type PaymentRail = "counter" | "telegram_staff" | "shopify" | "moonpay" | "stripe" | "solana_pay";
 export type ProofLevel = "order_intent_only" | "payment_backed" | "fulfilled" | "receipt_memory_issued";
+export type AgentShackListingType = "merchant_agent";
+export type AgentShackMode = "one_time_call" | "subscription" | "fork";
 
 export type Money = {
   amountUsd: string;
@@ -121,4 +123,37 @@ export type ReceiptHandoff = {
   receiptHash: string;
   claimUrl: string;
   cnftStatus: "pending" | "ready_for_mint";
+};
+
+export type AgentShackListing = {
+  id: string;
+  name: string;
+  type: AgentShackListingType;
+  category: string;
+  version: string;
+  modes: AgentShackMode[];
+  runtime: {
+    type: "hosted_endpoint" | "self_hosted_template";
+    manifestUrl: string;
+  };
+  evaluator: {
+    policy: string;
+    checks: string[];
+  };
+  receipt: {
+    requiredFields: string[];
+    proofLevels: ProofLevel[];
+  };
+  settlement: {
+    pass: string;
+    fail: string;
+  };
+  reputation: {
+    subjects: string[];
+  };
+  forking: {
+    allowed: boolean;
+    forkable: string[];
+    lineageFeeBps: number;
+  };
 };

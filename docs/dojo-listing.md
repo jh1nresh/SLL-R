@@ -1,4 +1,4 @@
-# Dojo Listing Spec
+# AgentShack Listing Spec
 
 ## Listing
 
@@ -32,14 +32,14 @@ SLL-R gives a merchant an installable seller operating agent. Buyer agents can
 call SLL-R to discover capabilities, request quotes, create orders, and receive
 verified receipt memory after payment or fulfillment proof.
 
-## Why Dojo
+## Why AgentShack
 
-Dojo should list SLL-R as an agent service and install template:
+AgentShack should list SLL-R as an agent service and install template:
 
 - Hosted service: Jiagon runs SLL-R for early merchants.
 - Self-hosted template: merchants or builders fork the runtime and configure
   their own catalog, checkout, and webhook adapters.
-- Workflow primitive: other Dojo agents can call SLL-R instead of building a
+- Workflow primitive: other AgentShack agents can call SLL-R instead of building a
   merchant-specific ordering flow.
 
 ## Install Surface
@@ -70,9 +70,9 @@ The manifest advertises:
 - required environment variables
 - receipt handoff capability
 
-## Done Criteria For Dojo Listing
+## Done Criteria For AgentShack Listing
 
-- A Dojo worker can read the manifest and understand how to call SLL-R.
+- An AgentShack worker can read the manifest and understand how to call SLL-R.
 - A merchant can install a static catalog profile without editing core runtime
   code.
 - A buyer agent can run quote -> order -> payment proof -> receipt memory.
