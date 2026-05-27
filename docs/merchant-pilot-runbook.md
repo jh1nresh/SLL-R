@@ -13,8 +13,9 @@ Best first wedge:
 ```text
 buyer agent asks for coffee or beans
 -> SLL-R quotes Raposa options
--> buyer agent creates order
--> Raposa confirms pickup or checkout
+-> buyer agent creates order with a requested pickup window
+-> SLL-R estimates the live queue and returns a pickup promise
+-> Raposa confirms, marks ready, then marks customer claimed
 -> SLL-R records payment or fulfillment proof
 -> Jiagon issues receipt memory
 ```
@@ -22,7 +23,7 @@ buyer agent asks for coffee or beans
 What Raposa gets:
 
 - one agent-readable catalog
-- pickup ETA / availability logic
+- pickup ETA, queue visibility, and promise logic
 - Telegram or simple merchant terminal for staff
 - verified receipt memory for customers
 - future compatibility with buyer agents on AgentShack
@@ -33,6 +34,7 @@ Initial config:
 - `merchantId`: `raposa-shop` for shipped coffee products
 - payment rail: counter first, MoonPay / Shopify later
 - staff workflow: Telegram group or hosted merchant terminal
+- promise workflow: accept, ready, claimed, then receipt memory
 
 ## SOLYD Pilot
 
@@ -81,6 +83,8 @@ current workflow first.
 - Merchant can see or receive created orders.
 - Buyer agent can get a quote with budget and timing constraints.
 - Order has a stable ID and status.
+- Pickup orders include estimated wait, promised time, ready time, and claimed
+  time.
 - Payment or fulfillment proof upgrades the order.
 - Jiagon returns a receipt memory object or claim URL.
 

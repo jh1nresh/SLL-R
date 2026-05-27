@@ -35,7 +35,7 @@ building a custom agent stack from scratch.
 
 Target users:
 
-- Raposa Coffee: pickup orders and online coffee product orders.
+- Raposa Coffee: pickup promise, event queue, and online coffee product orders.
 - SOLYD: online product quotes, checkout handoff, and payment-backed receipts.
 - AgentShack builders: reusable seller-agent template for their own merchants.
 
@@ -43,8 +43,8 @@ MVP success means:
 
 - SLL-R has a stable agent manifest that AgentShack can index.
 - A buyer agent can ask for a quote and create an order through the API.
-- The merchant can use a simple terminal or existing checkout flow to complete
-  the order.
+- The merchant can use a simple terminal or existing checkout flow to accept,
+  ready, claim, or complete the order.
 - A payment or fulfillment proof can become Jiagon receipt memory.
 - Raposa / SOLYD can understand what they need to configure in less than one
   meeting.
@@ -118,6 +118,8 @@ GET  /orders?merchantId=raposa-coffee
 GET  /orders/{orderId}
 POST /orders/{orderId}/accept
 POST /orders/{orderId}/reject
+POST /orders/{orderId}/ready
+POST /orders/{orderId}/claim
 POST /orders/{orderId}/fulfill
 POST /webhooks/payment
 ```
@@ -136,9 +138,9 @@ Customer QR / order page:
 http://localhost:3100/raposa/order
 ```
 
-The Raposa pilot keeps payment at the counter. SLL-R captures the order, lets
-staff accept or reject it, and issues receipt memory after staff marks the order
-fulfilled.
+The Raposa pilot keeps payment at the counter. SLL-R captures the order,
+estimates the pickup promise from the active queue, lets staff accept or reject
+it, marks the drink ready, and issues receipt memory after the customer claim.
 
 ## Example Quote
 
@@ -215,6 +217,28 @@ curl -X POST http://localhost:3100/orders/ord_.../fulfill \
     "merchantId": "raposa-coffee",
     "actor": "raposa-staff",
     "note": "Paid at counter and handed off."
+  }'
+```
+
+Raposa promise flow:
+
+```bash
+curl -X POST http://localhost:3100/orders/ord_.../ready \
+  -H "content-type: application/json" \
+  -d '{
+    "merchantId": "raposa-coffee",
+    "actor": "raposa-staff",
+    "note": "Drink is ready."
+  }'
+```
+
+```bash
+curl -X POST http://localhost:3100/orders/ord_.../claim \
+  -H "content-type: application/json" \
+  -d '{
+    "merchantId": "raposa-coffee",
+    "actor": "raposa-staff",
+    "note": "Paid at counter and claimed."
   }'
 ```
 

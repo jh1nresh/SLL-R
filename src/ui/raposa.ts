@@ -156,8 +156,8 @@ export function raposaTerminalPage(origin: string) {
   <div class="brand">
     <div class="mark">R</div>
     <div>
-      <h1>Raposa Order Terminal</h1>
-      <p>Accept QR and buyer-agent orders without changing POS.</p>
+      <h1>Raposa Promise Terminal</h1>
+      <p>Accept pickup requests, promise a ready time, and reduce counter interruptions.</p>
     </div>
   </div>
   <div class="row">
@@ -169,8 +169,8 @@ export function raposaTerminalPage(origin: string) {
   <section class="panel stack">
     <div class="row" style="justify-content: space-between;">
       <div>
-        <h2>Incoming Orders</h2>
-        <p>Staff accepts, rejects, then marks fulfilled after normal counter payment.</p>
+        <h2>Pickup Promise Board</h2>
+        <p>Staff accepts, marks ready, then confirms customer claim after normal counter payment.</p>
       </div>
       <span class="pill" id="count">0 orders</span>
     </div>
@@ -180,14 +180,14 @@ export function raposaTerminalPage(origin: string) {
   </section>
   <aside class="panel stack">
     <h2>Pilot Setup</h2>
-    <div class="notice">Raposa keeps counter payment. SLL-R only captures agent/QR orders and issues receipt memory after staff fulfillment.</div>
+    <div class="notice">Raposa keeps counter payment. SLL-R manages the pickup promise and issues receipt memory after customer claim.</div>
     <div class="stack">
       <p><strong>Customer QR URL</strong></p>
       <pre>${origin}/raposa/order</pre>
       <p><strong>API queue</strong></p>
       <pre>${origin}/orders?merchantId=raposa-coffee</pre>
       <p><strong>Proof level</strong></p>
-      <pre>merchant_confirmed_fulfillment</pre>
+      <pre>pickup_promise + ready_signal + customer_claim</pre>
     </div>
   </aside>
 </main>
@@ -220,10 +220,17 @@ async function action(orderId, actionName, note) {
   await loadOrders();
 }
 
+function timeText(value) {
+  if (!value) return "not set";
+  return new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
 function renderOrder(order) {
   const canAccept = order.status === "pending_payment";
   const canReject = order.status === "pending_payment" || order.status === "accepted";
-  const canFulfill = order.status === "pending_payment" || order.status === "accepted" || order.status === "payment_backed";
+  const canReady = order.status === "accepted" || order.status === "payment_backed";
+  const canClaim = order.status === "ready";
+  const promise = order.promise || {};
   return \`
     <article class="order">
       <div class="order-title">
@@ -238,11 +245,19 @@ function renderOrder(order) {
         <span class="muted">Payment: \${escapeText(order.payment.mode)}</span>
         <span class="muted">Proof: \${escapeText(order.proofLevel)}</span>
       </div>
+      <div class="row">
+        <span class="pill">\${escapeText(promise.status || "not_applicable")}</span>
+        <span class="muted">Est. wait: \${escapeText(promise.estimatedWaitMinutes ?? "n/a")} min</span>
+        <span class="muted">Promised: \${escapeText(timeText(promise.promisedReadyAt))}</span>
+        <span class="muted">Ready: \${escapeText(timeText(promise.readyAt))}</span>
+        \${promise.delayMinutes ? \`<span class="muted">Delay: \${escapeText(promise.delayMinutes)} min</span>\` : ""}
+      </div>
       \${order.receipt ? \`<pre>Receipt: \${escapeText(order.receipt.receiptHash)}\\nClaim: \${escapeText(order.receipt.claimUrl)}</pre>\` : ""}
       <div class="row">
         <button \${canAccept ? "" : "disabled"} onclick="action('\${order.id}', 'accept', 'Accepted from Raposa terminal.')">Accept</button>
         <button class="danger" \${canReject ? "" : "disabled"} onclick="action('\${order.id}', 'reject', 'Rejected from Raposa terminal.')">Reject</button>
-        <button class="secondary" \${canFulfill ? "" : "disabled"} onclick="action('\${order.id}', 'fulfill', 'Paid at counter and handed off.')">Mark Fulfilled</button>
+        <button class="secondary" \${canReady ? "" : "disabled"} onclick="action('\${order.id}', 'ready', 'Drink is ready for pickup.')">Ready</button>
+        <button class="secondary" \${canClaim ? "" : "disabled"} onclick="action('\${order.id}', 'claim', 'Paid at counter and claimed by customer.')">Claimed</button>
       </div>
     </article>
   \`;
@@ -278,14 +293,14 @@ export function raposaOrderPage() {
     <div class="mark">R</div>
     <div>
       <h1>Order from Raposa</h1>
-      <p>QR order flow powered by SLL-R. Pay at the counter as usual.</p>
+      <p>Get a pickup promise before you stand in line. Pay at the counter as usual.</p>
     </div>
   </div>
   <a class="button secondary" href="/raposa">Staff terminal</a>
 </header>
 <main class="grid">
   <section class="panel stack">
-    <h2>Create Pickup Order</h2>
+    <h2>Create Pickup Promise</h2>
     <form id="orderForm" class="stack">
       <label>
         Item
@@ -296,17 +311,17 @@ export function raposaOrderPage() {
         <input id="customerLabel" placeholder="Alex / table 4 / buyer agent" value="Raposa guest">
       </label>
       <label>
-        Pickup window
+        I can pick up in this many minutes
         <input id="deadlineMinutes" type="number" min="5" max="60" value="15">
       </label>
-      <button type="submit">Send order to Raposa</button>
+      <button type="submit">Ask Raposa for pickup promise</button>
     </form>
     <div id="result" class="stack"></div>
   </section>
   <aside class="panel stack">
     <h2>How this works</h2>
-    <p>SLL-R quotes the order, creates a structured pickup request, and sends it to the Raposa terminal.</p>
-    <p>Raposa accepts the order, you pay at the counter, and staff marks it fulfilled to issue receipt memory.</p>
+    <p>SLL-R quotes the order, estimates wait from the live queue, and sends a pickup promise to the Raposa terminal.</p>
+    <p>Raposa marks the drink ready, you pay at the counter, and the customer claim issues receipt memory.</p>
   </aside>
 </main>
 <script>
@@ -349,6 +364,7 @@ form.addEventListener("submit", async (event) => {
     result.innerHTML = '<div class="notice">' + escapeText(payload.error || "Order failed") + '</div>';
     return;
   }
+  const promise = payload.order.promise || {};
   result.innerHTML = \`
     <div class="order">
       <div class="order-title">
@@ -358,7 +374,8 @@ form.addEventListener("submit", async (event) => {
         </div>
         <span class="pill">\${escapeText(payload.order.status)}</span>
       </div>
-      <p>Show this at Raposa. Pay at the counter as usual. Staff will mark fulfilled after handoff.</p>
+      <p>Estimated wait: \${escapeText(promise.estimatedWaitMinutes ?? "n/a")} min. Promised pickup: \${escapeText(promise.promisedReadyAt ? new Date(promise.promisedReadyAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "not set")}.</p>
+      <p>Show this at Raposa. Pay at the counter as usual. Staff will mark ready, then claimed after handoff.</p>
       <pre>\${escapeText(JSON.stringify(payload.order, null, 2))}</pre>
     </div>
   \`;

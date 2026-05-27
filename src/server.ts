@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
-import { acceptOrder, createOrder, fulfillOrder, getOrder, listOrders, rejectOrder } from "./core/orders.js";
+import { acceptOrder, claimOrder, createOrder, fulfillOrder, getOrder, listOrders, markOrderReady, rejectOrder } from "./core/orders.js";
 import { quoteOrder } from "./core/quote.js";
 import { merchantForId, merchantProfiles } from "./merchants/profiles.js";
 import { pilotKitForMerchant } from "./merchants/pilotKits.js";
@@ -121,6 +121,19 @@ export function createSllrServer() {
         }
         if (request.method === "POST" && action === "fulfill") {
           const order = await fulfillOrder(orderId, await body(request) as never);
+          return json(response, 200, {
+            product: "SLL-R merchant terminal",
+            status: order.status,
+            proofLevel: order.proofLevel,
+            order,
+          });
+        }
+        if (request.method === "POST" && action === "ready") {
+          const order = markOrderReady(orderId, await body(request) as never);
+          return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
+        }
+        if (request.method === "POST" && action === "claim") {
+          const order = await claimOrder(orderId, await body(request) as never);
           return json(response, 200, {
             product: "SLL-R merchant terminal",
             status: order.status,

@@ -11,7 +11,7 @@ They use SLL-R as a hosted or self-hosted seller agent endpoint:
 buyer/customer agent
 -> SLL-R quote
 -> SLL-R order
--> merchant terminal accept/reject/fulfill
+-> merchant terminal accept/reject/ready/claim
 -> existing payment or checkout
 -> Jiagon receipt memory
 -> AgentShack reputation
@@ -26,11 +26,11 @@ Flow:
 ```text
 customer scans QR or buyer agent calls API
 -> asks for coffee within budget/time
--> SLL-R creates a structured pickup order
--> Raposa sees the order queue
+-> SLL-R creates a structured pickup promise
+-> Raposa sees the promise board and estimated wait
 -> staff accepts
 -> customer pays at counter
--> staff marks fulfilled
+-> staff marks ready, then claimed
 -> receipt memory is issued
 ```
 
@@ -38,7 +38,7 @@ Why this is low-friction:
 
 - Raposa keeps its counter payment flow.
 - No POS migration.
-- Staff only needs an order queue and fulfill action.
+- Staff only needs a promise board with accept, ready, and claim actions.
 - The receipt proves a real purchase/fulfillment event.
 
 Pilot endpoint:

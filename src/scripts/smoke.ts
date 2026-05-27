@@ -49,12 +49,12 @@ async function main() {
     }
 
     const raposaTerminal = await fetch(`${origin}/raposa`).then((response) => response.text());
-    if (!raposaTerminal.includes("Raposa Order Terminal") || !raposaTerminal.includes("/raposa/order")) {
+    if (!raposaTerminal.includes("Raposa Promise Terminal") || !raposaTerminal.includes("/raposa/order")) {
       throw new Error("Raposa terminal page did not render expected staff controls.");
     }
 
     const raposaOrderPage = await fetch(`${origin}/raposa/order`).then((response) => response.text());
-    if (!raposaOrderPage.includes("Order from Raposa") || !raposaOrderPage.includes("Send order to Raposa")) {
+    if (!raposaOrderPage.includes("Order from Raposa") || !raposaOrderPage.includes("Ask Raposa for pickup promise")) {
       throw new Error("Raposa customer order page did not render expected order form.");
     }
 
@@ -85,8 +85,11 @@ async function main() {
       maxSpendUsd: "10.00",
       deadlineMinutes: 15,
       paymentMode: "counter",
-    }) as { order?: { id?: string } };
+    }) as { order?: { id?: string; promise?: { status?: string; estimatedWaitMinutes?: number; promisedReadyAt?: string } } };
     if (!pickupOrder.order?.id) throw new Error(`Pickup order was not created: ${JSON.stringify(pickupOrder)}`);
+    if (pickupOrder.order.promise?.status !== "on_time" || !pickupOrder.order.promise.promisedReadyAt) {
+      throw new Error(`Pickup order did not include a pickup promise: ${JSON.stringify(pickupOrder)}`);
+    }
 
     const terminalList = await fetch(`${origin}/orders?merchantId=raposa-coffee`).then((response) => response.json()) as { orders?: Array<{ id?: string }> };
     if (!terminalList.orders?.some((order) => order.id === pickupOrder.order?.id)) {
@@ -102,13 +105,22 @@ async function main() {
       throw new Error(`Merchant accept failed: ${JSON.stringify(accepted)}`);
     }
 
-    const fulfilled = await postJson(origin, `/orders/${pickupOrder.order.id}/fulfill`, {
+    const ready = await postJson(origin, `/orders/${pickupOrder.order.id}/ready`, {
       merchantId: "raposa-coffee",
       actor: "raposa-staff",
-      note: "Paid at counter and handed off.",
-    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } };
-    if (fulfilled.proofLevel !== "receipt_memory_issued" || !fulfilled.order?.receipt?.receiptHash) {
-      throw new Error(`Merchant fulfillment did not issue receipt handoff: ${JSON.stringify(fulfilled)}`);
+      note: "Drink is ready.",
+    }) as { status?: string; order?: { promise?: { readyAt?: string } } };
+    if (ready.status !== "ready" || !ready.order?.promise?.readyAt) {
+      throw new Error(`Merchant ready signal failed: ${JSON.stringify(ready)}`);
+    }
+
+    const claimed = await postJson(origin, `/orders/${pickupOrder.order.id}/claim`, {
+      merchantId: "raposa-coffee",
+      actor: "raposa-staff",
+      note: "Paid at counter and claimed.",
+    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string }; promise?: { claimedAt?: string } } };
+    if (claimed.proofLevel !== "receipt_memory_issued" || !claimed.order?.receipt?.receiptHash || !claimed.order.promise?.claimedAt) {
+      throw new Error(`Customer claim did not issue receipt handoff: ${JSON.stringify(claimed)}`);
     }
 
     const orderResult = await postJson(origin, "/orders", {

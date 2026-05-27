@@ -14,6 +14,7 @@ export type CatalogItem = {
   name: string;
   amountUsd: string;
   fulfillment: FulfillmentMode[];
+  productionClass?: "espresso" | "cold" | "pastry" | "general";
   prepMinutes?: number;
   shippingDays?: number;
   inventory?: number;
@@ -78,9 +79,20 @@ export type SellerOrder = {
   merchantName: string;
   agentId: string;
   customerLabel: string;
-  status: "pending_payment" | "accepted" | "rejected" | "payment_backed" | "fulfilled" | "receipt_issued";
+  status: "pending_payment" | "accepted" | "rejected" | "payment_backed" | "ready" | "claimed" | "fulfilled" | "receipt_issued";
   proofLevel: ProofLevel;
   item: NonNullable<QuoteResult["item"]>;
+  promise: {
+    status: "on_time" | "delayed_offer" | "not_applicable";
+    productionClass: "espresso" | "cold" | "pastry" | "general" | "shipping";
+    requestedReadyAt: string | null;
+    promisedReadyAt: string | null;
+    estimatedWaitMinutes: number | null;
+    capacityWindowMinutes: number | null;
+    readyAt: string | null;
+    claimedAt: string | null;
+    delayMinutes: number | null;
+  };
   payment: {
     mode: "counter" | "checkout" | "crypto";
     status: "required" | "verified";
@@ -88,7 +100,7 @@ export type SellerOrder = {
     paymentId: string | null;
   };
   terminal: {
-    status: "requested" | "accepted" | "rejected" | "fulfilled";
+    status: "requested" | "accepted" | "rejected" | "ready" | "claimed" | "fulfilled";
     actor: string | null;
     note: string | null;
     updatedAt: string | null;

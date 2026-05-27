@@ -8,7 +8,7 @@ function publicOrigin() {
 export async function issueJiagonReceipt(order: SellerOrder): Promise<ReceiptHandoff> {
   const receiptApiUrl = (process.env.JIAGON_RECEIPT_API_URL || "").trim();
   const receiptHash = createHash("sha256")
-    .update(`${order.id}:${order.merchantId}:${order.item.subtotalUsd}:${order.payment.paymentId || "manual"}`)
+    .update(`${order.id}:${order.merchantId}:${order.item.subtotalUsd}:${order.payment.paymentId || "manual"}:${order.promise.promisedReadyAt || ""}:${order.promise.readyAt || ""}:${order.promise.claimedAt || ""}`)
     .digest("hex");
 
   if (!receiptApiUrl) {
@@ -36,6 +36,7 @@ export async function issueJiagonReceipt(order: SellerOrder): Promise<ReceiptHan
       purpose: "sllr_seller_agent_order",
       paymentProvider: order.payment.provider,
       paymentId: order.payment.paymentId,
+      servicePromise: order.promise,
     }),
   });
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;

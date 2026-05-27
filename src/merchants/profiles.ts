@@ -10,9 +10,9 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
     paymentRails: ["counter", "telegram_staff", "solana_pay"],
     humanApproval: { requiredAboveUsd: "25.00" },
     catalog: [
-      { id: "espresso", name: "Espresso", amountUsd: "4.50", fulfillment: ["pickup"], prepMinutes: 4, tags: ["coffee"] },
-      { id: "iced-latte", name: "Iced latte", amountUsd: "6.50", fulfillment: ["pickup"], prepMinutes: 7, tags: ["coffee", "latte", "iced"] },
-      { id: "croissant", name: "Butter croissant", amountUsd: "5.25", fulfillment: ["pickup"], prepMinutes: 3, tags: ["pastry"] },
+      { id: "espresso", name: "Espresso", amountUsd: "4.50", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 4, tags: ["coffee"] },
+      { id: "iced-latte", name: "Iced latte", amountUsd: "6.50", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 7, tags: ["coffee", "latte", "iced"] },
+      { id: "croissant", name: "Butter croissant", amountUsd: "5.25", fulfillment: ["pickup"], productionClass: "pastry", prepMinutes: 3, tags: ["pastry"] },
     ],
   },
   "raposa-shop": {

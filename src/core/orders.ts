@@ -1,11 +1,76 @@
 import { randomUUID } from "node:crypto";
 import { merchantForId } from "../merchants/profiles.js";
-import type { MerchantActionRequest, MerchantOrderFilter, OrderRequest, PaymentWebhook, SellerOrder } from "../types.js";
+import type { CatalogItem, MerchantActionRequest, MerchantOrderFilter, MerchantProfile, OrderRequest, PaymentWebhook, SellerOrder } from "../types.js";
 import { issueJiagonReceipt } from "../adapters/jiagonReceipts.js";
 import { centsFromUsd } from "./money.js";
 import { quoteOrder } from "./quote.js";
 
 const orders = new Map<string, SellerOrder>();
+
+const capacityByClass = {
+  espresso: 8,
+  cold: 12,
+  pastry: 20,
+  general: 10,
+} as const;
+
+function productionClassFor(item: CatalogItem): keyof typeof capacityByClass {
+  if (item.productionClass) return item.productionClass;
+  const tags = new Set((item.tags || []).map((tag) => tag.toLowerCase()));
+  if (tags.has("pastry")) return "pastry";
+  if (tags.has("cold brew") || tags.has("cold")) return "cold";
+  if (tags.has("coffee") || tags.has("latte") || tags.has("espresso")) return "espresso";
+  return "general";
+}
+
+function addMinutes(date: Date, minutes: number) {
+  return new Date(date.getTime() + minutes * 60_000);
+}
+
+function activePickupOrders(merchantId: string, productionClass: string) {
+  return Array.from(orders.values()).filter((order) => (
+    order.merchantId === merchantId
+    && order.promise.productionClass === productionClass
+    && !["rejected", "claimed", "fulfilled", "receipt_issued"].includes(order.status)
+  ));
+}
+
+function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: OrderRequest, now: Date): SellerOrder["promise"] {
+  if (!merchant.fulfillment.includes("pickup")) {
+    return {
+      status: "not_applicable",
+      productionClass: "shipping",
+      requestedReadyAt: null,
+      promisedReadyAt: null,
+      estimatedWaitMinutes: null,
+      capacityWindowMinutes: null,
+      readyAt: null,
+      claimedAt: null,
+      delayMinutes: null,
+    };
+  }
+
+  const productionClass = productionClassFor(item);
+  const activeAhead = activePickupOrders(merchant.id, productionClass).length;
+  const capacity = capacityByClass[productionClass];
+  const capacityWindowMinutes = 15;
+  const prepMinutes = Math.max(item.prepMinutes || 5, 1);
+  const estimatedWaitMinutes = prepMinutes + Math.floor(activeAhead / capacity) * capacityWindowMinutes;
+  const promisedReadyAt = addMinutes(now, estimatedWaitMinutes);
+  const requestedReadyAt = input.deadlineMinutes ? addMinutes(now, input.deadlineMinutes) : null;
+
+  return {
+    status: requestedReadyAt && promisedReadyAt > requestedReadyAt ? "delayed_offer" : "on_time",
+    productionClass,
+    requestedReadyAt: requestedReadyAt?.toISOString() || null,
+    promisedReadyAt: promisedReadyAt.toISOString(),
+    estimatedWaitMinutes,
+    capacityWindowMinutes,
+    readyAt: null,
+    claimedAt: null,
+    delayMinutes: null,
+  };
+}
 
 export function createOrder(input: OrderRequest) {
   const quote = quoteOrder(input);
@@ -18,8 +83,11 @@ export function createOrder(input: OrderRequest) {
   const merchant = merchantForId(input.merchantId);
   if (!merchant) throw Object.assign(new Error(`Unknown merchant: ${input.merchantId}`), { status: 404 });
 
-  const now = new Date().toISOString();
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
   const paymentMode = input.paymentMode || (merchant.fulfillment.includes("shipping") ? "checkout" : "counter");
+  const catalogItem = merchant.catalog.find((item) => item.id === quote.item?.id);
+  if (!catalogItem) throw Object.assign(new Error(`Catalog item not found: ${quote.item.id}`), { status: 409 });
   const order: SellerOrder = {
     id: `ord_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
     merchantId: merchant.id,
@@ -29,6 +97,7 @@ export function createOrder(input: OrderRequest) {
     status: "pending_payment",
     proofLevel: "order_intent_only",
     item: quote.item,
+    promise: pickupPromise(merchant, catalogItem, input, nowDate),
     payment: {
       mode: paymentMode,
       status: "required",
@@ -131,6 +200,65 @@ export async function fulfillOrder(orderId: string, input: MerchantActionRequest
   fulfilled.updatedAt = new Date().toISOString();
   orders.set(fulfilled.id, fulfilled);
   return fulfilled;
+}
+
+export function markOrderReady(orderId: string, input: MerchantActionRequest) {
+  const order = requireOrderForMerchant(orderId, input);
+  if (order.status === "rejected") {
+    throw Object.assign(new Error("Rejected orders cannot be marked ready."), { status: 409 });
+  }
+  if (order.status === "receipt_issued" || order.status === "claimed") return order;
+  if (order.status !== "accepted" && order.status !== "payment_backed") {
+    throw Object.assign(new Error("Only accepted orders can be marked ready."), { status: 409 });
+  }
+
+  const readyAt = new Date();
+  const promisedReadyAt = order.promise.promisedReadyAt ? new Date(order.promise.promisedReadyAt) : null;
+  const delayMinutes = promisedReadyAt ? Math.max(0, Math.ceil((readyAt.getTime() - promisedReadyAt.getTime()) / 60_000)) : null;
+  const updated: SellerOrder = {
+    ...order,
+    status: "ready",
+    terminal: terminalUpdate(input, "ready"),
+    promise: {
+      ...order.promise,
+      readyAt: readyAt.toISOString(),
+      delayMinutes,
+    },
+    updatedAt: readyAt.toISOString(),
+  };
+  orders.set(updated.id, updated);
+  return updated;
+}
+
+export async function claimOrder(orderId: string, input: MerchantActionRequest) {
+  const order = requireOrderForMerchant(orderId, input);
+  if (order.status === "rejected") {
+    throw Object.assign(new Error("Rejected orders cannot be claimed."), { status: 409 });
+  }
+  if (order.status === "receipt_issued") return order;
+  if (order.status !== "ready") {
+    throw Object.assign(new Error("Only ready pickup orders can be claimed."), { status: 409 });
+  }
+
+  const claimedAt = new Date().toISOString();
+  const claimed: SellerOrder = {
+    ...order,
+    status: "claimed",
+    proofLevel: "fulfilled",
+    terminal: terminalUpdate(input, "claimed"),
+    promise: {
+      ...order.promise,
+      readyAt: order.promise.readyAt || claimedAt,
+      claimedAt,
+    },
+    updatedAt: claimedAt,
+  };
+  claimed.receipt = await issueJiagonReceipt(claimed);
+  claimed.status = "receipt_issued";
+  claimed.proofLevel = "receipt_memory_issued";
+  claimed.updatedAt = new Date().toISOString();
+  orders.set(claimed.id, claimed);
+  return claimed;
 }
 
 export async function attachPaymentProof(input: PaymentWebhook) {
