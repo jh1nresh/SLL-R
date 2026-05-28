@@ -1,4 +1,4 @@
-import { createOrder, getOrder } from "../core/orders.js";
+import { attachPaymentProof, createOrder, getOrder } from "../core/orders.js";
 import { centsFromUsd } from "../core/money.js";
 import { quoteOrder } from "../core/quote.js";
 import { merchantForId, merchantProfiles } from "../merchants/profiles.js";
@@ -177,4 +177,15 @@ export function baseCoffeePayment(orderId: string, payer?: string | null) {
 
 export function baseCoffeeStatus(orderId: string) {
   return requireBaseCoffeeOrder(orderId);
+}
+
+export async function baseCoffeeRecordDemoPayment(orderId: string, paymentId?: string | null, amountUsd?: string | null) {
+  const order = requireBaseCoffeeOrder(orderId);
+  return attachPaymentProof({
+    orderId: order.id,
+    merchantId: order.merchantId,
+    provider: "base_usdc",
+    amountUsd: amountUsd || order.item.subtotalUsd,
+    paymentId: paymentId || `base_demo_${order.id}`,
+  });
 }

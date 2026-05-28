@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import type { ReceiptHandoff, SellerOrder } from "../types.js";
 
 function publicOrigin() {
-  return process.env.SLLR_PUBLIC_ORIGIN || `http://localhost:${process.env.SLLR_PORT || 3100}`;
+  if (process.env.SLLR_PUBLIC_ORIGIN) return process.env.SLLR_PUBLIC_ORIGIN;
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return `http://localhost:${process.env.SLLR_PORT || 3100}`;
 }
 
 export async function issueJiagonReceipt(order: SellerOrder): Promise<ReceiptHandoff> {

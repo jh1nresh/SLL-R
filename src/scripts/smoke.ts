@@ -126,6 +126,19 @@ async function main() {
       process.env.SLLR_BASE_COFFEE_RECIPIENT = previousBaseRecipient;
     }
 
+    const nounReceipt = await getJson(origin, `/base-plugin/coffee/record-demo-payment?orderId=${nounOrder.order.id}&paymentId=base_tx_smoke`) as {
+      proofLevel?: string;
+      order?: { receipt?: { receiptHash?: string }; payment?: { provider?: string; paymentId?: string } };
+    };
+    if (
+      nounReceipt.proofLevel !== "receipt_memory_issued"
+      || !nounReceipt.order?.receipt?.receiptHash
+      || nounReceipt.order.payment?.provider !== "base_usdc"
+      || nounReceipt.order.payment.paymentId !== "base_tx_smoke"
+    ) {
+      throw new Error(`Noun Coffee demo payment proof did not issue receipt memory: ${JSON.stringify(nounReceipt)}`);
+    }
+
     const raposaTerminal = await fetch(`${origin}/raposa`).then((response) => response.text());
     if (!raposaTerminal.includes("Raposa Promise Terminal") || !raposaTerminal.includes("/raposa/order")) {
       throw new Error("Raposa terminal page did not render expected staff controls.");

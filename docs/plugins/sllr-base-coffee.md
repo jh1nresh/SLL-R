@@ -50,6 +50,15 @@ If the response includes `transactions`, ask the user to approve the returned
 Base USDC call and submit it with Base MCP `send_calls`. If the response mode is
 `checkout_handoff`, open the merchant checkout URL instead.
 
+6. For demos, record the Base MCP payment request or transaction id:
+
+   ```text
+   GET /base-plugin/coffee/record-demo-payment?orderId=ord_...&paymentId=0x...
+   ```
+
+This upgrades the order into receipt memory. Production integrations must verify
+the Base transaction before calling a receipt issuance path.
+
 ## send_calls Mapping
 
 Map `transactions[*]` into one Base MCP `send_calls` request:
@@ -91,3 +100,8 @@ Coffee's wallet. Real production onboarding should configure:
 After payment proof is attached through `POST /webhooks/payment`, SLL-R upgrades
 the order to Jiagon receipt memory. The receipt memory can later be represented
 as a Solana cNFT by Jiagon.
+
+For Base MCP demos, `GET /base-plugin/coffee/record-demo-payment` is the
+lightweight proof handoff. It is intentionally named as a demo endpoint because
+it records a provided transaction or request id without independently verifying
+the Base transfer.

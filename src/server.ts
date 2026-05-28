@@ -7,7 +7,7 @@ import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
-import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuote, baseCoffeeStatus } from "./adapters/baseCoffeePlugin.js";
+import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuote, baseCoffeeRecordDemoPayment, baseCoffeeStatus } from "./adapters/baseCoffeePlugin.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -40,7 +40,13 @@ function originFrom(request: IncomingMessage) {
   const configured = process.env.SLLR_PUBLIC_ORIGIN?.trim();
   if (configured) return configured.replace(/\/$/, "");
   const host = request.headers.host || `localhost:${process.env.SLLR_PORT || 3100}`;
-  return `http://${host}`;
+  const forwardedProto = request.headers["x-forwarded-proto"];
+  const protocol = typeof forwardedProto === "string"
+    ? forwardedProto.split(",")[0]
+    : host.startsWith("localhost") || host.startsWith("127.0.0.1")
+      ? "http"
+      : "https";
+  return `${protocol}://${host}`;
 }
 
 function errorResponse(response: ServerResponse, error: unknown) {
@@ -53,12 +59,11 @@ function errorResponse(response: ServerResponse, error: unknown) {
   });
 }
 
-export function createSllrServer() {
-  return createServer(async (request, response) => {
-    try {
-      const url = new URL(request.url || "/", originFrom(request));
+export async function handleSllrRequest(request: IncomingMessage, response: ServerResponse) {
+  try {
+    const url = new URL(request.url || "/", originFrom(request));
 
-      if (request.method === "GET" && url.pathname === "/health") {
+    if (request.method === "GET" && url.pathname === "/health") {
         return json(response, 200, { ok: true, product: "SLL-R" });
       }
       if (request.method === "GET" && url.pathname === "/raposa") {
@@ -101,6 +106,18 @@ export function createSllrServer() {
         const orderId = url.searchParams.get("orderId") || "";
         if (!orderId) return json(response, 400, { error: "Missing orderId." });
         return json(response, 200, { product: "SLL-R Base coffee status", order: baseCoffeeStatus(orderId) });
+      }
+      if (request.method === "GET" && url.pathname === "/base-plugin/coffee/record-demo-payment") {
+        const orderId = url.searchParams.get("orderId") || "";
+        if (!orderId) return json(response, 400, { error: "Missing orderId." });
+        const order = await baseCoffeeRecordDemoPayment(orderId, url.searchParams.get("paymentId"), url.searchParams.get("amountUsd"));
+        return json(response, 200, {
+          product: "SLL-R Base coffee demo payment proof",
+          status: order.status,
+          proofLevel: order.proofLevel,
+          order,
+          warning: "Demo endpoint records payment proof from a provided transaction or request id. Production must verify the Base transaction before issuing receipt memory.",
+        });
       }
       if (request.method === "POST" && url.pathname === "/quote") {
         return json(response, 200, { product: "SLL-R quote", quote: quoteOrder(await body(request) as never) });
@@ -172,11 +189,14 @@ export function createSllrServer() {
         });
       }
 
-      return json(response, 404, { error: "SLL-R route not found." });
-    } catch (error) {
-      return errorResponse(response, error);
-    }
-  });
+    return json(response, 404, { error: "SLL-R route not found." });
+  } catch (error) {
+    return errorResponse(response, error);
+  }
+}
+
+export function createSllrServer() {
+  return createServer(handleSllrRequest);
 }
 
 if (process.argv[1]?.endsWith("server.js")) {
