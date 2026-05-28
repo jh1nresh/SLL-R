@@ -76,6 +76,9 @@ export function sllrManifest(origin: string) {
     },
     endpoints: {
       manifest: `${origin}/.well-known/sllr-agent.json`,
+      aiPluginManifest: `${origin}/.well-known/ai-plugin.json`,
+      baseMcpPluginSpec: `${origin}/.well-known/base-mcp-plugin.md`,
+      openapi: `${origin}/openapi.json`,
       capabilities: `${origin}/capabilities`,
       merchants: `${origin}/merchants`,
       merchantMenu: `${origin}/merchants/{merchantId}/menu`,
@@ -98,6 +101,52 @@ export function sllrManifest(origin: string) {
       "payment proof intake",
       "Jiagon receipt memory handoff",
       "Solana receipt cNFT ready proof",
+      "OpenAPI tool discovery",
+      "Base MCP custom plugin instructions",
+    ],
+    tools: [
+      {
+        name: "list_merchants",
+        method: "GET",
+        path: "/merchants",
+        description: "List configured merchants an agent can quote or order from.",
+      },
+      {
+        name: "get_merchant_menu",
+        method: "GET",
+        path: "/merchants/{merchantId}/menu",
+        description: "Fetch catalog and menu sections for a merchant.",
+      },
+      {
+        name: "quote_merchant_order",
+        method: "POST",
+        path: "/merchants/{merchantId}/quote",
+        description: "Return feasibility, item match, price, ETA, and alternatives for buyer intent.",
+      },
+      {
+        name: "create_merchant_order",
+        method: "POST",
+        path: "/merchants/{merchantId}/orders",
+        description: "Create an order after quote acceptance.",
+      },
+      {
+        name: "prepare_base_coffee_payment",
+        method: "GET",
+        path: "/base-plugin/coffee/prepare-payment",
+        description: "Return Base USDC calldata that maps to Base MCP send_calls.",
+      },
+      {
+        name: "record_base_coffee_demo_payment",
+        method: "GET",
+        path: "/base-plugin/coffee/record-demo-payment",
+        description: "Record Base MCP request or transaction id and issue demo receipt memory.",
+      },
+      {
+        name: "prepare_solana_payment",
+        method: "GET",
+        path: "/solana-pay/prepare-payment",
+        description: "Return Solana Pay URL or Helio checkout handoff for Solana rail merchants.",
+      },
     ],
     adapters: adapterManifest(),
     exampleMerchants: Object.values(merchantProfiles).map((merchant) => ({

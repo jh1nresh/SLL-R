@@ -10,6 +10,8 @@ import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMen
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuote, baseCoffeeRecordDemoPayment, baseCoffeeStatus } from "./adapters/baseCoffeePlugin.js";
 import { helioWebhook, solanaPayMerchants, solanaPayPreparePayment, solanaPayVerifyPayment } from "./adapters/solanaPay.js";
+import { baseMcpPluginSpec } from "./baseMcpPlugin.js";
+import { aiPluginManifest, sllrOpenApi } from "./openapi.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -18,6 +20,16 @@ function json(response: ServerResponse, status: number, payload: unknown) {
 
 function html(response: ServerResponse, status: number, payload: string) {
   response.writeHead(status, { "content-type": "text/html; charset=utf-8" });
+  response.end(payload);
+}
+
+function markdown(response: ServerResponse, status: number, payload: string) {
+  response.writeHead(status, { "content-type": "text/markdown; charset=utf-8" });
+  response.end(payload);
+}
+
+function svg(response: ServerResponse, status: number, payload: string) {
+  response.writeHead(status, { "content-type": "image/svg+xml; charset=utf-8" });
   response.end(payload);
 }
 
@@ -68,6 +80,9 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
     if (request.method === "GET" && url.pathname === "/health") {
         return json(response, 200, { ok: true, product: "SLL-R" });
       }
+      if (request.method === "GET" && url.pathname === "/sllr-logo.svg") {
+        return svg(response, 200, `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="SLL-R"><rect width="512" height="512" rx="96" fill="#163b2b"/><path d="M120 132h272v248H120z" fill="#f8f4ea"/><path d="M164 318c28 18 70 18 98-1 24-16 36-43 36-80v-72h-52v75c0 21-6 35-17 43-13 9-32 8-48-3l-17 38z" fill="#163b2b"/><path d="M356 164a36 36 0 1 1-72 0 36 36 0 0 1 72 0z" fill="#111"/><path d="m305 164 12 13 25-29" fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><path d="M159 365h194" stroke="#163b2b" stroke-width="12" stroke-linecap="round" stroke-dasharray="1 28"/></svg>`);
+      }
       if (request.method === "GET" && url.pathname === "/raposa") {
         return html(response, 200, raposaTerminalPage(originFrom(request)));
       }
@@ -76,6 +91,15 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "GET" && url.pathname === "/.well-known/sllr-agent.json") {
         return json(response, 200, sllrManifest(originFrom(request)));
+      }
+      if (request.method === "GET" && url.pathname === "/.well-known/ai-plugin.json") {
+        return json(response, 200, aiPluginManifest(originFrom(request)));
+      }
+      if (request.method === "GET" && url.pathname === "/.well-known/base-mcp-plugin.md") {
+        return markdown(response, 200, baseMcpPluginSpec(originFrom(request)));
+      }
+      if (request.method === "GET" && url.pathname === "/openapi.json") {
+        return json(response, 200, sllrOpenApi(originFrom(request)));
       }
       if (request.method === "GET" && url.pathname === "/capabilities") {
         const merchantId = url.searchParams.get("merchantId") || "";

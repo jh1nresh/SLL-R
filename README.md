@@ -45,6 +45,8 @@ Target users:
 MVP success means:
 
 - SLL-R has a stable agent manifest that AgentShack can index.
+- ChatGPT, Hermes, Base MCP, and similar agents can discover the API through
+  OpenAPI and tool manifests.
 - A buyer agent can ask for a quote and create an order through the API.
 - The merchant can use a simple terminal or existing checkout flow to accept,
   ready, claim, or complete the order.
@@ -131,6 +133,9 @@ http://localhost:3100
 
 ```text
 GET  /.well-known/sllr-agent.json
+GET  /.well-known/ai-plugin.json
+GET  /.well-known/base-mcp-plugin.md
+GET  /openapi.json
 GET  /raposa
 GET  /raposa/order
 GET  /capabilities?merchantId=raposa-coffee

@@ -62,6 +62,35 @@ async function main() {
     if (manifest.agentShack?.type !== "merchant_agent" || manifest.agentShack.evaluator?.policy !== "order-fulfillment-v0") {
       throw new Error(`Manifest did not expose AgentShack merchant listing schema: ${JSON.stringify(manifest)}`);
     }
+    if (!("endpoints" in manifest) || !(manifest as { endpoints?: { openapi?: string; baseMcpPluginSpec?: string } }).endpoints?.openapi?.endsWith("/openapi.json")) {
+      throw new Error(`Manifest did not expose OpenAPI discovery: ${JSON.stringify(manifest)}`);
+    }
+
+    const aiPlugin = await getJson(origin, "/.well-known/ai-plugin.json") as {
+      name_for_model?: string;
+      api?: { type?: string; url?: string };
+    };
+    if (aiPlugin.name_for_model !== "sllr_agent_commerce" || aiPlugin.api?.type !== "openapi" || !aiPlugin.api.url?.endsWith("/openapi.json")) {
+      throw new Error(`AI plugin manifest did not point to OpenAPI schema: ${JSON.stringify(aiPlugin)}`);
+    }
+
+    const openapi = await getJson(origin, "/openapi.json") as {
+      openapi?: string;
+      paths?: Record<string, unknown>;
+    };
+    if (
+      openapi.openapi !== "3.1.0"
+      || !openapi.paths?.["/base-plugin/coffee/prepare-payment"]
+      || !openapi.paths?.["/merchants/{merchantId}/quote"]
+      || !openapi.paths?.["/.well-known/base-mcp-plugin.md"]
+    ) {
+      throw new Error(`OpenAPI schema did not expose required agent tools: ${JSON.stringify(openapi)}`);
+    }
+
+    const baseMcpPlugin = await fetch(`${origin}/.well-known/base-mcp-plugin.md`).then((response) => response.text());
+    if (!baseMcpPlugin.includes("STOP - COMPLETE BASE MCP ONBOARDING FIRST") || !baseMcpPlugin.includes("send_calls")) {
+      throw new Error("Base MCP plugin spec did not include onboarding and send_calls mapping.");
+    }
 
     const raposaKit = await fetch(`${origin}/pilot-kit?merchantId=raposa-coffee`).then((response) => response.json()) as {
       merchant?: { id?: string };

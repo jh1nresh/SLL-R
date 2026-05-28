@@ -17,6 +17,22 @@ transaction, and turning payment proof into Jiagon receipt memory.
 
 Do not use a random or burn address for `SLLR_BASE_COFFEE_RECIPIENT`.
 
+## Agent Discovery URLs
+
+Use these URLs when a chat agent, Hermes run, or Base MCP custom plugin needs a
+self-describing tool surface:
+
+```text
+GET <SLLR_URL>/.well-known/sllr-agent.json
+GET <SLLR_URL>/.well-known/ai-plugin.json
+GET <SLLR_URL>/.well-known/base-mcp-plugin.md
+GET <SLLR_URL>/openapi.json
+```
+
+The Base MCP plugin spec is the most direct contest artifact: it tells the
+assistant to call `get_wallets`, quote/order with GET endpoints, prepare Base
+USDC calldata, then pass `transactions[]` into Base MCP `send_calls`.
+
 ## Demo Prompt
 
 ```text
