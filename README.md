@@ -132,6 +132,14 @@ GET  /.well-known/sllr-agent.json
 GET  /raposa
 GET  /raposa/order
 GET  /capabilities?merchantId=raposa-coffee
+GET  /merchants
+GET  /merchants/{merchantId}
+GET  /merchants/{merchantId}/menu
+POST /merchants/{merchantId}/quote
+POST /merchants/{merchantId}/orders
+GET  /merchants/{merchantId}/orders
+POST /merchants/{merchantId}/payment
+POST /merchants/{merchantId}/receipt
 GET  /pilot-kit?merchantId=raposa-coffee
 GET  /base-plugin/coffee/merchants
 GET  /base-plugin/coffee/quote?merchantId=noun-coffee&intent=...
@@ -171,6 +179,20 @@ it, marks the drink ready, and issues receipt memory after the customer claim.
 
 ## Example Quote
 
+Merchant-scoped quote:
+
+```bash
+curl -X POST http://localhost:3100/merchants/raposa-shop/quote \
+  -H "content-type: application/json" \
+  -d '{
+    "userIntent": "Ship me Raposa Nitro Cold Brew Caramel Latte under $20 this week",
+    "maxSpendUsd": "20.00",
+    "deliverByDays": 7
+  }'
+```
+
+Legacy global quote:
+
 ```bash
 curl -X POST http://localhost:3100/quote \
   -H "content-type: application/json" \
@@ -209,10 +231,9 @@ curl "http://localhost:3100/pilot-kit?merchantId=solyd"
 ## Example Order
 
 ```bash
-curl -X POST http://localhost:3100/orders \
+curl -X POST http://localhost:3100/merchants/raposa-shop/orders \
   -H "content-type: application/json" \
   -d '{
-    "merchantId": "raposa-shop",
     "agentId": "buy-r-demo",
     "userIntent": "Ship me Raposa Nitro Cold Brew Caramel Latte under $20 this week",
     "maxSpendUsd": "20.00",
@@ -224,16 +245,21 @@ curl -X POST http://localhost:3100/orders \
 ## Example Payment Proof
 
 ```bash
-curl -X POST http://localhost:3100/webhooks/payment \
+curl -X POST http://localhost:3100/merchants/raposa-shop/payment \
   -H "content-type: application/json" \
   -d '{
     "orderId": "ord_...",
-    "merchantId": "raposa-shop",
     "provider": "binance_pay",
     "amountUsd": "17.95",
-    "paymentId": "binance_pay_transaction_demo"
+    "paymentId": "binance_pay_transaction_demo",
+    "demo": true
   }'
 ```
+
+`POST /merchants/{merchantId}/payment` binds payment proof to the path merchant.
+It rejects providers that are not enabled in that merchant profile.
+Production must configure `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` and pass it in
+`x-sllr-merchant-payment-secret`; `demo: true` is only for local demo proof.
 
 ## Example Merchant Terminal
 

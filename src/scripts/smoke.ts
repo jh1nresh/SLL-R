@@ -32,6 +32,19 @@ async function getJsonFailure(origin: string, path: string) {
   return { status: response.status, json };
 }
 
+async function postJsonFailure(origin: string, path: string, payload: unknown) {
+  const response = await fetch(`${origin}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const json = await response.json() as Record<string, unknown>;
+  if (response.ok) {
+    throw new Error(`${path} unexpectedly succeeded: ${JSON.stringify(json)}`);
+  }
+  return { status: response.status, json };
+}
+
 async function main() {
   const server = createSllrServer();
   server.listen(0);
@@ -64,6 +77,25 @@ async function main() {
     };
     if (solydKit.merchant?.id !== "solyd" || !solydKit.pilot?.buyerPrompt?.includes("SOLYD")) {
       throw new Error(`SOLYD pilot kit was not generated: ${JSON.stringify(solydKit)}`);
+    }
+
+    const merchantList = await getJson(origin, "/merchants") as {
+      merchants?: Array<{ id?: string; catalogItems?: number }>;
+    };
+    if (
+      !merchantList.merchants?.some((merchant) => merchant.id === "noun-coffee")
+      || !merchantList.merchants?.some((merchant) => merchant.id === "raposa-shop")
+      || !merchantList.merchants?.some((merchant) => merchant.id === "solyd")
+    ) {
+      throw new Error(`Merchant runtime did not list configured merchants: ${JSON.stringify(merchantList)}`);
+    }
+
+    const nounMenu = await getJson(origin, "/merchants/noun-coffee/menu") as {
+      catalog?: Array<{ id?: string }>;
+      menuSections?: Array<{ id?: string }>;
+    };
+    if (!nounMenu.catalog?.some((item) => item.id === "dalat-highlands") || !nounMenu.menuSections?.length) {
+      throw new Error(`Noun Coffee merchant menu did not expose catalog and menu sections: ${JSON.stringify(nounMenu)}`);
     }
 
     const baseMerchants = await getJson(origin, "/base-plugin/coffee/merchants") as {
@@ -159,6 +191,15 @@ async function main() {
       throw new Error(`Unexpected Raposa Shop quote: ${JSON.stringify(quote)}`);
     }
 
+    const merchantQuote = await postJson(origin, "/merchants/raposa-shop/quote", {
+      userIntent: "Ship me Raposa Nitro Cold Brew Caramel Latte under $20 this week",
+      maxSpendUsd: "20.00",
+      deliverByDays: 7,
+    }) as { quote?: { feasible?: boolean; merchant?: { id?: string }; item?: { id?: string } } };
+    if (!merchantQuote.quote?.feasible || merchantQuote.quote.merchant?.id !== "raposa-shop" || merchantQuote.quote.item?.id !== "nitro-caramel-latte") {
+      throw new Error(`Unexpected merchant-scoped Raposa Shop quote: ${JSON.stringify(merchantQuote)}`);
+    }
+
     const pickupQuote = await postJson(origin, "/quote", {
       merchantId: "raposa-coffee",
       userIntent: "Get me an iced latte under $10 in 15 minutes",
@@ -223,6 +264,65 @@ async function main() {
       paymentMode: "checkout",
     }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
     if (!orderResult.order?.id) throw new Error(`Order was not created: ${JSON.stringify(orderResult)}`);
+
+    const merchantOrder = await postJson(origin, "/merchants/solyd/orders", {
+      agentId: "buy-r-smoke",
+      userIntent: "Ship me a black MagSafe iPhone 16 case under $100",
+      maxSpendUsd: "100.00",
+      deliverByDays: 7,
+      paymentMode: "checkout",
+    }) as { order?: { id?: string; merchantId?: string; item?: { subtotalUsd?: string } } };
+    if (!merchantOrder.order?.id || merchantOrder.order.merchantId !== "solyd") {
+      throw new Error(`Merchant-scoped SOLYD order was not created: ${JSON.stringify(merchantOrder)}`);
+    }
+
+    const merchantOrders = await getJson(origin, "/merchants/solyd/orders") as { orders?: Array<{ id?: string }> };
+    if (!merchantOrders.orders?.some((order) => order.id === merchantOrder.order?.id)) {
+      throw new Error(`Merchant-scoped orders did not include SOLYD order: ${JSON.stringify(merchantOrders)}`);
+    }
+
+    const unsupportedPayment = await postJsonFailure(origin, "/merchants/solyd/payment", {
+      orderId: merchantOrder.order.id,
+      provider: "counter",
+      amountUsd: merchantOrder.order.item?.subtotalUsd,
+      paymentId: "counter_not_supported",
+    });
+    if (unsupportedPayment.status !== 409) {
+      throw new Error(`Unsupported merchant payment provider should be rejected: ${JSON.stringify(unsupportedPayment)}`);
+    }
+
+    const merchantPayment = await postJson(origin, "/merchants/solyd/payment", {
+      orderId: merchantOrder.order.id,
+      provider: "moonpay",
+      amountUsd: merchantOrder.order.item?.subtotalUsd,
+      paymentId: "merchant_pay_smoke",
+      demo: true,
+    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string }; payment?: { provider?: string; paymentId?: string } } };
+    if (
+      merchantPayment.proofLevel !== "receipt_memory_issued"
+      || !merchantPayment.order?.receipt?.receiptHash
+      || merchantPayment.order.payment?.provider !== "moonpay"
+      || merchantPayment.order.payment.paymentId !== "merchant_pay_smoke"
+    ) {
+      throw new Error(`Merchant-scoped payment proof did not issue receipt memory: ${JSON.stringify(merchantPayment)}`);
+    }
+
+    const receiptOrder = await postJson(origin, "/merchants/raposa-coffee/orders", {
+      agentId: "buy-r-smoke",
+      userIntent: "Get me a croissant under $10",
+      maxSpendUsd: "10.00",
+      deadlineMinutes: 15,
+      paymentMode: "counter",
+    }) as { order?: { id?: string } };
+    if (!receiptOrder.order?.id) throw new Error(`Receipt test order was not created: ${JSON.stringify(receiptOrder)}`);
+    const receipt = await postJson(origin, "/merchants/raposa-coffee/receipt", {
+      orderId: receiptOrder.order.id,
+      actor: "raposa-staff",
+      note: "Counter paid and handed off.",
+    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } };
+    if (receipt.proofLevel !== "receipt_memory_issued" || !receipt.order?.receipt?.receiptHash) {
+      throw new Error(`Merchant-scoped receipt endpoint did not issue receipt memory: ${JSON.stringify(receipt)}`);
+    }
 
     const nonBaseStatusFailure = await getJsonFailure(origin, `/base-plugin/coffee/status?orderId=${orderResult.order.id}`);
     if (nonBaseStatusFailure.status !== 404) {

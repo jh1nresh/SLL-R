@@ -6,6 +6,7 @@ import { merchantForId, merchantProfiles } from "./merchants/profiles.js";
 import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
+import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder } from "./core/merchantApi.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuote, baseCoffeeRecordDemoPayment, baseCoffeeStatus } from "./adapters/baseCoffeePlugin.js";
 
@@ -82,6 +83,34 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           product: "SLL-R seller operating agent",
           merchants: merchant ? [merchant] : Object.values(merchantProfiles),
         });
+      }
+      if (request.method === "GET" && url.pathname === "/merchants") {
+        return json(response, 200, listMerchants());
+      }
+      const merchantRoute = url.pathname.match(/^\/merchants\/([^/]+)(?:\/([^/]+))?$/);
+      if (merchantRoute) {
+        const [, merchantId, action] = merchantRoute;
+        if (request.method === "GET" && !action) {
+          return json(response, 200, getMerchant(merchantId));
+        }
+        if (request.method === "GET" && action === "menu") {
+          return json(response, 200, getMerchantMenu(merchantId));
+        }
+        if (request.method === "POST" && action === "quote") {
+          return json(response, 200, quoteMerchantOrder(merchantId, await body(request)));
+        }
+        if (request.method === "POST" && action === "orders") {
+          return json(response, 201, createMerchantOrder(merchantId, await body(request)));
+        }
+        if (request.method === "GET" && action === "orders") {
+          return json(response, 200, listMerchantOrders(merchantId, url.searchParams.get("status")));
+        }
+        if (request.method === "POST" && action === "payment") {
+          return json(response, 200, await attachMerchantPayment(merchantId, request.headers, await body(request)));
+        }
+        if (request.method === "POST" && action === "receipt") {
+          return json(response, 200, await issueMerchantReceipt(merchantId, await body(request)));
+        }
       }
       if (request.method === "GET" && url.pathname === "/pilot-kit") {
         const merchantId = url.searchParams.get("merchantId") || "";

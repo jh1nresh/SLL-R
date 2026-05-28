@@ -77,6 +77,12 @@ export function sllrManifest(origin: string) {
     endpoints: {
       manifest: `${origin}/.well-known/sllr-agent.json`,
       capabilities: `${origin}/capabilities`,
+      merchants: `${origin}/merchants`,
+      merchantMenu: `${origin}/merchants/{merchantId}/menu`,
+      merchantQuote: `${origin}/merchants/{merchantId}/quote`,
+      merchantOrders: `${origin}/merchants/{merchantId}/orders`,
+      merchantPayment: `${origin}/merchants/{merchantId}/payment`,
+      merchantReceipt: `${origin}/merchants/{merchantId}/receipt`,
       quote: `${origin}/quote`,
       orders: `${origin}/orders`,
       paymentWebhook: `${origin}/webhooks/payment`,
