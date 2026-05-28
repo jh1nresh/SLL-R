@@ -74,6 +74,31 @@ Pilot endpoint:
 GET /pilot-kit?merchantId=solyd
 ```
 
+## BNB / Binance Pay Path
+
+Use Binance Pay when the merchant wants a BNB-native checkout rail without
+replacing their storefront:
+
+```text
+buyer agent
+-> SLL-R quote/order
+-> Binance Pay checkout
+-> Binance Pay PAY webhook
+-> SLL-R Query Order confirms PAID
+-> merchant fulfills or refund flow starts
+-> Jiagon receipt memory
+-> AgentShack reputation
+```
+
+The key rule: webhook events are not enough to clear the job. SLL-R should query
+the Binance Pay order and only upgrade the receipt after confirmed `PAID`,
+`FULL_REFUNDED`, or other terminal states.
+
+Travala is the reference case for this direction, not a live adapter. Travel
+bookings show why the model matters: quotes, confirmations, cancellations, and
+refunds all produce durable receipt events that an agent can build reputation
+from.
+
 ## Meeting Ask
 
 Ask each merchant for:
@@ -83,6 +108,7 @@ Ask each merchant for:
 - staff terminal preference
 - checkout/payment rail
 - receipt claim preference
+- Binance Pay API/webhook access if they want a BNB-native checkout proof path
 
 Do not ask for a full POS integration in the first meeting.
 

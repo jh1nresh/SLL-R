@@ -22,7 +22,7 @@ BUY-R / Hermes / ChatGPT
 
 - **SLL-R**: seller agent runtime for merchants.
 - **Jiagon**: proof, receipt memory, and Solana cNFT system.
-- **POS adapters**: internal SLL-R tools for Shopify, MoonPay, Telegram staff flow, Browser Use, Stripe, or future POS systems.
+- **POS adapters**: internal SLL-R tools for Shopify, MoonPay, Binance Pay, Telegram staff flow, Browser Use, Stripe, or future POS systems.
 - **BUY-R**: buyer-side agent caller. This can be Hermes, ChatGPT, Telegram, AgentShack, or another personal agent.
 
 SLL-R is not a full POS replacement. It operates the merchant's existing checkout
@@ -56,14 +56,34 @@ SLL-R exposes a small seller-agent runtime and keeps POS / checkout systems as
 replaceable adapters:
 
 - `staff_terminal`: Telegram or a merchant terminal that confirms fulfillment.
-- `checkout_handoff`: Shopify, MoonPay Commerce, or a hosted checkout link.
-- `payment_proof`: webhook or on-chain reference verification.
+- `checkout_handoff`: Shopify, MoonPay Commerce, Binance Pay, or a hosted checkout link.
+- `payment_proof`: webhook, Query Order, or on-chain reference verification.
 - `receipt_memory`: Jiagon receipt memory and Solana cNFT handoff.
 
 The current scaffold ships Raposa and SOLYD example profiles plus adapter
 metadata in `GET /.well-known/sllr-agent.json`. Real merchant integrations can
 replace the mock catalog and stubbed adapters without changing the quote/order
 API contract.
+
+## BNB / Binance Pay Rail
+
+Binance Pay is a strong SLL-R target because it gives merchants a checkout rail,
+webhooks, and an order query API that can become payment proof:
+
+```text
+SLL-R order
+-> Binance Pay checkout with merchantTradeNo
+-> PAY webhook
+-> Query Order confirms PAID
+-> fulfillment or refund proof
+-> Jiagon receipt memory
+```
+
+Travala is the reference merchant vertical for this path. Travel bookings have
+clear quote, checkout, confirmation, cancellation, and refund states, so they are
+a good example of how SLL-R can clear real merchant work beyond cafes and
+ecommerce. This repo does not claim a live Travala integration yet; it documents
+the path in [Binance Pay / Travala fit](./docs/binance-pay-travala.md).
 
 ## AgentShack Listing Shape
 
@@ -209,9 +229,9 @@ curl -X POST http://localhost:3100/webhooks/payment \
   -d '{
     "orderId": "ord_...",
     "merchantId": "raposa-shop",
-    "provider": "moonpay",
+    "provider": "binance_pay",
     "amountUsd": "17.95",
-    "paymentId": "pay_demo"
+    "paymentId": "binance_pay_transaction_demo"
   }'
 ```
 
@@ -288,6 +308,7 @@ issue verified receipt memory.
 ## Pilot Docs
 
 - [AgentShack listing spec](./docs/dojo-listing.md)
+- [Binance Pay / Travala fit](./docs/binance-pay-travala.md)
 - [Raposa / SOLYD pilot runbook](./docs/merchant-pilot-runbook.md)
 - [AgentShack merchant pilot](./docs/agentshack-merchant-pilot.md)
 - [Base MCP demo runbook](./docs/base-mcp-demo-runbook.md)

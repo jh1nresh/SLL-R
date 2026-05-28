@@ -78,11 +78,25 @@ const adapters: SellerAgentAdapter[] = [
     requiredEnv: ["SOLANA_RPC_URL", "JIAGON_SOLANA_PAY_RECIPIENT"],
   },
   {
+    id: "binance-pay-order-proof",
+    role: "payment_proof",
+    label: "Binance Pay order proof adapter",
+    status: "planned",
+    supportedRails: ["binance_pay"],
+    responsibilities: [
+      "create Binance Pay checkout handoff orders when the merchant enables the rail",
+      "ingest Binance Pay PAY and PAY_REFUND webhooks as advisory events",
+      "confirm final payment or refund state through Query Order before issuing receipt memory",
+      "bind merchantTradeNo, prepayId, and transactionId to the SLL-R order proof",
+    ],
+    requiredEnv: ["BINANCE_PAY_API_KEY", "BINANCE_PAY_API_SECRET", "BINANCE_PAY_WEBHOOK_PUBLIC_KEY"],
+  },
+  {
     id: "jiagon-receipts",
     role: "receipt_memory",
     label: "Jiagon receipt memory handoff",
     status: process.env.JIAGON_RECEIPT_API_URL ? "ready" : "stubbed",
-    supportedRails: ["counter", "telegram_staff", "shopify", "moonpay", "stripe", "solana_pay"],
+    supportedRails: ["counter", "telegram_staff", "shopify", "moonpay", "stripe", "solana_pay", "binance_pay"],
     responsibilities: [
       "issue portable receipt memory",
       "prepare Solana cNFT mint metadata",

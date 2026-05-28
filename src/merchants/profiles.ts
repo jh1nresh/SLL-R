@@ -276,7 +276,7 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
     category: "coffee ecommerce",
     location: "Online",
     fulfillment: ["shipping"],
-    paymentRails: ["shopify", "moonpay", "stripe", "solana_pay"],
+    paymentRails: ["shopify", "moonpay", "stripe", "solana_pay", "binance_pay"],
     humanApproval: { requiredAboveUsd: "100.00" },
     catalog: [
       {
@@ -323,7 +323,7 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
     category: "phone accessories",
     location: "Online",
     fulfillment: ["shipping"],
-    paymentRails: ["shopify", "moonpay", "stripe", "solana_pay"],
+    paymentRails: ["shopify", "moonpay", "stripe", "solana_pay", "binance_pay"],
     humanApproval: { requiredAboveUsd: "150.00" },
     catalog: [
       {
