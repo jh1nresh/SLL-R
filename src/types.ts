@@ -1,5 +1,5 @@
 export type FulfillmentMode = "pickup" | "shipping";
-export type PaymentRail = "counter" | "telegram_staff" | "shopify" | "moonpay" | "stripe" | "solana_pay";
+export type PaymentRail = "counter" | "telegram_staff" | "shopify" | "moonpay" | "stripe" | "solana_pay" | "base_usdc";
 export type ProofLevel = "order_intent_only" | "payment_backed" | "fulfilled" | "receipt_memory_issued";
 export type AgentShackListingType = "merchant_agent";
 export type AgentShackMode = "one_time_call" | "subscription" | "fork";
@@ -19,6 +19,7 @@ export type CatalogItem = {
   shippingDays?: number;
   inventory?: number;
   tags?: string[];
+  productUrl?: string;
 };
 
 export type MerchantProfile = {

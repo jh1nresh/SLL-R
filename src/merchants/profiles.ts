@@ -91,6 +91,47 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
       },
     ],
   },
+  "noun-coffee": {
+    id: "noun-coffee",
+    name: "Noun Coffee",
+    category: "coffee ecommerce",
+    location: "Marina del Rey",
+    fulfillment: ["shipping"],
+    paymentRails: ["shopify", "base_usdc"],
+    humanApproval: { requiredAboveUsd: "100.00" },
+    catalog: [
+      {
+        id: "dalat-highlands",
+        name: "Dalat Highlands",
+        amountUsd: "32.00",
+        fulfillment: ["shipping"],
+        shippingDays: 5,
+        inventory: 20,
+        tags: ["coffee", "beans", "vietnam", "dalat", "highlands", "raspberry", "watermelon", "black tea"],
+        productUrl: "https://noun.coffee/products/dalat-highlands",
+      },
+      {
+        id: "block-zero",
+        name: "Block Zero",
+        amountUsd: "21.00",
+        fulfillment: ["shipping"],
+        shippingDays: 5,
+        inventory: 20,
+        tags: ["coffee", "bitcoin", "block", "beans"],
+        productUrl: "https://noun.coffee/products/bitcoin-block",
+      },
+      {
+        id: "fridge-cig-hat",
+        name: "Fridge Cig Hat",
+        amountUsd: "40.00",
+        fulfillment: ["shipping"],
+        shippingDays: 5,
+        inventory: 20,
+        tags: ["hat", "merch", "fridge", "cig"],
+        productUrl: "https://noun.coffee/products/fridge-cig-hat",
+      },
+    ],
+  },
 };
 
 export function merchantForId(merchantId: string) {

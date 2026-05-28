@@ -14,6 +14,24 @@ async function postJson(origin: string, path: string, payload: unknown) {
   return json;
 }
 
+async function getJson(origin: string, path: string) {
+  const response = await fetch(`${origin}${path}`);
+  const json = await response.json() as Record<string, unknown>;
+  if (!response.ok) {
+    throw new Error(`${path} failed: ${JSON.stringify(json)}`);
+  }
+  return json;
+}
+
+async function getJsonFailure(origin: string, path: string) {
+  const response = await fetch(`${origin}${path}`);
+  const json = await response.json() as Record<string, unknown>;
+  if (response.ok) {
+    throw new Error(`${path} unexpectedly succeeded: ${JSON.stringify(json)}`);
+  }
+  return { status: response.status, json };
+}
+
 async function main() {
   const server = createSllrServer();
   server.listen(0);
@@ -46,6 +64,66 @@ async function main() {
     };
     if (solydKit.merchant?.id !== "solyd" || !solydKit.pilot?.buyerPrompt?.includes("SOLYD")) {
       throw new Error(`SOLYD pilot kit was not generated: ${JSON.stringify(solydKit)}`);
+    }
+
+    const baseMerchants = await getJson(origin, "/base-plugin/coffee/merchants") as {
+      merchants?: Array<{ id?: string; paymentRails?: string[] }>;
+    };
+    const nounMerchant = baseMerchants.merchants?.find((merchant) => merchant.id === "noun-coffee");
+    if (!nounMerchant?.paymentRails?.includes("base_usdc")) {
+      throw new Error(`Noun Coffee was not exposed through the Base coffee plugin: ${JSON.stringify(baseMerchants)}`);
+    }
+
+    const nounIntent = encodeURIComponent("Ship me Dalat Highlands coffee beans under $40");
+    const nounQuote = await getJson(origin, `/base-plugin/coffee/quote?merchantId=noun-coffee&intent=${nounIntent}&maxSpendUsd=40.00&deliverByDays=7`) as {
+      quote?: { feasible?: boolean; item?: { id?: string; subtotalUsd?: string } };
+      checkoutHandoff?: { url?: string };
+    };
+    if (!nounQuote.quote?.feasible || nounQuote.quote.item?.id !== "dalat-highlands" || !nounQuote.checkoutHandoff?.url?.includes("noun.coffee")) {
+      throw new Error(`Unexpected Noun Coffee Base quote: ${JSON.stringify(nounQuote)}`);
+    }
+
+    const nounOrder = await getJson(origin, `/base-plugin/coffee/order?merchantId=noun-coffee&intent=${nounIntent}&maxSpendUsd=40.00&deliverByDays=7&agentId=base-smoke`) as {
+      order?: { id?: string; item?: { subtotalUsd?: string } };
+      checkoutHandoff?: { url?: string };
+    };
+    if (!nounOrder.order?.id || nounOrder.order.item?.subtotalUsd !== "32.00" || !nounOrder.checkoutHandoff?.url) {
+      throw new Error(`Noun Coffee Base order was not created: ${JSON.stringify(nounOrder)}`);
+    }
+
+    const nounPaymentHandoff = await getJson(origin, `/base-plugin/coffee/prepare-payment?orderId=${nounOrder.order.id}`) as {
+      mode?: string;
+      checkoutHandoff?: { url?: string };
+    };
+    if (nounPaymentHandoff.mode !== "checkout_handoff" || !nounPaymentHandoff.checkoutHandoff?.url) {
+      throw new Error(`Noun Coffee payment should default to checkout handoff: ${JSON.stringify(nounPaymentHandoff)}`);
+    }
+
+    const nonBaseQuoteFailure = await getJsonFailure(origin, "/base-plugin/coffee/quote?merchantId=raposa-shop&intent=coffee");
+    if (nonBaseQuoteFailure.status !== 404) {
+      throw new Error(`Non-Base merchant quote should be rejected: ${JSON.stringify(nonBaseQuoteFailure)}`);
+    }
+
+    const previousBaseRecipient = process.env.SLLR_BASE_COFFEE_RECIPIENT;
+    process.env.SLLR_BASE_COFFEE_RECIPIENT = "0x000000000000000000000000000000000000dEaD";
+    const nounDemoPayment = await getJson(origin, `/base-plugin/coffee/prepare-payment?orderId=${nounOrder.order.id}&from=0x000000000000000000000000000000000000bEEF`) as {
+      mode?: string;
+      chainId?: number;
+      transactions?: Array<{ chainId?: number; to?: string; data?: string }>;
+    };
+    if (
+      nounDemoPayment.mode !== "base_mcp_demo"
+      || nounDemoPayment.chainId !== 8453
+      || nounDemoPayment.transactions?.[0]?.chainId !== 8453
+      || nounDemoPayment.transactions?.[0]?.to !== "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      || !nounDemoPayment.transactions[0].data?.startsWith("0xa9059cbb")
+    ) {
+      throw new Error(`Noun Coffee Base demo payment was not prepared: ${JSON.stringify(nounDemoPayment)}`);
+    }
+    if (previousBaseRecipient === undefined) {
+      delete process.env.SLLR_BASE_COFFEE_RECIPIENT;
+    } else {
+      process.env.SLLR_BASE_COFFEE_RECIPIENT = previousBaseRecipient;
     }
 
     const raposaTerminal = await fetch(`${origin}/raposa`).then((response) => response.text());
@@ -132,6 +210,11 @@ async function main() {
       paymentMode: "checkout",
     }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
     if (!orderResult.order?.id) throw new Error(`Order was not created: ${JSON.stringify(orderResult)}`);
+
+    const nonBaseStatusFailure = await getJsonFailure(origin, `/base-plugin/coffee/status?orderId=${orderResult.order.id}`);
+    if (nonBaseStatusFailure.status !== 404) {
+      throw new Error(`Non-Base order status should be rejected: ${JSON.stringify(nonBaseStatusFailure)}`);
+    }
 
     const paid = await postJson(origin, "/webhooks/payment", {
       orderId: orderResult.order.id,

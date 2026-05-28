@@ -7,6 +7,7 @@ import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
+import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuote, baseCoffeeStatus } from "./adapters/baseCoffeePlugin.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -81,6 +82,25 @@ export function createSllrServer() {
         const merchantId = url.searchParams.get("merchantId") || "";
         const kit = merchantId ? pilotKitForMerchant(merchantId, originFrom(request)) : null;
         return json(response, kit ? 200 : 404, kit || { error: `Unknown merchant: ${merchantId || "(missing merchantId)"}` });
+      }
+      if (request.method === "GET" && url.pathname === "/base-plugin/coffee/merchants") {
+        return json(response, 200, baseCoffeeMerchants(originFrom(request)));
+      }
+      if (request.method === "GET" && url.pathname === "/base-plugin/coffee/quote") {
+        return json(response, 200, baseCoffeeQuote(url.searchParams));
+      }
+      if (request.method === "GET" && url.pathname === "/base-plugin/coffee/order") {
+        return json(response, 201, baseCoffeeOrder(url.searchParams));
+      }
+      if (request.method === "GET" && url.pathname === "/base-plugin/coffee/prepare-payment") {
+        const orderId = url.searchParams.get("orderId") || "";
+        if (!orderId) return json(response, 400, { error: "Missing orderId." });
+        return json(response, 200, baseCoffeePayment(orderId, url.searchParams.get("from")));
+      }
+      if (request.method === "GET" && url.pathname === "/base-plugin/coffee/status") {
+        const orderId = url.searchParams.get("orderId") || "";
+        if (!orderId) return json(response, 400, { error: "Missing orderId." });
+        return json(response, 200, { product: "SLL-R Base coffee status", order: baseCoffeeStatus(orderId) });
       }
       if (request.method === "POST" && url.pathname === "/quote") {
         return json(response, 200, { product: "SLL-R quote", quote: quoteOrder(await body(request) as never) });

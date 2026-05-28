@@ -37,6 +37,7 @@ Target users:
 
 - Raposa Coffee: pickup promise, event queue, and online coffee product orders.
 - SOLYD: online product quotes, checkout handoff, and payment-backed receipts.
+- Noun Coffee: Base/USDC coffee storefront quote and checkout handoff.
 - AgentShack builders: reusable seller-agent template for their own merchants.
 
 MVP success means:
@@ -112,6 +113,11 @@ GET  /raposa
 GET  /raposa/order
 GET  /capabilities?merchantId=raposa-coffee
 GET  /pilot-kit?merchantId=raposa-coffee
+GET  /base-plugin/coffee/merchants
+GET  /base-plugin/coffee/quote?merchantId=noun-coffee&intent=...
+GET  /base-plugin/coffee/order?merchantId=noun-coffee&intent=...
+GET  /base-plugin/coffee/prepare-payment?orderId=ord_...
+GET  /base-plugin/coffee/status?orderId=ord_...
 POST /quote
 POST /orders
 GET  /orders?merchantId=raposa-coffee
@@ -154,6 +160,20 @@ curl -X POST http://localhost:3100/quote \
     "deliverByDays": 7
   }'
 ```
+
+## Example Base Coffee Plugin
+
+```bash
+curl "http://localhost:3100/base-plugin/coffee/quote?merchantId=noun-coffee&intent=Ship%20me%20Dalat%20Highlands%20coffee%20beans&maxSpendUsd=40.00&deliverByDays=7"
+```
+
+```bash
+curl "http://localhost:3100/base-plugin/coffee/order?merchantId=noun-coffee&intent=Ship%20me%20Dalat%20Highlands%20coffee%20beans&maxSpendUsd=40.00&deliverByDays=7&agentId=base-mcp-agent"
+```
+
+`GET /base-plugin/coffee/prepare-payment` returns a checkout handoff by default.
+For a Base MCP demo transaction, set `SLLR_BASE_COFFEE_RECIPIENT` to a demo EVM
+address; SLL-R will return a Base USDC transfer call to that configured address.
 
 ## Example Pilot Kit
 
