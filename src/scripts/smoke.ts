@@ -54,6 +54,21 @@ async function main() {
   const origin = `http://127.0.0.1:${address.port}`;
 
   try {
+    const root = await getJson(origin, "/") as {
+      product?: string;
+      agentDiscovery?: { openapi?: string; baseMcpPluginSpec?: string };
+      baseMcpDemo?: { quote?: string; preparePayment?: string };
+    };
+    if (
+      root.product !== "SLL-R"
+      || !root.agentDiscovery?.openapi?.endsWith("/openapi.json")
+      || !root.agentDiscovery?.baseMcpPluginSpec?.endsWith("/.well-known/base-mcp-plugin.md")
+      || !root.baseMcpDemo?.quote?.includes("/base-plugin/coffee/quote")
+      || !root.baseMcpDemo?.preparePayment?.includes("/base-plugin/coffee/prepare-payment")
+    ) {
+      throw new Error(`Root discovery response was not useful: ${JSON.stringify(root)}`);
+    }
+
     const manifest = await fetch(`${origin}/.well-known/sllr-agent.json`).then((response) => response.json()) as {
       name?: string;
       agentShack?: { type?: string; evaluator?: { policy?: string } };

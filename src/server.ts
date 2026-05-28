@@ -73,10 +73,42 @@ function errorResponse(response: ServerResponse, error: unknown) {
   });
 }
 
+function rootDiscovery(origin: string) {
+  return {
+    product: "SLL-R",
+    description: "Seller-side agent runtime for merchant quote, order, payment proof, and Jiagon receipt memory.",
+    status: "ready",
+    agentDiscovery: {
+      sllrManifest: `${origin}/.well-known/sllr-agent.json`,
+      aiPluginManifest: `${origin}/.well-known/ai-plugin.json`,
+      baseMcpPluginSpec: `${origin}/.well-known/base-mcp-plugin.md`,
+      openapi: `${origin}/openapi.json`,
+    },
+    baseMcpDemo: {
+      merchants: `${origin}/base-plugin/coffee/merchants`,
+      quote: `${origin}/base-plugin/coffee/quote?merchantId=noun-coffee&intent=Ship%20me%20Dalat%20Highlands%20coffee%20beans&maxSpendUsd=40.00&deliverByDays=7`,
+      order: `${origin}/base-plugin/coffee/order?merchantId=noun-coffee&intent=Ship%20me%20Dalat%20Highlands%20coffee%20beans&maxSpendUsd=40.00&deliverByDays=7&agentId=base-mcp-demo`,
+      preparePayment: `${origin}/base-plugin/coffee/prepare-payment?orderId=ord_...&from=0x...`,
+      status: `${origin}/base-plugin/coffee/status?orderId=ord_...`,
+    },
+    merchantRuntime: {
+      merchants: `${origin}/merchants`,
+      menu: `${origin}/merchants/{merchantId}/menu`,
+      quote: `${origin}/merchants/{merchantId}/quote`,
+      orders: `${origin}/merchants/{merchantId}/orders`,
+      payment: `${origin}/merchants/{merchantId}/payment`,
+      receipt: `${origin}/merchants/{merchantId}/receipt`,
+    },
+  };
+}
+
 export async function handleSllrRequest(request: IncomingMessage, response: ServerResponse) {
   try {
     const url = new URL(request.url || "/", originFrom(request));
 
+    if (request.method === "GET" && url.pathname === "/") {
+        return json(response, 200, rootDiscovery(originFrom(request)));
+      }
     if (request.method === "GET" && url.pathname === "/health") {
         return json(response, 200, { ok: true, product: "SLL-R" });
       }
