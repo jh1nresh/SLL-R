@@ -86,6 +86,10 @@ export function sllrManifest(origin: string) {
       quote: `${origin}/quote`,
       orders: `${origin}/orders`,
       paymentWebhook: `${origin}/webhooks/payment`,
+      solanaPayMerchants: `${origin}/solana-pay/merchants`,
+      solanaPayPreparePayment: `${origin}/solana-pay/prepare-payment`,
+      solanaPayVerifyPayment: `${origin}/solana-pay/verify-payment`,
+      helioWebhook: `${origin}/webhooks/helio`,
     },
     capabilities: [
       "merchant catalog discovery",

@@ -4,6 +4,7 @@ export type PaymentRail =
   | "telegram_staff"
   | "shopify"
   | "moonpay"
+  | "helio"
   | "stripe"
   | "solana_pay"
   | "base_usdc"

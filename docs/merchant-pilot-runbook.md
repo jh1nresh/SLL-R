@@ -32,7 +32,8 @@ Initial config:
 
 - `merchantId`: `raposa-coffee` for pickup
 - `merchantId`: `raposa-shop` for shipped coffee products
-- payment rail: counter first, MoonPay / Shopify / Binance Pay later
+- payment rail: counter first, Solana Pay or Helio / MoonPay Commerce for crypto
+  checkout, Binance Pay later
 - staff workflow: Telegram group or hosted merchant terminal
 - promise workflow: accept, ready, claimed, then receipt memory
 
@@ -60,8 +61,8 @@ Initial config:
 
 - `merchantId`: `solyd`
 - fulfillment: shipping
-- payment rail: existing checkout first, MoonPay / Shopify / Binance Pay webhook
-  later
+- payment rail: existing checkout first, Solana Pay / Helio / MoonPay Commerce,
+  Shopify, or Binance Pay webhook later
 - receipt handoff: Jiagon API
 
 ## Merchant Meeting Checklist
@@ -75,6 +76,8 @@ Ask for:
 - current checkout/payment provider
 - webhook access if they want payment-backed receipts
 - preferred staff notification channel
+- Solana Pay recipient wallet or Helio / MoonPay Commerce pay link if they want
+  a Solana-native rail
 - Binance Pay API access, webhook configuration, and refund policy if they want
   a BNB-native merchant rail
 
@@ -97,10 +100,14 @@ Level 1: static catalog and mock payment proof.
 
 Level 2: static catalog plus real staff confirmation.
 
-Level 3: real checkout webhook from Shopify, MoonPay, Stripe, Solana Pay, or
-Binance Pay.
+Level 3: real checkout webhook from Shopify, Helio / MoonPay Commerce, Stripe,
+Solana Pay, or Binance Pay.
 
 Level 4: production merchant profile with receipt memory and analytics.
 
 For Binance Pay, Level 3 must include webhook signature verification and a Query
 Order confirmation before SLL-R marks an order as payment-backed.
+
+For Solana Pay / Helio, Level 3 must include reference, amount, recipient, token,
+and webhook or transaction verification before SLL-R marks an order as
+payment-backed.

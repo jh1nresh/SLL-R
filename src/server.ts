@@ -9,6 +9,7 @@ import { attachPaymentProof } from "./core/orders.js";
 import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder } from "./core/merchantApi.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuote, baseCoffeeRecordDemoPayment, baseCoffeeStatus } from "./adapters/baseCoffeePlugin.js";
+import { helioWebhook, solanaPayMerchants, solanaPayPreparePayment, solanaPayVerifyPayment } from "./adapters/solanaPay.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -135,6 +136,32 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         const orderId = url.searchParams.get("orderId") || "";
         if (!orderId) return json(response, 400, { error: "Missing orderId." });
         return json(response, 200, { product: "SLL-R Base coffee status", order: baseCoffeeStatus(orderId) });
+      }
+      if (request.method === "GET" && url.pathname === "/solana-pay/merchants") {
+        return json(response, 200, solanaPayMerchants(originFrom(request)));
+      }
+      if (request.method === "GET" && url.pathname === "/solana-pay/prepare-payment") {
+        const orderId = url.searchParams.get("orderId") || "";
+        if (!orderId) return json(response, 400, { error: "Missing orderId." });
+        return json(response, 200, solanaPayPreparePayment(orderId));
+      }
+      if (request.method === "POST" && url.pathname === "/solana-pay/verify-payment") {
+        const order = await solanaPayVerifyPayment(request.headers, await body(request) as never);
+        return json(response, 200, {
+          product: "SLL-R Solana payment proof adapter",
+          status: order.status,
+          proofLevel: order.proofLevel,
+          order,
+        });
+      }
+      if (request.method === "POST" && url.pathname === "/webhooks/helio") {
+        const order = await helioWebhook(request.headers, await body(request) as never);
+        return json(response, 200, {
+          product: "SLL-R Helio payment proof adapter",
+          status: order.status,
+          proofLevel: order.proofLevel,
+          order,
+        });
       }
       if (request.method === "GET" && url.pathname === "/base-plugin/coffee/record-demo-payment") {
         const orderId = url.searchParams.get("orderId") || "";

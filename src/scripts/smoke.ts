@@ -79,6 +79,16 @@ async function main() {
       throw new Error(`SOLYD pilot kit was not generated: ${JSON.stringify(solydKit)}`);
     }
 
+    const solanaMerchants = await getJson(origin, "/solana-pay/merchants") as {
+      merchants?: Array<{ id?: string; paymentRails?: string[] }>;
+    };
+    for (const merchantId of ["raposa-coffee", "raposa-shop", "solyd"]) {
+      const merchant = solanaMerchants.merchants?.find((candidate) => candidate.id === merchantId);
+      if (!merchant?.paymentRails?.includes("solana_pay")) {
+        throw new Error(`Solana Pay merchant ${merchantId} was not exposed: ${JSON.stringify(solanaMerchants)}`);
+      }
+    }
+
     const merchantList = await getJson(origin, "/merchants") as {
       merchants?: Array<{ id?: string; catalogItems?: number }>;
     };
@@ -265,6 +275,44 @@ async function main() {
     }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
     if (!orderResult.order?.id) throw new Error(`Order was not created: ${JSON.stringify(orderResult)}`);
 
+    const previousSolanaRecipient = process.env.SLLR_SOLANA_PAY_RECIPIENT;
+    const previousSolanaSecret = process.env.SLLR_SOLANA_PAY_VERIFY_SECRET;
+    const solanaOrder = await postJson(origin, "/orders", {
+      merchantId: "raposa-shop",
+      agentId: "buy-r-smoke",
+      userIntent: "Ship me Raposa Nitro Cold Brew Starter Pack under $30 this week",
+      maxSpendUsd: "30.00",
+      deliverByDays: 7,
+      paymentMode: "crypto",
+    }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+    if (!solanaOrder.order?.id) throw new Error(`Solana payment order was not created: ${JSON.stringify(solanaOrder)}`);
+    process.env.SLLR_SOLANA_PAY_RECIPIENT = "11111111111111111111111111111111";
+    const solanaPayment = await getJson(origin, `/solana-pay/prepare-payment?orderId=${solanaOrder.order.id}`) as {
+      mode?: string;
+      recipient?: string;
+      reference?: string;
+      solanaPayUrl?: string;
+    };
+    if (
+      solanaPayment.mode !== "solana_pay_url"
+      || solanaPayment.recipient !== "11111111111111111111111111111111"
+      || !solanaPayment.reference
+      || !solanaPayment.solanaPayUrl?.startsWith("solana:11111111111111111111111111111111?")
+    ) {
+      throw new Error(`Solana Pay URL was not prepared: ${JSON.stringify(solanaPayment)}`);
+    }
+
+    const solanaProofWithoutSecret = await postJsonFailure(origin, "/solana-pay/verify-payment", {
+      orderId: solanaOrder.order.id,
+      merchantId: "raposa-shop",
+      amountUsd: solanaOrder.order.item?.subtotalUsd,
+      paymentId: "solana_tx_smoke",
+      reference: solanaPayment.reference,
+    });
+    if (solanaProofWithoutSecret.status !== 403) {
+      throw new Error(`Solana proof without verifier secret should be rejected: ${JSON.stringify(solanaProofWithoutSecret)}`);
+    }
+
     const merchantOrder = await postJson(origin, "/merchants/solyd/orders", {
       agentId: "buy-r-smoke",
       userIntent: "Ship me a black MagSafe iPhone 16 case under $100",
@@ -327,6 +375,61 @@ async function main() {
     const nonBaseStatusFailure = await getJsonFailure(origin, `/base-plugin/coffee/status?orderId=${orderResult.order.id}`);
     if (nonBaseStatusFailure.status !== 404) {
       throw new Error(`Non-Base order status should be rejected: ${JSON.stringify(nonBaseStatusFailure)}`);
+    }
+
+    const solanaPaid = await postJson(origin, "/solana-pay/verify-payment", {
+      orderId: solanaOrder.order.id,
+      merchantId: "raposa-shop",
+      amountUsd: solanaOrder.order.item?.subtotalUsd,
+      paymentId: "solana_tx_smoke",
+      reference: solanaPayment.reference,
+      demo: true,
+    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string }; payment?: { provider?: string } } };
+    if (solanaPaid.proofLevel !== "receipt_memory_issued" || solanaPaid.order?.payment?.provider !== "solana_pay" || !solanaPaid.order.receipt?.receiptHash) {
+      throw new Error(`Solana Pay proof did not issue receipt memory: ${JSON.stringify(solanaPaid)}`);
+    }
+    if (previousSolanaRecipient === undefined) {
+      delete process.env.SLLR_SOLANA_PAY_RECIPIENT;
+    } else {
+      process.env.SLLR_SOLANA_PAY_RECIPIENT = previousSolanaRecipient;
+    }
+    if (previousSolanaSecret === undefined) {
+      delete process.env.SLLR_SOLANA_PAY_VERIFY_SECRET;
+    } else {
+      process.env.SLLR_SOLANA_PAY_VERIFY_SECRET = previousSolanaSecret;
+    }
+
+    const previousHelioUrl = process.env.SLLR_HELIO_CHECKOUT_BASE_URL;
+    process.env.SLLR_HELIO_CHECKOUT_BASE_URL = "https://app.hel.io/pay/sllr-demo";
+    const helioOrder = await postJson(origin, "/orders", {
+      merchantId: "solyd",
+      agentId: "buy-r-smoke",
+      userIntent: "Ship me a black MagSafe iPhone 16 case under $100",
+      maxSpendUsd: "100.00",
+      deliverByDays: 7,
+      paymentMode: "checkout",
+    }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+    if (!helioOrder.order?.id) throw new Error(`Helio handoff order was not created: ${JSON.stringify(helioOrder)}`);
+    const helioHandoff = await getJson(origin, `/solana-pay/prepare-payment?orderId=${helioOrder.order.id}`) as {
+      helioCheckoutHandoff?: { url?: string };
+    };
+    if (!helioHandoff.helioCheckoutHandoff?.url?.includes("orderId=")) {
+      throw new Error(`Helio checkout handoff was not returned: ${JSON.stringify(helioHandoff)}`);
+    }
+    const helioPaid = await postJson(origin, "/webhooks/helio", {
+      orderId: helioOrder.order.id,
+      merchantId: "solyd",
+      amountUsd: helioOrder.order.item?.subtotalUsd,
+      paymentId: "helio_tx_smoke",
+      demo: true,
+    }) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
+    if (helioPaid.proofLevel !== "receipt_memory_issued" || helioPaid.order?.payment?.provider !== "helio" || !helioPaid.order.receipt?.receiptHash) {
+      throw new Error(`Helio webhook proof did not issue receipt memory: ${JSON.stringify(helioPaid)}`);
+    }
+    if (previousHelioUrl === undefined) {
+      delete process.env.SLLR_HELIO_CHECKOUT_BASE_URL;
+    } else {
+      process.env.SLLR_HELIO_CHECKOUT_BASE_URL = previousHelioUrl;
     }
 
     const paid = await postJson(origin, "/webhooks/payment", {

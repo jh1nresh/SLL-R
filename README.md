@@ -38,6 +38,8 @@ Target users:
 - Raposa Coffee: pickup promise, event queue, and online coffee product orders.
 - SOLYD: online product quotes, checkout handoff, and payment-backed receipts.
 - Noun Coffee: Base/USDC coffee storefront quote and checkout handoff.
+- Raposa / SOLYD Solana rail: Solana Pay URL or Helio checkout handoff with
+  payment proof promoted into Jiagon receipt memory.
 - AgentShack builders: reusable seller-agent template for their own merchants.
 
 MVP success means:
@@ -57,7 +59,7 @@ replaceable adapters:
 
 - `staff_terminal`: Telegram or a merchant terminal that confirms fulfillment.
 - `checkout_handoff`: Shopify, MoonPay Commerce, Binance Pay, or a hosted checkout link.
-- `payment_proof`: webhook, Query Order, or on-chain reference verification.
+- `payment_proof`: webhook, Query Order, Solana Pay reference, Helio, or on-chain verification.
 - `receipt_memory`: Jiagon receipt memory and Solana cNFT handoff.
 
 The current scaffold ships Raposa and SOLYD example profiles plus adapter
@@ -147,6 +149,10 @@ GET  /base-plugin/coffee/order?merchantId=noun-coffee&intent=...
 GET  /base-plugin/coffee/prepare-payment?orderId=ord_...
 GET  /base-plugin/coffee/record-demo-payment?orderId=ord_...
 GET  /base-plugin/coffee/status?orderId=ord_...
+GET  /solana-pay/merchants
+GET  /solana-pay/prepare-payment?orderId=ord_...
+POST /solana-pay/verify-payment
+POST /webhooks/helio
 POST /quote
 POST /orders
 GET  /orders?merchantId=raposa-coffee
@@ -217,6 +223,54 @@ curl "http://localhost:3100/base-plugin/coffee/order?merchantId=noun-coffee&inte
 `GET /base-plugin/coffee/prepare-payment` returns a checkout handoff by default.
 For a Base MCP demo transaction, set `SLLR_BASE_COFFEE_RECIPIENT` to a demo EVM
 address; SLL-R will return a Base USDC transfer call to that configured address.
+
+## Example Solana Pay / Helio Rail
+
+Raposa and SOLYD expose `solana_pay` capability. If `SLLR_SOLANA_PAY_RECIPIENT`
+is configured, SLL-R returns a Solana Pay URL bound to the SLL-R order reference.
+If `SLLR_HELIO_CHECKOUT_BASE_URL` is configured, SLL-R also returns a Helio /
+MoonPay Commerce checkout handoff.
+
+```bash
+curl "http://localhost:3100/solana-pay/merchants"
+```
+
+```bash
+curl -X POST http://localhost:3100/orders \
+  -H "content-type: application/json" \
+  -d '{
+    "merchantId": "solyd",
+    "agentId": "buy-r-demo",
+    "userIntent": "Ship me a black MagSafe iPhone 16 case under $100",
+    "maxSpendUsd": "100.00",
+    "deliverByDays": 7,
+    "paymentMode": "crypto"
+  }'
+```
+
+```bash
+curl "http://localhost:3100/solana-pay/prepare-payment?orderId=ord_..."
+```
+
+For a local demo proof without a verifier secret:
+
+```bash
+curl -X POST http://localhost:3100/solana-pay/verify-payment \
+  -H "content-type: application/json" \
+  -d '{
+    "orderId": "ord_...",
+    "merchantId": "solyd",
+    "provider": "solana_pay",
+    "amountUsd": "79.00",
+    "paymentId": "solana_tx_demo",
+    "reference": "reference_from_prepare_payment",
+    "demo": true
+  }'
+```
+
+Production must configure `SLLR_SOLANA_PAY_VERIFY_SECRET` or
+`SLLR_HELIO_WEBHOOK_SECRET` and verify the transaction or webhook before issuing
+receipt memory.
 
 ## Example Pilot Kit
 
