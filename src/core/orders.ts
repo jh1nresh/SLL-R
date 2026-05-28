@@ -36,7 +36,7 @@ function activePickupOrders(merchantId: string, productionClass: string) {
 }
 
 function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: OrderRequest, now: Date): SellerOrder["promise"] {
-  if (!merchant.fulfillment.includes("pickup")) {
+  if (!item.fulfillment.includes("pickup")) {
     return {
       status: "not_applicable",
       productionClass: "shipping",
@@ -85,9 +85,9 @@ export function createOrder(input: OrderRequest) {
 
   const nowDate = new Date();
   const now = nowDate.toISOString();
-  const paymentMode = input.paymentMode || (merchant.fulfillment.includes("shipping") ? "checkout" : "counter");
   const catalogItem = merchant.catalog.find((item) => item.id === quote.item?.id);
   if (!catalogItem) throw Object.assign(new Error(`Catalog item not found: ${quote.item.id}`), { status: 409 });
+  const paymentMode = input.paymentMode || (catalogItem.fulfillment.includes("shipping") ? "checkout" : "counter");
   const order: SellerOrder = {
     id: `ord_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
     merchantId: merchant.id,

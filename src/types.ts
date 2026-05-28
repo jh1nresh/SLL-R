@@ -22,6 +22,26 @@ export type CatalogItem = {
   productUrl?: string;
 };
 
+export type MenuItem = {
+  id: string;
+  name: string;
+  section: string;
+  description?: string;
+  service?: "in_store" | "shipping";
+  priceStatus: "listed" | "unlisted";
+  amountUsd?: string;
+  available?: boolean;
+  tags?: string[];
+};
+
+export type MenuSection = {
+  id: string;
+  name: string;
+  service: "in_store" | "shipping";
+  source: string;
+  items: MenuItem[];
+};
+
 export type MerchantProfile = {
   id: string;
   name: string;
@@ -33,6 +53,7 @@ export type MerchantProfile = {
     requiredAboveUsd: string;
   };
   catalog: CatalogItem[];
+  menuSections?: MenuSection[];
 };
 
 export type QuoteRequest = {
