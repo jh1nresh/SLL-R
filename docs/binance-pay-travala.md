@@ -37,7 +37,7 @@ buyer agent intent
 -> PAY webhook arrives
 -> SLL-R Query Order confirms PAID
 -> merchant fulfills or refund path starts
--> Jiagon receipt memory
+-> SLL-R receipt memory
 -> AgentShack reputation / credit signal
 ```
 

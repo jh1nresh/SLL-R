@@ -6,7 +6,7 @@ agent-orderable merchant.
 ## Goal
 
 Show a buyer agent creating an order, preparing Solana payment, and turning
-payment proof into Jiagon receipt memory.
+payment proof into SLL-R receipt memory.
 
 ```text
 agent intent
@@ -14,7 +14,7 @@ agent intent
 -> SLL-R order
 -> Solana Pay URL or Helio checkout handoff
 -> payment proof
--> Jiagon receipt memory
+-> SLL-R receipt memory
 ```
 
 ## Required Setup
@@ -44,7 +44,7 @@ endpoint as production payment verification.
 Buy me a SOLYD black MagSafe iPhone 16 case under $100.
 Use SLL-R to quote, create the order, prepare Solana Pay, and show the merchant,
 item, amount, Solana recipient, and reference before payment.
-After payment proof is attached, show the Jiagon receipt memory.
+After payment proof is attached, show the SLL-R receipt memory.
 ```
 
 For Raposa beans:

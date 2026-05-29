@@ -162,7 +162,7 @@ export type PaymentWebhook = {
 
 export type ReceiptHandoff = {
   status: "stubbed" | "submitted";
-  jiagonReceiptId: string;
+  receiptMemoryId: string;
   receiptHash: string;
   claimUrl: string;
   cnftStatus: "pending" | "ready_for_mint";

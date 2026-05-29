@@ -95,7 +95,7 @@ function connectPlan(merchant: MerchantProfile, origin: string) {
       "Let Shopify checkout handle Base Pay / card / crypto payment methods.",
       "Use Shopify orders/paid webhook as payment proof.",
       "Use Shopify fulfillment webhook as fulfillment proof when available.",
-      "Issue Jiagon receipt memory after verified payment or fulfillment proof.",
+      "Issue SLL-R receipt memory after verified payment or fulfillment proof.",
     ],
     requiredMerchantSetup: [
       "Confirm Shopify storefront domain.",

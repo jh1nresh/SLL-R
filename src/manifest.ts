@@ -58,20 +58,20 @@ function agentShackListing(origin: string): AgentShackListing {
 
 export function sllrManifest(origin: string) {
   return {
-    name: "SLL-R by Jiagon",
+    name: "SLL-R",
     description: "Installable seller agents for merchants in the agent economy.",
     version: "0.1.0",
     role: "seller_operating_agent",
     agentShack: agentShackListing(origin),
     dojo: {
-      listingName: "SLL-R by Jiagon",
+      listingName: "SLL-R",
       category: "merchant agent",
       installModes: ["hosted", "template", "self-hosted"],
       buyerAgents: ["BUY-R", "Hermes", "ChatGPT", "Dojo workflows"],
     },
     boundaries: {
       sllr: "seller agent runtime",
-      jiagon: "proof and receipt memory system",
+      receiptMemory: "proof and receipt memory system",
       posAdapters: "internal checkout and POS workflow tools used by SLL-R",
     },
     endpoints: {
@@ -105,7 +105,7 @@ export function sllrManifest(origin: string) {
       "quote-first order negotiation",
       "checkout handoff",
       "payment proof intake",
-      "Jiagon receipt memory handoff",
+      "SLL-R receipt memory handoff",
       "Solana receipt cNFT ready proof",
       "OpenAPI tool discovery",
       "Base MCP custom plugin instructions",

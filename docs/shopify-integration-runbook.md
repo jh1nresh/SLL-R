@@ -3,8 +3,8 @@
 SLL-R should connect Shopify stores without replacing their checkout or POS.
 
 Use Shopify as the source of truth for products, carts, paid orders, fulfillment,
-and refunds. Use SLL-R as the agent-facing quote/order layer and Jiagon receipt
-memory bridge.
+and refunds. Use SLL-R as the agent-facing quote/order layer and receipt memory
+bridge.
 
 ## Official Surfaces
 
@@ -53,7 +53,7 @@ buyer agent intent
 -> buyer pays through Shopify checkout, including Base Pay if enabled
 -> Shopify orders/paid webhook
 -> SLL-R attaches payment proof
--> Jiagon receipt memory
+-> SLL-R receipt memory
 ```
 
 ## Current Adapter Behavior

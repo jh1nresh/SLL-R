@@ -17,7 +17,7 @@ buyer agent asks for coffee or beans
 -> SLL-R estimates the live queue and returns a pickup promise
 -> Raposa confirms, marks ready, then marks customer claimed
 -> SLL-R records payment or fulfillment proof
--> Jiagon issues receipt memory
+-> SLL-R issues receipt memory
 ```
 
 What Raposa gets:
@@ -47,7 +47,7 @@ buyer agent asks for a phone case
 -> buyer agent creates order
 -> checkout handoff uses existing SOLYD checkout
 -> payment webhook confirms proof
--> Jiagon issues receipt memory
+-> SLL-R issues receipt memory
 ```
 
 What SOLYD gets:
@@ -63,7 +63,7 @@ Initial config:
 - fulfillment: shipping
 - payment rail: existing checkout first, Solana Pay / Helio / MoonPay Commerce,
   Shopify, or Binance Pay webhook later
-- receipt handoff: Jiagon API
+- receipt handoff: SLL-R receipt API
 
 ## Merchant Meeting Checklist
 
@@ -92,7 +92,7 @@ current workflow first.
 - Pickup orders include estimated wait, promised time, ready time, and claimed
   time.
 - Payment or fulfillment proof upgrades the order.
-- Jiagon returns a receipt memory object or claim URL.
+- SLL-R returns a receipt memory object or claim URL.
 
 ## First Integration Levels
 

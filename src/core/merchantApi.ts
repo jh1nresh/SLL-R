@@ -107,7 +107,7 @@ export function createMerchantOrder(merchantId: string, payload: Record<string, 
     status: result.order.status,
     quote: result.quote,
     order: result.order,
-    next: "Attach payment or fulfillment proof to issue Jiagon receipt memory.",
+    next: "Attach payment or fulfillment proof to issue SLL-R receipt memory.",
   };
 }
 

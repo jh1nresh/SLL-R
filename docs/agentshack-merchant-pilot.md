@@ -13,7 +13,7 @@ buyer/customer agent
 -> SLL-R order
 -> merchant terminal accept/reject/ready/claim
 -> existing payment or checkout
--> Jiagon receipt memory
+-> SLL-R receipt memory
 -> AgentShack reputation
 ```
 
@@ -86,7 +86,7 @@ buyer agent
 -> Binance Pay PAY webhook
 -> SLL-R Query Order confirms PAID
 -> merchant fulfills or refund flow starts
--> Jiagon receipt memory
+-> SLL-R receipt memory
 -> AgentShack reputation
 ```
 

@@ -5,7 +5,7 @@ Use this runbook to record a Base Agent Quest demo for SLL-R.
 ## Goal
 
 Show a buyer agent ordering Noun Coffee through SLL-R, preparing a Base USDC
-transaction, and turning payment proof into Jiagon receipt memory.
+transaction, and turning payment proof into SLL-R receipt memory.
 
 ## Required Setup
 

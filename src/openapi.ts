@@ -188,7 +188,7 @@ export function sllrOpenApi(origin: string) {
         post: {
           tags: ["Merchant Runtime"],
           operationId: "issueMerchantReceipt",
-          summary: "Issue Jiagon receipt memory for a merchant order.",
+          summary: "Issue SLL-R receipt memory for a merchant order.",
           parameters: [{ $ref: "#/components/parameters/MerchantId" }],
           requestBody: {
             required: true,
@@ -558,7 +558,7 @@ export function aiPluginManifest(origin: string) {
       is_user_authenticated: false,
     },
     logo_url: `${origin}/sllr-logo.svg`,
-    contact_email: "support@jiagon.xyz",
+    contact_email: "support@sll-r.local",
     legal_info_url: `${origin}/.well-known/sllr-agent.json`,
   };
 }

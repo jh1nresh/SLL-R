@@ -81,7 +81,7 @@ function errorResponse(response: ServerResponse, error: unknown) {
 function rootDiscovery(origin: string) {
   return {
     product: "SLL-R",
-    description: "Seller-side agent runtime for merchant quote, order, payment proof, and Jiagon receipt memory.",
+    description: "Seller-side agent runtime for merchant quote, order, payment proof, and verified receipt memory.",
     status: "ready",
     agentDiscovery: {
       sllrManifest: `${origin}/.well-known/sllr-agent.json`,
@@ -297,7 +297,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           status: result.order.status,
           quote: result.quote,
           order: result.order,
-          next: "Attach payment or fulfillment proof to issue Jiagon receipt memory.",
+          next: "Attach payment or fulfillment proof to issue SLL-R receipt memory.",
         });
       }
       if (request.method === "GET" && url.pathname === "/orders") {

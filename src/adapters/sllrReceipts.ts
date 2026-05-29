@@ -7,7 +7,7 @@ function publicOrigin() {
   return `http://localhost:${process.env.SLLR_PORT || 3100}`;
 }
 
-export async function issueJiagonReceipt(order: SellerOrder): Promise<ReceiptHandoff> {
+export async function issueSllrReceipt(order: SellerOrder): Promise<ReceiptHandoff> {
   const receiptApiUrl = (process.env.JIAGON_RECEIPT_API_URL || "").trim();
   const receiptHash = createHash("sha256")
     .update(`${order.id}:${order.merchantId}:${order.item.subtotalUsd}:${order.payment.paymentId || "manual"}:${order.promise.promisedReadyAt || ""}:${order.promise.readyAt || ""}:${order.promise.claimedAt || ""}`)
@@ -16,7 +16,7 @@ export async function issueJiagonReceipt(order: SellerOrder): Promise<ReceiptHan
   if (!receiptApiUrl) {
     return {
       status: "stubbed",
-      jiagonReceiptId: `stub_${order.id}`,
+      receiptMemoryId: `stub_${order.id}`,
       receiptHash,
       claimUrl: `${publicOrigin()}/receipts/${order.id}`,
       cnftStatus: "ready_for_mint",
@@ -43,12 +43,12 @@ export async function issueJiagonReceipt(order: SellerOrder): Promise<ReceiptHan
   });
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) {
-    throw new Error(typeof payload.error === "string" ? payload.error : "Jiagon receipt handoff failed.");
+    throw new Error(typeof payload.error === "string" ? payload.error : "SLL-R receipt handoff failed.");
   }
 
   return {
     status: "submitted",
-    jiagonReceiptId: String(payload.receiptId || payload.id || `jiagon_${order.id}`),
+    receiptMemoryId: String(payload.receiptId || payload.id || `sllr_${order.id}`),
     receiptHash: String(payload.receiptHash || receiptHash),
     claimUrl: String(payload.claimUrl || `${publicOrigin()}/receipts/${order.id}`),
     cnftStatus: "ready_for_mint",

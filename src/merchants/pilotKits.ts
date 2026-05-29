@@ -28,7 +28,7 @@ const merchantUseCases: Record<string, {
       "Open the Raposa order queue.",
       "Accept orders the staff can fulfill in the requested pickup window.",
       "Take payment at the counter as usual.",
-      "Mark fulfilled after handoff so Jiagon can issue receipt memory.",
+      "Mark fulfilled after handoff so SLL-R can issue receipt memory.",
     ],
     requiredSetup: [
       "Confirm menu items, prices, and prep-time estimates.",
@@ -147,7 +147,7 @@ export function pilotKitForMerchant(merchantId: string, origin: string) {
       "Approve the first catalog/menu snapshot.",
       "Pick the staff terminal path for the pilot.",
       "Pick payment proof level: manual fulfillment first or checkout webhook.",
-      "Pick receipt claim path: Jiagon app, wallet, phone, or email later.",
+      "Pick receipt claim path: wallet, phone, or email later.",
     ],
   };
 }

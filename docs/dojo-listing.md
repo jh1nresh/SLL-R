@@ -5,7 +5,7 @@
 Name:
 
 ```text
-SLL-R by Jiagon
+SLL-R
 ```
 
 Short description:
@@ -36,7 +36,7 @@ verified receipt memory after payment or fulfillment proof.
 
 AgentShack should list SLL-R as an agent service and install template:
 
-- Hosted service: Jiagon runs SLL-R for early merchants.
+- Hosted service: SLL-R runs for early merchants.
 - Self-hosted template: merchants or builders fork the runtime and configure
   their own catalog, checkout, and webhook adapters.
 - Workflow primitive: other AgentShack agents can call SLL-R instead of building a
@@ -51,7 +51,7 @@ The minimum install should ask for:
 - catalog source: static config, Shopify, or custom API
 - checkout/payment source: counter, Shopify, MoonPay, Stripe, Solana Pay, or
   Binance Pay
-- receipt destination: Jiagon API URL and API key
+- receipt destination: SLL-R receipt API URL and API key
 - staff notification channel: Telegram group or merchant terminal
 
 For Binance Pay, install must also collect API credentials, webhook public-key

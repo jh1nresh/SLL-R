@@ -49,7 +49,7 @@ const adapters: SellerAgentAdapter[] = [
     responsibilities: [
       "accept MoonPay Commerce or Helio checkout events",
       "verify payment amount and merchant order binding",
-      "promote a paid order into Jiagon receipt memory",
+      "promote a paid order into SLL-R receipt memory",
     ],
     requiredEnv: ["MOONPAY_COMMERCE_WEBHOOK_SECRET", "SLLR_HELIO_WEBHOOK_SECRET"],
   },
@@ -93,9 +93,9 @@ const adapters: SellerAgentAdapter[] = [
     requiredEnv: ["BINANCE_PAY_API_KEY", "BINANCE_PAY_API_SECRET", "BINANCE_PAY_WEBHOOK_PUBLIC_KEY"],
   },
   {
-    id: "jiagon-receipts",
+    id: "sllr-receipts",
     role: "receipt_memory",
-    label: "Jiagon receipt memory handoff",
+    label: "SLL-R receipt memory handoff",
     status: process.env.JIAGON_RECEIPT_API_URL ? "ready" : "stubbed",
     supportedRails: ["counter", "telegram_staff", "shopify", "moonpay", "helio", "stripe", "solana_pay", "binance_pay"],
     responsibilities: [

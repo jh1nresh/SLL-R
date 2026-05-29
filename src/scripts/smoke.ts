@@ -73,7 +73,7 @@ async function main() {
       name?: string;
       agentShack?: { type?: string; evaluator?: { policy?: string } };
     };
-    if (manifest.name !== "SLL-R by Jiagon") throw new Error("Manifest did not identify SLL-R.");
+    if (manifest.name !== "SLL-R") throw new Error("Manifest did not identify SLL-R.");
     if (manifest.agentShack?.type !== "merchant_agent" || manifest.agentShack.evaluator?.policy !== "order-fulfillment-v0") {
       throw new Error(`Manifest did not expose AgentShack merchant listing schema: ${JSON.stringify(manifest)}`);
     }

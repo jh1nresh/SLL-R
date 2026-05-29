@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { merchantForId } from "../merchants/profiles.js";
 import type { CatalogItem, MerchantActionRequest, MerchantOrderFilter, MerchantProfile, OrderRequest, PaymentWebhook, SellerOrder } from "../types.js";
-import { issueJiagonReceipt } from "../adapters/jiagonReceipts.js";
+import { issueSllrReceipt } from "../adapters/sllrReceipts.js";
 import { centsFromUsd } from "./money.js";
 import { quoteOrder } from "./quote.js";
 
@@ -194,7 +194,7 @@ export async function fulfillOrder(orderId: string, input: MerchantActionRequest
     terminal: terminalUpdate(input, "fulfilled"),
     updatedAt: new Date().toISOString(),
   };
-  fulfilled.receipt = await issueJiagonReceipt(fulfilled);
+  fulfilled.receipt = await issueSllrReceipt(fulfilled);
   fulfilled.status = "receipt_issued";
   fulfilled.proofLevel = "receipt_memory_issued";
   fulfilled.updatedAt = new Date().toISOString();
@@ -253,7 +253,7 @@ export async function claimOrder(orderId: string, input: MerchantActionRequest) 
     },
     updatedAt: claimedAt,
   };
-  claimed.receipt = await issueJiagonReceipt(claimed);
+  claimed.receipt = await issueSllrReceipt(claimed);
   claimed.status = "receipt_issued";
   claimed.proofLevel = "receipt_memory_issued";
   claimed.updatedAt = new Date().toISOString();
@@ -283,7 +283,7 @@ export async function attachPaymentProof(input: PaymentWebhook) {
     },
     updatedAt: new Date().toISOString(),
   };
-  updated.receipt = await issueJiagonReceipt(updated);
+  updated.receipt = await issueSllrReceipt(updated);
   updated.status = "receipt_issued";
   updated.proofLevel = "receipt_memory_issued";
   updated.updatedAt = new Date().toISOString();

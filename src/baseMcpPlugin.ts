@@ -9,7 +9,7 @@ export function baseMcpPluginSpec(origin: string) {
 >
 > The payer address used in \`prepare-payment?from=<address>\` must come from the detected wallet, not from a guessed prompt value.
 
-SLL-R is a seller-side agent runtime for merchants. This plugin lets a Base-aware agent discover Noun Coffee, quote a real product, create an order, prepare Base USDC calldata, and attach payment proof as Jiagon receipt memory.
+SLL-R is a seller-side agent runtime for merchants. This plugin lets a Base-aware agent discover Noun Coffee, quote a real product, create an order, prepare Base USDC calldata, and attach payment proof as SLL-R receipt memory.
 
 **SLL-R API:** ${origin}
 **Supported chain:** Base mainnet (\`8453\` / \`base\`)

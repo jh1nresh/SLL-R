@@ -93,13 +93,13 @@ Coffee's wallet. Real production onboarding should configure:
 - merchant-owned receiving address or checkout provider webhook
 - order ID to payment reference mapping
 - webhook signature verification
-- Jiagon receipt issuance after payment proof
+- SLL-R receipt issuance after payment proof
 
 ## Receipt Memory
 
 After payment proof is attached through `POST /webhooks/payment`, SLL-R upgrades
-the order to Jiagon receipt memory. The receipt memory can later be represented
-as a Solana cNFT by Jiagon.
+the order to SLL-R receipt memory. The receipt memory can later be represented
+as a Solana cNFT by SLL-R.
 
 For Base MCP demos, `GET /base-plugin/coffee/record-demo-payment` is the
 lightweight proof handoff. It is intentionally named as a demo endpoint because

@@ -3,8 +3,8 @@
 SLL-R is an installable seller-side operating agent for merchants.
 
 It lets buyer agents place real-world orders with a merchant, checks merchant
-constraints, routes checkout through existing systems, and hands completed
-orders to Jiagon for verified receipt memory.
+constraints, routes checkout through existing systems, and turns completed
+orders into verified receipt memory.
 
 The current product goal is not a hackathon-only demo. The goal is to list SLL-R
 on AgentShack as a reusable merchant-agent service and onboard Raposa / SOLYD as
@@ -15,13 +15,13 @@ BUY-R / Hermes / ChatGPT
 -> SLL-R
 -> POS / checkout adapters
 -> payment or fulfillment proof
--> Jiagon receipt memory / Solana cNFT
+-> SLL-R receipt memory / Solana cNFT
 ```
 
 ## Product Boundary
 
 - **SLL-R**: seller agent runtime for merchants.
-- **Jiagon**: proof, receipt memory, and Solana cNFT system.
+- **Receipt memory**: proof-backed order, payment, and fulfillment record.
 - **POS adapters**: internal SLL-R tools for Shopify, MoonPay, Binance Pay, Telegram staff flow, Browser Use, Stripe, or future POS systems.
 - **BUY-R**: buyer-side agent caller. This can be Hermes, ChatGPT, Telegram, AgentShack, or another personal agent.
 
@@ -41,7 +41,7 @@ Target users:
 - Shopify merchants: Noun Coffee, Raposa Shop, and SOLYD can expose Storefront
   MCP / cart handoff / paid-order webhook proof without replacing checkout.
 - Raposa / SOLYD Solana rail: Solana Pay URL or Helio checkout handoff with
-  payment proof promoted into Jiagon receipt memory.
+  payment proof promoted into SLL-R receipt memory.
 - AgentShack builders: reusable seller-agent template for their own merchants.
 
 MVP success means:
@@ -52,7 +52,7 @@ MVP success means:
 - A buyer agent can ask for a quote and create an order through the API.
 - The merchant can use a simple terminal or existing checkout flow to accept,
   ready, claim, or complete the order.
-- A payment or fulfillment proof can become Jiagon receipt memory.
+- A payment or fulfillment proof can become SLL-R receipt memory.
 - Raposa / SOLYD can understand what they need to configure in less than one
   meeting.
 
@@ -64,7 +64,7 @@ replaceable adapters:
 - `staff_terminal`: Telegram or a merchant terminal that confirms fulfillment.
 - `checkout_handoff`: Shopify, MoonPay Commerce, Binance Pay, or a hosted checkout link.
 - `payment_proof`: webhook, Query Order, Solana Pay reference, Helio, or on-chain verification.
-- `receipt_memory`: Jiagon receipt memory and Solana cNFT handoff.
+- `receipt_memory`: SLL-R receipt memory and Solana cNFT handoff.
 
 The current scaffold ships Raposa and SOLYD example profiles plus adapter
 metadata in `GET /.well-known/sllr-agent.json`. Real merchant integrations can
@@ -82,7 +82,7 @@ SLL-R order
 -> PAY webhook
 -> Query Order confirms PAID
 -> fulfillment or refund proof
--> Jiagon receipt memory
+-> SLL-R receipt memory
 ```
 
 Travala is the reference merchant vertical for this path. Travel bookings have
@@ -405,7 +405,7 @@ curl -X POST http://localhost:3100/orders/ord_.../claim \
 Name:
 
 ```text
-SLL-R by Jiagon
+SLL-R
 ```
 
 Short description:
@@ -418,7 +418,7 @@ What it does:
 
 ```text
 SLL-R gives merchants an installable seller agent that buyer agents can quote,
-order, and pay through. After payment or fulfillment proof, SLL-R calls Jiagon to
+order, and pay through. After payment or fulfillment proof, SLL-R calls SLL-R to
 issue verified receipt memory.
 ```
 
