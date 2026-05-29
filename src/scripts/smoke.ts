@@ -97,6 +97,8 @@ async function main() {
       openapi.openapi !== "3.1.0"
       || !openapi.paths?.["/base-plugin/coffee/prepare-payment"]
       || !openapi.paths?.["/merchants/{merchantId}/quote"]
+      || !openapi.paths?.["/shopify/merchants"]
+      || !openapi.paths?.["/webhooks/shopify/orders-paid"]
       || !openapi.paths?.["/.well-known/base-mcp-plugin.md"]
     ) {
       throw new Error(`OpenAPI schema did not expose required agent tools: ${JSON.stringify(openapi)}`);
@@ -152,6 +154,35 @@ async function main() {
       throw new Error(`Noun Coffee merchant menu did not expose catalog and menu sections: ${JSON.stringify(nounMenu)}`);
     }
 
+    const shopifyMerchants = await getJson(origin, "/shopify/merchants") as {
+      merchants?: Array<{ id?: string; storefrontMcp?: string | null; ucpCatalogMcp?: string | null }>;
+    };
+    const shopifyIds = shopifyMerchants.merchants?.map((merchant) => merchant.id) || [];
+    for (const merchantId of ["noun-coffee", "raposa-shop", "solyd"]) {
+      if (!shopifyIds.includes(merchantId)) {
+        throw new Error(`Shopify merchant ${merchantId} was not listed: ${JSON.stringify(shopifyMerchants)}`);
+      }
+    }
+    const nounShopify = shopifyMerchants.merchants?.find((merchant) => merchant.id === "noun-coffee");
+    if (!nounShopify?.storefrontMcp?.includes("/api/mcp") || !nounShopify.ucpCatalogMcp?.includes("/api/ucp/mcp")) {
+      throw new Error(`Noun Coffee Shopify MCP endpoints were not exposed: ${JSON.stringify(shopifyMerchants)}`);
+    }
+
+    const nounShopifyConnect = await getJson(origin, "/shopify/merchants/noun-coffee/connect") as {
+      shopify?: { webhookSecretEnv?: string };
+      webhookUrls?: { ordersPaid?: string };
+    };
+    if (nounShopifyConnect.shopify?.webhookSecretEnv !== "SLLR_SHOPIFY_WEBHOOK_SECRET" || !nounShopifyConnect.webhookUrls?.ordersPaid?.endsWith("/webhooks/shopify/orders-paid")) {
+      throw new Error(`Noun Coffee Shopify connect plan was not useful: ${JSON.stringify(nounShopifyConnect)}`);
+    }
+
+    const nounShopifyProducts = await getJson(origin, "/shopify/merchants/noun-coffee/products") as {
+      products?: Array<{ id?: string; productUrl?: string | null }>;
+    };
+    if (!nounShopifyProducts.products?.some((item) => item.id === "dalat-highlands" && item.productUrl?.includes("noun.coffee"))) {
+      throw new Error(`Noun Coffee Shopify products did not expose checkout handoff: ${JSON.stringify(nounShopifyProducts)}`);
+    }
+
     const baseMerchants = await getJson(origin, "/base-plugin/coffee/merchants") as {
       merchants?: Array<{ id?: string; paymentRails?: string[] }>;
     };
@@ -175,6 +206,17 @@ async function main() {
     };
     if (!nounOrder.order?.id || nounOrder.order.item?.subtotalUsd !== "32.00" || !nounOrder.checkoutHandoff?.url) {
       throw new Error(`Noun Coffee Base order was not created: ${JSON.stringify(nounOrder)}`);
+    }
+
+    const nounShopifyCart = await postJson(origin, "/shopify/merchants/noun-coffee/cart", {
+      orderId: nounOrder.order.id,
+    }) as {
+      mode?: string;
+      checkoutHandoff?: { url?: string };
+      cartMetadata?: { sllr_order_id?: string | null };
+    };
+    if (nounShopifyCart.mode !== "checkout_handoff" || !nounShopifyCart.checkoutHandoff?.url?.includes("noun.coffee") || nounShopifyCart.cartMetadata?.sllr_order_id !== nounOrder.order.id) {
+      throw new Error(`Noun Coffee Shopify cart handoff was not created: ${JSON.stringify(nounShopifyCart)}`);
     }
 
     const nounPaymentHandoff = await getJson(origin, `/base-plugin/coffee/prepare-payment?orderId=${nounOrder.order.id}`) as {
@@ -223,6 +265,20 @@ async function main() {
       || nounReceipt.order.payment.paymentId !== "base_tx_smoke"
     ) {
       throw new Error(`Noun Coffee demo payment proof did not issue receipt memory: ${JSON.stringify(nounReceipt)}`);
+    }
+
+    const shopifyOrder = await getJson(origin, `/base-plugin/coffee/order?merchantId=noun-coffee&intent=${nounIntent}&maxSpendUsd=40.00&deliverByDays=7&agentId=shopify-smoke`) as {
+      order?: { id?: string; item?: { subtotalUsd?: string } };
+    };
+    if (!shopifyOrder.order?.id) throw new Error(`Shopify smoke order was not created: ${JSON.stringify(shopifyOrder)}`);
+    const shopifyPaid = await postJson(origin, "/webhooks/shopify/orders-paid", {
+      sllr_order_id: shopifyOrder.order.id,
+      current_total_price: shopifyOrder.order.item?.subtotalUsd,
+      admin_graphql_api_id: "gid://shopify/Order/123",
+      demo: true,
+    }) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
+    if (shopifyPaid.proofLevel !== "receipt_memory_issued" || shopifyPaid.order?.payment?.provider !== "shopify" || !shopifyPaid.order.receipt?.receiptHash) {
+      throw new Error(`Shopify paid webhook proof did not issue receipt memory: ${JSON.stringify(shopifyPaid)}`);
     }
 
     const raposaTerminal = await fetch(`${origin}/raposa`).then((response) => response.text());

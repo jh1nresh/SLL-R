@@ -12,6 +12,7 @@ import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuot
 import { helioWebhook, solanaPayMerchants, solanaPayPreparePayment, solanaPayVerifyPayment } from "./adapters/solanaPay.js";
 import { baseMcpPluginSpec } from "./baseMcpPlugin.js";
 import { aiPluginManifest, sllrOpenApi } from "./openapi.js";
+import { shopifyCartHandoff, shopifyConnectPlan, shopifyMerchants, shopifyOrdersFulfilledWebhook, shopifyOrdersPaidWebhook, shopifyProducts, shopifyRefundsCreateWebhook } from "./adapters/shopify.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -33,7 +34,7 @@ function svg(response: ServerResponse, status: number, payload: string) {
   response.end(payload);
 }
 
-async function body(request: IncomingMessage) {
+async function readBody(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -42,12 +43,16 @@ async function body(request: IncomingMessage) {
     }
   }
   const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw) return {};
+  if (!raw) return { raw, json: {} as Record<string, unknown> };
   try {
-    return JSON.parse(raw) as Record<string, unknown>;
+    return { raw, json: JSON.parse(raw) as Record<string, unknown> };
   } catch {
     throw Object.assign(new Error("Invalid JSON body."), { status: 400 });
   }
+}
+
+async function body(request: IncomingMessage) {
+  return (await readBody(request)).json;
 }
 
 function originFrom(request: IncomingMessage) {
@@ -99,6 +104,17 @@ function rootDiscovery(origin: string) {
       payment: `${origin}/merchants/{merchantId}/payment`,
       receipt: `${origin}/merchants/{merchantId}/receipt`,
     },
+    shopify: {
+      merchants: `${origin}/shopify/merchants`,
+      connect: `${origin}/shopify/merchants/{merchantId}/connect`,
+      products: `${origin}/shopify/merchants/{merchantId}/products`,
+      cart: `${origin}/shopify/merchants/{merchantId}/cart`,
+      webhooks: {
+        ordersPaid: `${origin}/webhooks/shopify/orders-paid`,
+        ordersFulfilled: `${origin}/webhooks/shopify/orders-fulfilled`,
+        refundsCreate: `${origin}/webhooks/shopify/refunds-create`,
+      },
+    },
   };
 }
 
@@ -143,6 +159,22 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "GET" && url.pathname === "/merchants") {
         return json(response, 200, listMerchants());
+      }
+      if (request.method === "GET" && url.pathname === "/shopify/merchants") {
+        return json(response, 200, shopifyMerchants(originFrom(request)));
+      }
+      const shopifyMerchantRoute = url.pathname.match(/^\/shopify\/merchants\/([^/]+)(?:\/([^/]+))?$/);
+      if (shopifyMerchantRoute) {
+        const [, merchantId, action] = shopifyMerchantRoute;
+        if (request.method === "GET" && action === "connect") {
+          return json(response, 200, shopifyConnectPlan(merchantId, originFrom(request)));
+        }
+        if (request.method === "GET" && action === "products") {
+          return json(response, 200, shopifyProducts(merchantId));
+        }
+        if (request.method === "POST" && action === "cart") {
+          return json(response, 200, shopifyCartHandoff(merchantId, await body(request), originFrom(request)));
+        }
       }
       const merchantRoute = url.pathname.match(/^\/merchants\/([^/]+)(?:\/([^/]+))?$/);
       if (merchantRoute) {
@@ -218,6 +250,30 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           proofLevel: order.proofLevel,
           order,
         });
+      }
+      if (request.method === "POST" && url.pathname === "/webhooks/shopify/orders-paid") {
+        const parsed = await readBody(request);
+        const order = await shopifyOrdersPaidWebhook(request.headers, parsed.raw, parsed.json);
+        return json(response, 200, {
+          product: "SLL-R Shopify paid proof adapter",
+          status: order.status,
+          proofLevel: order.proofLevel,
+          order,
+        });
+      }
+      if (request.method === "POST" && url.pathname === "/webhooks/shopify/orders-fulfilled") {
+        const parsed = await readBody(request);
+        const order = await shopifyOrdersFulfilledWebhook(request.headers, parsed.raw, parsed.json);
+        return json(response, 200, {
+          product: "SLL-R Shopify fulfillment proof adapter",
+          status: order.status,
+          proofLevel: order.proofLevel,
+          order,
+        });
+      }
+      if (request.method === "POST" && url.pathname === "/webhooks/shopify/refunds-create") {
+        const parsed = await readBody(request);
+        return json(response, 202, shopifyRefundsCreateWebhook(request.headers, parsed.raw, parsed.json));
       }
       if (request.method === "GET" && url.pathname === "/base-plugin/coffee/record-demo-payment") {
         const orderId = url.searchParams.get("orderId") || "";

@@ -38,6 +38,7 @@ export function sllrOpenApi(origin: string) {
     tags: [
       { name: "Discovery", description: "Agent-readable merchant and manifest discovery." },
       { name: "Merchant Runtime", description: "Merchant-scoped quote, order, payment, and receipt tools." },
+      { name: "Shopify", description: "Shopify Storefront MCP, checkout handoff, and webhook proof tools." },
       { name: "Base MCP", description: "GET-only Noun Coffee flow that prepares Base USDC calldata." },
       { name: "Solana", description: "Solana Pay and Helio handoff tools." },
     ],
@@ -198,6 +199,97 @@ export function sllrOpenApi(origin: string) {
             },
           },
           responses: { "200": jsonResponse("Receipt result"), ...errorResponses() },
+        },
+      },
+      "/shopify/merchants": {
+        get: {
+          tags: ["Shopify"],
+          operationId: "listShopifyMerchants",
+          summary: "List Shopify-capable merchants and Storefront MCP endpoints.",
+          responses: { "200": jsonResponse("Shopify merchants") },
+        },
+      },
+      "/shopify/merchants/{merchantId}/connect": {
+        get: {
+          tags: ["Shopify"],
+          operationId: "getShopifyConnectPlan",
+          summary: "Return the merchant setup checklist for Shopify MCP, checkout, and webhooks.",
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          responses: { "200": jsonResponse("Shopify connect plan"), ...errorResponses() },
+        },
+      },
+      "/shopify/merchants/{merchantId}/products": {
+        get: {
+          tags: ["Shopify"],
+          operationId: "listShopifyProducts",
+          summary: "Return product handoff data for a Shopify-capable merchant.",
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          responses: { "200": jsonResponse("Shopify product handoff"), ...errorResponses() },
+        },
+      },
+      "/shopify/merchants/{merchantId}/cart": {
+        post: {
+          tags: ["Shopify"],
+          operationId: "createShopifyCartHandoff",
+          summary: "Create a Shopify checkout handoff for an SLL-R order or item.",
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ShopifyCartBody" },
+              },
+            },
+          },
+          responses: { "200": jsonResponse("Shopify cart handoff"), ...errorResponses() },
+        },
+      },
+      "/webhooks/shopify/orders-paid": {
+        post: {
+          tags: ["Shopify"],
+          operationId: "shopifyOrdersPaidWebhook",
+          summary: "Accept a verified Shopify paid-order webhook and issue receipt memory.",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { type: "object" },
+              },
+            },
+          },
+          responses: { "200": jsonResponse("Shopify paid proof result"), ...errorResponses() },
+        },
+      },
+      "/webhooks/shopify/orders-fulfilled": {
+        post: {
+          tags: ["Shopify"],
+          operationId: "shopifyOrdersFulfilledWebhook",
+          summary: "Accept a verified Shopify fulfillment webhook and issue receipt memory.",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { type: "object" },
+              },
+            },
+          },
+          responses: { "200": jsonResponse("Shopify fulfillment proof result"), ...errorResponses() },
+        },
+      },
+      "/webhooks/shopify/refunds-create": {
+        post: {
+          tags: ["Shopify"],
+          operationId: "shopifyRefundsCreateWebhook",
+          summary: "Accept a verified Shopify refund webhook for future receipt reversal handling.",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { type: "object" },
+              },
+            },
+          },
+          responses: { "202": jsonResponse("Shopify refund proof accepted"), ...errorResponses() },
         },
       },
       "/base-plugin/coffee/merchants": {
@@ -411,6 +503,17 @@ export function sllrOpenApi(origin: string) {
             demo: { type: "boolean" },
             verificationToken: { type: "string" },
           },
+        },
+        ShopifyCartBody: {
+          type: "object",
+          properties: {
+            orderId: { type: "string" },
+            itemId: { type: "string" },
+          },
+          anyOf: [
+            { required: ["orderId"] },
+            { required: ["itemId"] },
+          ],
         },
         SolanaPaymentProofBody: {
           type: "object",

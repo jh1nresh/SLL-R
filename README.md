@@ -38,6 +38,8 @@ Target users:
 - Raposa Coffee: pickup promise, event queue, and online coffee product orders.
 - SOLYD: online product quotes, checkout handoff, and payment-backed receipts.
 - Noun Coffee: Base/USDC coffee storefront quote and checkout handoff.
+- Shopify merchants: Noun Coffee, Raposa Shop, and SOLYD can expose Storefront
+  MCP / cart handoff / paid-order webhook proof without replacing checkout.
 - Raposa / SOLYD Solana rail: Solana Pay URL or Helio checkout handoff with
   payment proof promoted into Jiagon receipt memory.
 - AgentShack builders: reusable seller-agent template for their own merchants.
@@ -147,6 +149,13 @@ POST /merchants/{merchantId}/orders
 GET  /merchants/{merchantId}/orders
 POST /merchants/{merchantId}/payment
 POST /merchants/{merchantId}/receipt
+GET  /shopify/merchants
+GET  /shopify/merchants/{merchantId}/connect
+GET  /shopify/merchants/{merchantId}/products
+POST /shopify/merchants/{merchantId}/cart
+POST /webhooks/shopify/orders-paid
+POST /webhooks/shopify/orders-fulfilled
+POST /webhooks/shopify/refunds-create
 GET  /pilot-kit?merchantId=raposa-coffee
 GET  /base-plugin/coffee/merchants
 GET  /base-plugin/coffee/quote?merchantId=noun-coffee&intent=...
@@ -228,6 +237,29 @@ curl "http://localhost:3100/base-plugin/coffee/order?merchantId=noun-coffee&inte
 `GET /base-plugin/coffee/prepare-payment` returns a checkout handoff by default.
 For a Base MCP demo transaction, set `SLLR_BASE_COFFEE_RECIPIENT` to a demo EVM
 address; SLL-R will return a Base USDC transfer call to that configured address.
+
+## Example Shopify Adapter
+
+Shopify is the preferred live merchant integration path for Noun Coffee, Raposa,
+and SOLYD. SLL-R should use Shopify Storefront MCP / Storefront API for catalog
+and cart, then Shopify webhooks for paid and fulfilled proof.
+
+```bash
+curl "http://localhost:3100/shopify/merchants"
+```
+
+```bash
+curl "http://localhost:3100/shopify/merchants/noun-coffee/connect"
+```
+
+```bash
+curl -X POST http://localhost:3100/shopify/merchants/noun-coffee/cart \
+  -H "content-type: application/json" \
+  -d '{"itemId":"dalat-highlands"}'
+```
+
+Production webhook proof requires `SLLR_SHOPIFY_WEBHOOK_SECRET` and the raw
+Shopify request body. Local demos can use `demo=true`; production should not.
 
 ## Example Solana Pay / Helio Rail
 
