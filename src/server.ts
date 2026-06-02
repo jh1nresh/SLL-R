@@ -8,6 +8,8 @@ import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
 import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder } from "./core/merchantApi.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
+import { merchantTerminalPage, standaloneAgentPage } from "./ui/agenticPos.js";
+import { standaloneAgentMessage } from "./core/standaloneAgent.js";
 import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuote, baseCoffeeRecordDemoPayment, baseCoffeeStatus } from "./adapters/baseCoffeePlugin.js";
 import { helioWebhook, solanaPayMerchants, solanaPayPreparePayment, solanaPayVerifyPayment } from "./adapters/solanaPay.js";
 import { baseMcpPluginSpec } from "./baseMcpPlugin.js";
@@ -98,6 +100,9 @@ function rootDiscovery(origin: string) {
     },
     merchantRuntime: {
       merchants: `${origin}/merchants`,
+      standaloneAgent: `${origin}/agent/{merchantId}`,
+      standaloneAgentMessage: `${origin}/agent/{merchantId}/message`,
+      merchantTerminal: `${origin}/terminal/{merchantId}`,
       menu: `${origin}/merchants/{merchantId}/menu`,
       quote: `${origin}/merchants/{merchantId}/quote`,
       orders: `${origin}/merchants/{merchantId}/orders`,
@@ -159,6 +164,22 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "GET" && url.pathname === "/merchants") {
         return json(response, 200, listMerchants());
+      }
+      const standaloneAgentRoute = url.pathname.match(/^\/agent\/([^/]+)(?:\/([^/]+))?$/);
+      if (standaloneAgentRoute) {
+        const [, merchantId, action] = standaloneAgentRoute;
+        if (request.method === "GET" && !action) {
+          const page = standaloneAgentPage(merchantId, originFrom(request));
+          return page ? html(response, 200, page) : json(response, 404, { error: `Unknown merchant: ${merchantId}` });
+        }
+        if (request.method === "POST" && action === "message") {
+          return json(response, 200, standaloneAgentMessage(merchantId, await body(request), originFrom(request)));
+        }
+      }
+      const terminalRoute = url.pathname.match(/^\/terminal\/([^/]+)$/);
+      if (terminalRoute && request.method === "GET") {
+        const page = merchantTerminalPage(terminalRoute[1], originFrom(request));
+        return page ? html(response, 200, page) : json(response, 404, { error: `Unknown merchant: ${terminalRoute[1]}` });
       }
       if (request.method === "GET" && url.pathname === "/shopify/merchants") {
         return json(response, 200, shopifyMerchants(originFrom(request)));

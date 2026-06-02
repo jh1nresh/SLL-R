@@ -25,7 +25,7 @@ function orderReference(orderId: string) {
 }
 
 function solanaAddressEnv() {
-  const value = (process.env.SLLR_SOLANA_PAY_RECIPIENT || process.env.JIAGON_SOLANA_PAY_RECIPIENT || "").trim();
+  const value = (process.env.SLLR_SOLANA_PAY_RECIPIENT || "").trim();
   if (!value) return null;
   if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)) {
     throw Object.assign(new Error("SLLR_SOLANA_PAY_RECIPIENT must be a Solana base58 address."), { status: 500 });
@@ -34,7 +34,7 @@ function solanaAddressEnv() {
 }
 
 function splTokenEnv() {
-  const value = (process.env.SLLR_SOLANA_PAY_SPL_TOKEN || process.env.JIAGON_SOLANA_PAY_SPL_TOKEN || "").trim();
+  const value = (process.env.SLLR_SOLANA_PAY_SPL_TOKEN || "").trim();
   if (!value) return null;
   if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)) {
     throw Object.assign(new Error("SLLR_SOLANA_PAY_SPL_TOKEN must be a Solana base58 mint address."), { status: 500 });

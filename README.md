@@ -56,6 +56,20 @@ MVP success means:
 - Raposa / SOLYD can understand what they need to configure in less than one
   meeting.
 
+The main product surface is now the standalone agentic POS flow:
+
+```text
+customer QR / web agent
+-> natural-language intent
+-> SLL-R quote
+-> SLL-R order
+-> existing checkout or staff fulfillment
+-> SLL-R receipt memory and loyalty-ready history
+```
+
+MCP, OpenAPI, and ChatGPT Actions are distribution surfaces. They are not the
+product core.
+
 ## Adapter Contract
 
 SLL-R exposes a small seller-agent runtime and keeps POS / checkout systems as
@@ -141,6 +155,9 @@ GET  /openapi.json
 GET  /raposa
 GET  /raposa/order
 GET  /capabilities?merchantId=raposa-coffee
+GET  /agent/{merchantId}
+POST /agent/{merchantId}/message
+GET  /terminal/{merchantId}
 GET  /merchants
 GET  /merchants/{merchantId}
 GET  /merchants/{merchantId}/menu
@@ -196,6 +213,42 @@ http://localhost:3100/raposa/order
 The Raposa pilot keeps payment at the counter. SLL-R captures the order,
 estimates the pickup promise from the active queue, lets staff accept or reject
 it, marks the drink ready, and issues receipt memory after the customer claim.
+
+## Standalone Agentic POS Pages
+
+Customer ordering agent:
+
+```text
+http://localhost:3100/agent/noun-coffee
+http://localhost:3100/agent/raposa-coffee
+```
+
+Merchant terminal:
+
+```text
+http://localhost:3100/terminal/noun-coffee
+http://localhost:3100/terminal/raposa-coffee
+```
+
+The first standalone agent uses deterministic intent parsing instead of an LLM.
+It supports simple demo intents such as:
+
+```text
+I want Dalat Highlands coffee beans under $40.
+I need an iced latte within 10 minutes.
+```
+
+The API behind the page is:
+
+```bash
+curl -X POST http://localhost:3100/agent/noun-coffee/message \
+  -H "content-type: application/json" \
+  -d '{
+    "message": "I want Dalat Highlands coffee beans under $40."
+  }'
+```
+
+Send `confirm=true` to create the order after reviewing the quote.
 
 ## Example Quote
 
@@ -418,8 +471,8 @@ What it does:
 
 ```text
 SLL-R gives merchants an installable seller agent that buyer agents can quote,
-order, and pay through. After payment or fulfillment proof, SLL-R calls SLL-R to
-issue verified receipt memory.
+order, and pay through. After payment or fulfillment proof, SLL-R issues
+verified receipt memory.
 ```
 
 ## Pilot Docs

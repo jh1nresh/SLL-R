@@ -80,6 +80,9 @@ export function sllrManifest(origin: string) {
       baseMcpPluginSpec: `${origin}/.well-known/base-mcp-plugin.md`,
       openapi: `${origin}/openapi.json`,
       capabilities: `${origin}/capabilities`,
+      standaloneAgent: `${origin}/agent/{merchantId}`,
+      standaloneAgentMessage: `${origin}/agent/{merchantId}/message`,
+      merchantTerminal: `${origin}/terminal/{merchantId}`,
       merchants: `${origin}/merchants`,
       merchantMenu: `${origin}/merchants/{merchantId}/menu`,
       merchantQuote: `${origin}/merchants/{merchantId}/quote`,
@@ -102,6 +105,9 @@ export function sllrManifest(origin: string) {
     },
     capabilities: [
       "merchant catalog discovery",
+      "hosted customer ordering agent",
+      "hosted merchant terminal",
+      "pickup promise management",
       "quote-first order negotiation",
       "checkout handoff",
       "payment proof intake",
@@ -113,6 +119,24 @@ export function sllrManifest(origin: string) {
       "Shopify paid order webhook proof",
     ],
     tools: [
+      {
+        name: "open_standalone_agent",
+        method: "GET",
+        path: "/agent/{merchantId}",
+        description: "Open the hosted SLL-R customer ordering agent for a merchant.",
+      },
+      {
+        name: "message_standalone_agent",
+        method: "POST",
+        path: "/agent/{merchantId}/message",
+        description: "Quote or create an order from customer natural-language intent.",
+      },
+      {
+        name: "open_merchant_terminal",
+        method: "GET",
+        path: "/terminal/{merchantId}",
+        description: "Open the hosted SLL-R merchant order terminal.",
+      },
       {
         name: "list_merchants",
         method: "GET",

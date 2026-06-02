@@ -96,14 +96,14 @@ const adapters: SellerAgentAdapter[] = [
     id: "sllr-receipts",
     role: "receipt_memory",
     label: "SLL-R receipt memory handoff",
-    status: process.env.JIAGON_RECEIPT_API_URL ? "ready" : "stubbed",
+    status: process.env.SLLR_RECEIPT_API_URL ? "ready" : "stubbed",
     supportedRails: ["counter", "telegram_staff", "shopify", "moonpay", "helio", "stripe", "solana_pay", "binance_pay"],
     responsibilities: [
       "issue portable receipt memory",
       "prepare Solana cNFT mint metadata",
       "return claim URLs for buyer agents and wallets",
     ],
-    requiredEnv: ["JIAGON_RECEIPT_API_URL", "JIAGON_RECEIPT_API_KEY"],
+    requiredEnv: ["SLLR_RECEIPT_API_URL", "SLLR_RECEIPT_API_KEY"],
   },
 ];
 

@@ -8,7 +8,8 @@ function publicOrigin() {
 }
 
 export async function issueSllrReceipt(order: SellerOrder): Promise<ReceiptHandoff> {
-  const receiptApiUrl = (process.env.JIAGON_RECEIPT_API_URL || "").trim();
+  const receiptApiUrl = (process.env.SLLR_RECEIPT_API_URL || "").trim();
+  const receiptApiKey = (process.env.SLLR_RECEIPT_API_KEY || "").trim();
   const receiptHash = createHash("sha256")
     .update(`${order.id}:${order.merchantId}:${order.item.subtotalUsd}:${order.payment.paymentId || "manual"}:${order.promise.promisedReadyAt || ""}:${order.promise.readyAt || ""}:${order.promise.claimedAt || ""}`)
     .digest("hex");
@@ -27,7 +28,7 @@ export async function issueSllrReceipt(order: SellerOrder): Promise<ReceiptHando
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...(process.env.JIAGON_RECEIPT_API_KEY ? { authorization: `Bearer ${process.env.JIAGON_RECEIPT_API_KEY}` } : {}),
+      ...(receiptApiKey ? { authorization: `Bearer ${receiptApiKey}` } : {}),
     },
     body: JSON.stringify({
       merchantId: order.merchantId,

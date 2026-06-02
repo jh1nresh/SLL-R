@@ -96,6 +96,9 @@ async function main() {
     if (
       openapi.openapi !== "3.1.0"
       || !openapi.paths?.["/base-plugin/coffee/prepare-payment"]
+      || !openapi.paths?.["/agent/{merchantId}"]
+      || !openapi.paths?.["/agent/{merchantId}/message"]
+      || !openapi.paths?.["/terminal/{merchantId}"]
       || !openapi.paths?.["/merchants/{merchantId}/quote"]
       || !openapi.paths?.["/shopify/merchants"]
       || !openapi.paths?.["/webhooks/shopify/orders-paid"]
@@ -152,6 +155,40 @@ async function main() {
     };
     if (!nounMenu.catalog?.some((item) => item.id === "dalat-highlands") || !nounMenu.menuSections?.length) {
       throw new Error(`Noun Coffee merchant menu did not expose catalog and menu sections: ${JSON.stringify(nounMenu)}`);
+    }
+
+    const nounAgentPage = await fetch(`${origin}/agent/noun-coffee`).then((response) => response.text());
+    if (!nounAgentPage.includes("Noun Coffee AI Ordering Agent") || !nounAgentPage.includes("/terminal/noun-coffee")) {
+      throw new Error("Noun Coffee standalone agent page did not render.");
+    }
+
+    const nounAgentQuote = await postJson(origin, "/agent/noun-coffee/message", {
+      message: "I want Dalat Highlands coffee beans under $40.",
+    }) as {
+      mode?: string;
+      quote?: { feasible?: boolean; item?: { id?: string } };
+      checkoutHandoff?: { url?: string };
+    };
+    if (nounAgentQuote.mode !== "quote" || !nounAgentQuote.quote?.feasible || nounAgentQuote.quote.item?.id !== "dalat-highlands" || !nounAgentQuote.checkoutHandoff?.url?.includes("noun.coffee")) {
+      throw new Error(`Noun Coffee standalone agent quote failed: ${JSON.stringify(nounAgentQuote)}`);
+    }
+
+    const nounAgentOrder = await postJson(origin, "/agent/noun-coffee/message", {
+      message: "I want Dalat Highlands coffee beans under $40.",
+      confirm: true,
+      customerLabel: "smoke customer",
+    }) as {
+      mode?: string;
+      order?: { id?: string; merchantId?: string; item?: { id?: string } };
+      terminalUrl?: string;
+    };
+    if (nounAgentOrder.mode !== "order_created" || nounAgentOrder.order?.merchantId !== "noun-coffee" || nounAgentOrder.order.item?.id !== "dalat-highlands" || !nounAgentOrder.terminalUrl?.endsWith("/terminal/noun-coffee")) {
+      throw new Error(`Noun Coffee standalone agent order failed: ${JSON.stringify(nounAgentOrder)}`);
+    }
+
+    const nounTerminalPage = await fetch(`${origin}/terminal/noun-coffee`).then((response) => response.text());
+    if (!nounTerminalPage.includes("Noun Coffee Merchant Terminal") || !nounTerminalPage.includes("/agent/noun-coffee")) {
+      throw new Error("Noun Coffee merchant terminal page did not render.");
     }
 
     const shopifyMerchants = await getJson(origin, "/shopify/merchants") as {

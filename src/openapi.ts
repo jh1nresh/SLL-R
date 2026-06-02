@@ -37,6 +37,7 @@ export function sllrOpenApi(origin: string) {
     ],
     tags: [
       { name: "Discovery", description: "Agent-readable merchant and manifest discovery." },
+      { name: "Standalone Agent", description: "Hosted customer agent and merchant terminal pages." },
       { name: "Merchant Runtime", description: "Merchant-scoped quote, order, payment, and receipt tools." },
       { name: "Shopify", description: "Shopify Storefront MCP, checkout handoff, and webhook proof tools." },
       { name: "Base MCP", description: "GET-only Noun Coffee flow that prepares Base USDC calldata." },
@@ -98,6 +99,61 @@ export function sllrOpenApi(origin: string) {
           operationId: "listMerchants",
           summary: "List configured SLL-R merchants.",
           responses: { "200": jsonResponse("Merchant list") },
+        },
+      },
+      "/agent/{merchantId}": {
+        get: {
+          tags: ["Standalone Agent"],
+          operationId: "openStandaloneAgent",
+          summary: "Open the hosted SLL-R customer ordering agent.",
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          responses: {
+            "200": {
+              description: "HTML ordering agent",
+              content: {
+                "text/html": {
+                  schema: { type: "string" },
+                },
+              },
+            },
+            ...errorResponses(),
+          },
+        },
+      },
+      "/agent/{merchantId}/message": {
+        post: {
+          tags: ["Standalone Agent"],
+          operationId: "messageStandaloneAgent",
+          summary: "Quote or create an order from customer intent.",
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/StandaloneAgentMessageBody" },
+              },
+            },
+          },
+          responses: { "200": jsonResponse("Standalone agent response"), ...errorResponses() },
+        },
+      },
+      "/terminal/{merchantId}": {
+        get: {
+          tags: ["Standalone Agent"],
+          operationId: "openMerchantTerminal",
+          summary: "Open the hosted SLL-R merchant order terminal.",
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          responses: {
+            "200": {
+              description: "HTML merchant terminal",
+              content: {
+                "text/html": {
+                  schema: { type: "string" },
+                },
+              },
+            },
+            ...errorResponses(),
+          },
         },
       },
       "/merchants/{merchantId}": {
@@ -489,6 +545,20 @@ export function sllrOpenApi(origin: string) {
               },
             },
           ],
+        },
+        StandaloneAgentMessageBody: {
+          type: "object",
+          required: ["message"],
+          properties: {
+            message: { type: "string" },
+            confirm: { type: "boolean" },
+            maxSpendUsd: { type: "string" },
+            deadlineMinutes: { type: "integer", minimum: 1 },
+            deliverByDays: { type: "integer", minimum: 1 },
+            quantity: { type: "integer", minimum: 1 },
+            customerLabel: { type: "string" },
+            paymentMode: { type: "string", enum: ["counter", "checkout", "crypto"] },
+          },
         },
         PaymentProofBody: {
           type: "object",
