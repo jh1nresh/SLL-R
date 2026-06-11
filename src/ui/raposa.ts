@@ -180,7 +180,7 @@ export function raposaTerminalPage(origin: string) {
   </section>
   <aside class="panel stack">
     <h2>Pilot Setup</h2>
-    <div class="notice">Raposa keeps counter payment. SLL-R manages the pickup promise and issues receipt memory after customer claim.</div>
+    <div class="notice">Raposa keeps counter payment by default. SLL-R manages the pickup promise, payment/claim proof, and receipt memory after staff confirmation.</div>
     <div class="stack">
       <p><strong>Customer QR URL</strong></p>
       <pre>${origin}/raposa/order</pre>
@@ -242,7 +242,7 @@ function renderOrder(order) {
       </div>
       <div class="row">
         <span class="money">$\${escapeText(order.item.subtotalUsd)}</span>
-        <span class="muted">Payment: \${escapeText(order.payment.mode)}</span>
+        <span class="muted">Payment: \${escapeText(order.payment.mode)} / \${escapeText(order.payment.status)}</span>
         <span class="muted">Proof: \${escapeText(order.proofLevel)}</span>
       </div>
       <div class="row">
@@ -257,7 +257,7 @@ function renderOrder(order) {
         <button \${canAccept ? "" : "disabled"} onclick="action('\${order.id}', 'accept', 'Accepted from Raposa terminal.')">Accept</button>
         <button class="danger" \${canReject ? "" : "disabled"} onclick="action('\${order.id}', 'reject', 'Rejected from Raposa terminal.')">Reject</button>
         <button class="secondary" \${canReady ? "" : "disabled"} onclick="action('\${order.id}', 'ready', 'Drink is ready for pickup.')">Ready</button>
-        <button class="secondary" \${canClaim ? "" : "disabled"} onclick="action('\${order.id}', 'claim', 'Paid at counter and claimed by customer.')">Claimed</button>
+        <button class="secondary" \${canClaim ? "" : "disabled"} onclick="action('\${order.id}', 'claim', 'Paid at counter and claimed by customer.')">Paid + Claimed</button>
       </div>
     </article>
   \`;

@@ -37,6 +37,22 @@ Initial config:
 - staff workflow: Telegram group or hosted merchant terminal
 - promise workflow: accept, ready, claimed, then receipt memory
 
+Day-one demo flow:
+
+```text
+1. Customer or buyer agent opens /raposa/order or /agent/raposa-coffee.
+2. Customer asks for a drink with a time constraint, such as "iced latte in 10 minutes."
+3. SLL-R quotes the item, price, and pickup promise from the active queue.
+4. Customer creates the order and receives a pickup code.
+5. Staff opens /raposa or /terminal/raposa-coffee.
+6. Staff accepts the order, marks it ready, then taps Paid + Claimed after counter payment.
+7. SLL-R issues receipt memory from the claim / fulfillment proof.
+```
+
+The first Raposa pilot should not require a POS migration. The value to prove is
+that SLL-R can reduce wait-time uncertainty and staff interruptions while
+preserving the existing counter workflow.
+
 ## SOLYD Pilot
 
 Best first wedge:

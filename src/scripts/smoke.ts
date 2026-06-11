@@ -135,6 +135,55 @@ async function main() {
       throw new Error(`Raposa pilot kit was not generated: ${JSON.stringify(raposaKit)}`);
     }
 
+    const raposaMenu = await getJson(origin, "/merchants/raposa-coffee/menu") as {
+      catalog?: Array<{ id?: string; prepMinutes?: number }>;
+      menuSections?: Array<{ id?: string; items?: Array<{ id?: string }> }>;
+    };
+    if (
+      !raposaMenu.catalog?.some((item) => item.id === "iced-latte" && item.prepMinutes === 7)
+      || !raposaMenu.catalog?.some((item) => item.id === "cold-brew" && item.prepMinutes === 3)
+      || !raposaMenu.menuSections?.some((section) => section.id === "raposa-pickup-drinks" && section.items?.some((item) => item.id === "iced-latte"))
+    ) {
+      throw new Error(`Raposa pilot menu was not useful for pickup promises: ${JSON.stringify(raposaMenu)}`);
+    }
+
+    const raposaOrder = await postJson(origin, "/merchants/raposa-coffee/orders", {
+      userIntent: "I need an iced latte in 10 minutes.",
+      deadlineMinutes: 10,
+      maxSpendUsd: "10.00",
+      customerLabel: "Raposa smoke customer",
+      paymentMode: "counter",
+    }) as {
+      order?: { id?: string; status?: string; item?: { id?: string }; promise?: { estimatedWaitMinutes?: number | null; promisedReadyAt?: string | null } };
+    };
+    if (raposaOrder.order?.status !== "pending_payment" || raposaOrder.order.item?.id !== "iced-latte" || !raposaOrder.order.promise?.promisedReadyAt) {
+      throw new Error(`Raposa order did not include a pickup promise: ${JSON.stringify(raposaOrder)}`);
+    }
+    const raposaAccepted = await postJson(origin, `/orders/${raposaOrder.order.id}/accept`, {
+      merchantId: "raposa-coffee",
+      actor: "smoke-staff",
+      note: "Accepted during smoke test.",
+    }) as { order?: { status?: string } };
+    if (raposaAccepted.order?.status !== "accepted") {
+      throw new Error(`Raposa accept failed: ${JSON.stringify(raposaAccepted)}`);
+    }
+    const raposaReady = await postJson(origin, `/orders/${raposaOrder.order.id}/ready`, {
+      merchantId: "raposa-coffee",
+      actor: "smoke-staff",
+      note: "Ready during smoke test.",
+    }) as { order?: { status?: string; promise?: { readyAt?: string | null } } };
+    if (raposaReady.order?.status !== "ready" || !raposaReady.order.promise?.readyAt) {
+      throw new Error(`Raposa ready failed: ${JSON.stringify(raposaReady)}`);
+    }
+    const raposaClaimed = await postJson(origin, `/orders/${raposaOrder.order.id}/claim`, {
+      merchantId: "raposa-coffee",
+      actor: "smoke-staff",
+      note: "Paid at counter and claimed during smoke test.",
+    }) as { order?: { status?: string; proofLevel?: string; receipt?: { receiptHash?: string } } };
+    if (raposaClaimed.order?.status !== "receipt_issued" || raposaClaimed.order.proofLevel !== "receipt_memory_issued" || !raposaClaimed.order.receipt?.receiptHash) {
+      throw new Error(`Raposa claim did not issue receipt memory: ${JSON.stringify(raposaClaimed)}`);
+    }
+
     const solydKit = await fetch(`${origin}/pilot-kit?merchantId=solyd`).then((response) => response.json()) as {
       merchant?: { id?: string };
       pilot?: { buyerPrompt?: string };

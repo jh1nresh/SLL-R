@@ -265,9 +265,36 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
     paymentRails: ["counter", "telegram_staff", "solana_pay"],
     humanApproval: { requiredAboveUsd: "25.00" },
     catalog: [
-      { id: "espresso", name: "Espresso", amountUsd: "4.50", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 4, tags: ["coffee"] },
-      { id: "iced-latte", name: "Iced latte", amountUsd: "6.50", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 7, tags: ["coffee", "latte", "iced"] },
-      { id: "croissant", name: "Butter croissant", amountUsd: "5.25", fulfillment: ["pickup"], productionClass: "pastry", prepMinutes: 3, tags: ["pastry"] },
+      { id: "espresso", name: "Espresso", amountUsd: "4.50", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 4, inventory: 40, tags: ["coffee", "espresso", "fast"] },
+      { id: "cortado", name: "Cortado", amountUsd: "5.50", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 6, inventory: 30, tags: ["coffee", "espresso", "milk", "small"] },
+      { id: "iced-latte", name: "Iced latte", amountUsd: "6.50", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 7, inventory: 35, tags: ["coffee", "latte", "iced", "milk"] },
+      { id: "cold-brew", name: "Cold brew", amountUsd: "5.75", fulfillment: ["pickup"], productionClass: "cold", prepMinutes: 3, inventory: 25, tags: ["coffee", "cold", "fast", "iced"] },
+      { id: "matcha-latte", name: "Matcha latte", amountUsd: "7.00", fulfillment: ["pickup"], productionClass: "cold", prepMinutes: 6, inventory: 20, tags: ["matcha", "latte", "iced", "milk"] },
+      { id: "croissant", name: "Butter croissant", amountUsd: "5.25", fulfillment: ["pickup"], productionClass: "pastry", prepMinutes: 3, inventory: 18, tags: ["pastry", "fast"] },
+    ],
+    menuSections: [
+      {
+        id: "raposa-pickup-drinks",
+        name: "Pickup drinks",
+        service: "in_store",
+        source: "SLL-R Raposa pilot menu",
+        items: [
+          { id: "espresso", name: "Espresso", section: "Pickup drinks", description: "Fast espresso order for pickup.", priceStatus: "listed", amountUsd: "4.50", tags: ["coffee", "espresso", "fast"] },
+          { id: "cortado", name: "Cortado", section: "Pickup drinks", description: "Espresso with steamed milk.", priceStatus: "listed", amountUsd: "5.50", tags: ["coffee", "espresso", "milk"] },
+          { id: "iced-latte", name: "Iced latte", section: "Pickup drinks", description: "Espresso and milk over ice. Main pilot item for pickup promise demos.", priceStatus: "listed", amountUsd: "6.50", tags: ["coffee", "latte", "iced"] },
+          { id: "cold-brew", name: "Cold brew", section: "Pickup drinks", description: "Fast cold coffee option when espresso queue is busy.", priceStatus: "listed", amountUsd: "5.75", tags: ["coffee", "cold", "fast"] },
+          { id: "matcha-latte", name: "Matcha latte", section: "Pickup drinks", description: "Matcha latte for non-coffee orders.", priceStatus: "listed", amountUsd: "7.00", tags: ["matcha", "iced"] },
+        ],
+      },
+      {
+        id: "raposa-pickup-pastries",
+        name: "Pickup pastries",
+        service: "in_store",
+        source: "SLL-R Raposa pilot menu",
+        items: [
+          { id: "croissant", name: "Butter croissant", section: "Pickup pastries", description: "Quick pastry add-on.", priceStatus: "listed", amountUsd: "5.25", tags: ["pastry", "fast"] },
+        ],
+      },
     ],
   },
   "raposa-shop": {
