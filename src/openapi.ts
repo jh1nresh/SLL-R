@@ -240,6 +240,23 @@ export function sllrOpenApi(origin: string) {
           responses: { "200": jsonResponse("Payment proof result"), ...errorResponses() },
         },
       },
+      "/merchants/{merchantId}/payment-options": {
+        post: {
+          tags: ["Merchant Runtime"],
+          operationId: "prepareMerchantPaymentOptions",
+          summary: "Return normal checkout and web3 payment options for an order.",
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/PaymentOptionsBody" },
+              },
+            },
+          },
+          responses: { "200": jsonResponse("Payment options"), ...errorResponses() },
+        },
+      },
       "/merchants/{merchantId}/receipt": {
         post: {
           tags: ["Merchant Runtime"],
@@ -572,6 +589,14 @@ export function sllrOpenApi(origin: string) {
             reference: { type: "string" },
             demo: { type: "boolean" },
             verificationToken: { type: "string" },
+          },
+        },
+        PaymentOptionsBody: {
+          type: "object",
+          required: ["orderId"],
+          properties: {
+            orderId: { type: "string" },
+            payer: { type: "string", description: "Optional payer wallet or account address for rails that need it." },
           },
         },
         ShopifyCartBody: {

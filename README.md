@@ -165,6 +165,7 @@ GET  /merchants/{merchantId}/menu
 POST /merchants/{merchantId}/quote
 POST /merchants/{merchantId}/orders
 GET  /merchants/{merchantId}/orders
+POST /merchants/{merchantId}/payment-options
 POST /merchants/{merchantId}/payment
 POST /merchants/{merchantId}/receipt
 GET  /shopify/merchants

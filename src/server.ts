@@ -7,6 +7,7 @@ import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
 import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder } from "./core/merchantApi.js";
+import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { merchantTerminalPage, standaloneAgentPage } from "./ui/agenticPos.js";
 import { standaloneAgentMessage } from "./core/standaloneAgent.js";
@@ -109,6 +110,7 @@ function rootDiscovery(origin: string) {
       quote: `${origin}/merchants/{merchantId}/quote`,
       orders: `${origin}/merchants/{merchantId}/orders`,
       payment: `${origin}/merchants/{merchantId}/payment`,
+      paymentOptions: `${origin}/merchants/{merchantId}/payment-options`,
       receipt: `${origin}/merchants/{merchantId}/receipt`,
     },
     shopify: {
@@ -222,6 +224,9 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         }
         if (request.method === "POST" && action === "payment") {
           return json(response, 200, await attachMerchantPayment(merchantId, request.headers, await body(request)));
+        }
+        if (request.method === "POST" && action === "payment-options") {
+          return json(response, 200, merchantPaymentOptions(merchantId, await body(request), originFrom(request)));
         }
         if (request.method === "POST" && action === "receipt") {
           return json(response, 200, await issueMerchantReceipt(merchantId, await body(request)));

@@ -88,6 +88,7 @@ export function sllrManifest(origin: string) {
       merchantMenu: `${origin}/merchants/{merchantId}/menu`,
       merchantQuote: `${origin}/merchants/{merchantId}/quote`,
       merchantOrders: `${origin}/merchants/{merchantId}/orders`,
+      merchantPaymentOptions: `${origin}/merchants/{merchantId}/payment-options`,
       merchantPayment: `${origin}/merchants/{merchantId}/payment`,
       merchantReceipt: `${origin}/merchants/{merchantId}/receipt`,
       shopifyMerchants: `${origin}/shopify/merchants`,
@@ -162,6 +163,12 @@ export function sllrManifest(origin: string) {
         method: "POST",
         path: "/merchants/{merchantId}/orders",
         description: "Create an order after quote acceptance.",
+      },
+      {
+        name: "prepare_merchant_payment_options",
+        method: "POST",
+        path: "/merchants/{merchantId}/payment-options",
+        description: "Return normal checkout and web3 payment options for an order.",
       },
       {
         name: "prepare_base_coffee_payment",

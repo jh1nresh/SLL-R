@@ -114,6 +114,7 @@ async function main() {
       || !openapi.paths?.["/agent/{merchantId}/message"]
       || !openapi.paths?.["/terminal/{merchantId}"]
       || !openapi.paths?.["/merchants/{merchantId}/quote"]
+      || !openapi.paths?.["/merchants/{merchantId}/payment-options"]
       || !openapi.paths?.["/shopify/merchants"]
       || !openapi.paths?.["/webhooks/shopify/orders-paid"]
       || !openapi.paths?.["/.well-known/base-mcp-plugin.md"]
@@ -198,6 +199,23 @@ async function main() {
     };
     if (nounAgentOrder.mode !== "order_created" || nounAgentOrder.order?.merchantId !== "noun-coffee" || nounAgentOrder.order.item?.id !== "dalat-highlands" || !nounAgentOrder.terminalUrl?.endsWith("/terminal/noun-coffee")) {
       throw new Error(`Noun Coffee standalone agent order failed: ${JSON.stringify(nounAgentOrder)}`);
+    }
+
+    const nounPaymentOptions = await postJson(origin, "/merchants/noun-coffee/payment-options", {
+      orderId: nounAgentOrder.order.id,
+    }) as {
+      paymentOptions?: Array<{ rail?: string; type?: string; checkoutHandoff?: { url?: string } | null }>;
+      safety?: { requiresUserApproval?: boolean; receiptRequiresProof?: boolean };
+    };
+    const optionRails = nounPaymentOptions.paymentOptions?.map((option) => option.rail) || [];
+    if (
+      !nounPaymentOptions.safety?.requiresUserApproval
+      || !nounPaymentOptions.safety.receiptRequiresProof
+      || !optionRails.includes("counter")
+      || !optionRails.includes("shopify")
+      || !nounPaymentOptions.paymentOptions?.some((option) => option.type === "checkout_handoff" || option.checkoutHandoff)
+    ) {
+      throw new Error(`Noun Coffee payment options did not expose hybrid checkout rails: ${JSON.stringify(nounPaymentOptions)}`);
     }
 
     const nounTerminalPage = await fetch(`${origin}/terminal/noun-coffee`).then((response) => response.text());
