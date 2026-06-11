@@ -16,6 +16,7 @@ import { helioWebhook, solanaPayMerchants, solanaPayPreparePayment, solanaPayVer
 import { baseMcpPluginSpec } from "./baseMcpPlugin.js";
 import { sllrMcpManifest } from "./mcpManifest.js";
 import { aiPluginManifest, sllrOpenApi } from "./openapi.js";
+import { solanaSllrPluginSpec } from "./solanaPlugin.js";
 import { shopifyCartHandoff, shopifyConnectPlan, shopifyMerchants, shopifyOrdersFulfilledWebhook, shopifyOrdersPaidWebhook, shopifyProducts, shopifyRefundsCreateWebhook } from "./adapters/shopify.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
@@ -92,6 +93,7 @@ function rootDiscovery(origin: string) {
       sllrMcpManifest: `${origin}/.well-known/sllr-mcp.json`,
       aiPluginManifest: `${origin}/.well-known/ai-plugin.json`,
       baseMcpPluginSpec: `${origin}/.well-known/base-mcp-plugin.md`,
+      solanaPluginSpec: `${origin}/.well-known/solana-sllr-plugin.md`,
       openapi: `${origin}/openapi.json`,
     },
     baseMcpDemo: {
@@ -157,6 +159,9 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "GET" && url.pathname === "/.well-known/base-mcp-plugin.md") {
         return markdown(response, 200, baseMcpPluginSpec(originFrom(request)));
+      }
+      if (request.method === "GET" && url.pathname === "/.well-known/solana-sllr-plugin.md") {
+        return markdown(response, 200, solanaSllrPluginSpec(originFrom(request)));
       }
       if (request.method === "GET" && url.pathname === "/openapi.json") {
         return json(response, 200, sllrOpenApi(originFrom(request)));

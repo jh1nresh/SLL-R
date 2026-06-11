@@ -154,6 +154,7 @@ GET  /.well-known/sllr-agent.json
 GET  /.well-known/sllr-mcp.json
 GET  /.well-known/ai-plugin.json
 GET  /.well-known/base-mcp-plugin.md
+GET  /.well-known/solana-sllr-plugin.md
 GET  /openapi.json
 GET  /raposa
 GET  /raposa/order

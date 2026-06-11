@@ -3,6 +3,13 @@
 Use this runbook to show SLL-R turning Raposa or SOLYD into a Solana-payable,
 agent-orderable merchant.
 
+Agent/plugin discovery:
+
+```text
+GET /.well-known/solana-sllr-plugin.md
+GET /solana-pay/merchants
+```
+
 ## Goal
 
 Show a buyer agent creating an order, preparing Solana payment, and turning
@@ -131,5 +138,7 @@ Buy me Raposa coffee beans under $20 this week using Solana Pay.
 - Production should verify transaction signature, recipient, token mint, amount,
   and reference against a trusted Solana RPC or Helio webhook before issuing
   receipt memory.
+- The verifier must reject any proof whose `reference` does not match the SLL-R
+  order reference.
 - Do not claim demo recipient wallets are merchant-owned unless the merchant has
   provided and approved that wallet.

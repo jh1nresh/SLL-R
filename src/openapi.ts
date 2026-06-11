@@ -85,6 +85,23 @@ export function sllrOpenApi(origin: string) {
           },
         },
       },
+      "/.well-known/solana-sllr-plugin.md": {
+        get: {
+          tags: ["Solana"],
+          operationId: "getSolanaSllrPluginSpec",
+          summary: "Read the Solana Pay merchant plugin instructions.",
+          responses: {
+            "200": {
+              description: "Markdown plugin spec",
+              content: {
+                "text/markdown": {
+                  schema: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+      },
       "/openapi.json": {
         get: {
           tags: ["Discovery"],

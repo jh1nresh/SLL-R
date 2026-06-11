@@ -79,6 +79,7 @@ export function sllrManifest(origin: string) {
       mcpManifest: `${origin}/.well-known/sllr-mcp.json`,
       aiPluginManifest: `${origin}/.well-known/ai-plugin.json`,
       baseMcpPluginSpec: `${origin}/.well-known/base-mcp-plugin.md`,
+      solanaPluginSpec: `${origin}/.well-known/solana-sllr-plugin.md`,
       openapi: `${origin}/openapi.json`,
       capabilities: `${origin}/capabilities`,
       standaloneAgent: `${origin}/agent/{merchantId}`,
@@ -118,6 +119,7 @@ export function sllrManifest(origin: string) {
       "OpenAPI tool discovery",
       "generic merchant MCP tool discovery",
       "Base MCP custom plugin instructions",
+      "Solana Pay merchant plugin instructions",
       "Shopify Storefront MCP connect plan",
       "Shopify paid order webhook proof",
     ],
@@ -187,6 +189,12 @@ export function sllrManifest(origin: string) {
         method: "GET",
         path: "/solana-pay/prepare-payment",
         description: "Return Solana Pay URL or Helio checkout handoff for Solana rail merchants.",
+      },
+      {
+        name: "verify_solana_payment",
+        method: "POST",
+        path: "/solana-pay/verify-payment",
+        description: "Attach Solana Pay or Helio proof after reference and verifier checks.",
       },
       {
         name: "list_shopify_merchants",

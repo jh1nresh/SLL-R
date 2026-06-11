@@ -56,7 +56,12 @@ async function main() {
   try {
     const root = await getJson(origin, "/") as {
       product?: string;
-      agentDiscovery?: { openapi?: string; baseMcpPluginSpec?: string; sllrMcpManifest?: string };
+      agentDiscovery?: {
+        openapi?: string;
+        baseMcpPluginSpec?: string;
+        sllrMcpManifest?: string;
+        solanaPluginSpec?: string;
+      };
       baseMcpDemo?: { quote?: string; preparePayment?: string };
     };
     if (
@@ -64,6 +69,7 @@ async function main() {
       || !root.agentDiscovery?.openapi?.endsWith("/openapi.json")
       || !root.agentDiscovery?.sllrMcpManifest?.endsWith("/.well-known/sllr-mcp.json")
       || !root.agentDiscovery?.baseMcpPluginSpec?.endsWith("/.well-known/base-mcp-plugin.md")
+      || !root.agentDiscovery?.solanaPluginSpec?.endsWith("/.well-known/solana-sllr-plugin.md")
       || !root.baseMcpDemo?.quote?.includes("/base-plugin/coffee/quote")
       || !root.baseMcpDemo?.preparePayment?.includes("/base-plugin/coffee/prepare-payment")
     ) {
@@ -118,6 +124,7 @@ async function main() {
       || !openapi.paths?.["/shopify/merchants"]
       || !openapi.paths?.["/webhooks/shopify/orders-paid"]
       || !openapi.paths?.["/.well-known/base-mcp-plugin.md"]
+      || !openapi.paths?.["/.well-known/solana-sllr-plugin.md"]
     ) {
       throw new Error(`OpenAPI schema did not expose required agent tools: ${JSON.stringify(openapi)}`);
     }
@@ -125,6 +132,10 @@ async function main() {
     const baseMcpPlugin = await fetch(`${origin}/.well-known/base-mcp-plugin.md`).then((response) => response.text());
     if (!baseMcpPlugin.includes("STOP - COMPLETE BASE MCP ONBOARDING FIRST") || !baseMcpPlugin.includes("send_calls")) {
       throw new Error("Base MCP plugin spec did not include onboarding and send_calls mapping.");
+    }
+    const solanaPlugin = await fetch(`${origin}/.well-known/solana-sllr-plugin.md`).then((response) => response.text());
+    if (!solanaPlugin.includes("SLL-R Solana Merchant Plugin") || !solanaPlugin.includes("reference does not match")) {
+      throw new Error("Solana merchant plugin spec did not include payment reference safety rules.");
     }
 
     const raposaKit = await fetch(`${origin}/pilot-kit?merchantId=raposa-coffee`).then((response) => response.json()) as {
@@ -559,6 +570,18 @@ async function main() {
       || !solanaPayment.solanaPayUrl?.startsWith("solana:11111111111111111111111111111111?")
     ) {
       throw new Error(`Solana Pay URL was not prepared: ${JSON.stringify(solanaPayment)}`);
+    }
+
+    const solanaWrongReference = await postJsonFailure(origin, "/solana-pay/verify-payment", {
+      orderId: solanaOrder.order.id,
+      merchantId: "raposa-shop",
+      amountUsd: solanaOrder.order.item?.subtotalUsd,
+      paymentId: "solana_tx_wrong_reference",
+      reference: "wrong_reference",
+      demo: true,
+    });
+    if (solanaWrongReference.status !== 409) {
+      throw new Error(`Solana proof with wrong reference should be rejected: ${JSON.stringify(solanaWrongReference)}`);
     }
 
     const solanaProofWithoutSecret = await postJsonFailure(origin, "/solana-pay/verify-payment", {
