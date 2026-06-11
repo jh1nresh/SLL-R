@@ -13,6 +13,7 @@ import { standaloneAgentMessage } from "./core/standaloneAgent.js";
 import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuote, baseCoffeeRecordDemoPayment, baseCoffeeStatus } from "./adapters/baseCoffeePlugin.js";
 import { helioWebhook, solanaPayMerchants, solanaPayPreparePayment, solanaPayVerifyPayment } from "./adapters/solanaPay.js";
 import { baseMcpPluginSpec } from "./baseMcpPlugin.js";
+import { sllrMcpManifest } from "./mcpManifest.js";
 import { aiPluginManifest, sllrOpenApi } from "./openapi.js";
 import { shopifyCartHandoff, shopifyConnectPlan, shopifyMerchants, shopifyOrdersFulfilledWebhook, shopifyOrdersPaidWebhook, shopifyProducts, shopifyRefundsCreateWebhook } from "./adapters/shopify.js";
 
@@ -87,6 +88,7 @@ function rootDiscovery(origin: string) {
     status: "ready",
     agentDiscovery: {
       sllrManifest: `${origin}/.well-known/sllr-agent.json`,
+      sllrMcpManifest: `${origin}/.well-known/sllr-mcp.json`,
       aiPluginManifest: `${origin}/.well-known/ai-plugin.json`,
       baseMcpPluginSpec: `${origin}/.well-known/base-mcp-plugin.md`,
       openapi: `${origin}/openapi.json`,
@@ -144,6 +146,9 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "GET" && url.pathname === "/.well-known/sllr-agent.json") {
         return json(response, 200, sllrManifest(originFrom(request)));
+      }
+      if (request.method === "GET" && url.pathname === "/.well-known/sllr-mcp.json") {
+        return json(response, 200, sllrMcpManifest(originFrom(request)));
       }
       if (request.method === "GET" && url.pathname === "/.well-known/ai-plugin.json") {
         return json(response, 200, aiPluginManifest(originFrom(request)));

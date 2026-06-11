@@ -149,6 +149,7 @@ http://localhost:3100
 
 ```text
 GET  /.well-known/sllr-agent.json
+GET  /.well-known/sllr-mcp.json
 GET  /.well-known/ai-plugin.json
 GET  /.well-known/base-mcp-plugin.md
 GET  /openapi.json

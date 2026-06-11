@@ -56,12 +56,13 @@ async function main() {
   try {
     const root = await getJson(origin, "/") as {
       product?: string;
-      agentDiscovery?: { openapi?: string; baseMcpPluginSpec?: string };
+      agentDiscovery?: { openapi?: string; baseMcpPluginSpec?: string; sllrMcpManifest?: string };
       baseMcpDemo?: { quote?: string; preparePayment?: string };
     };
     if (
       root.product !== "SLL-R"
       || !root.agentDiscovery?.openapi?.endsWith("/openapi.json")
+      || !root.agentDiscovery?.sllrMcpManifest?.endsWith("/.well-known/sllr-mcp.json")
       || !root.agentDiscovery?.baseMcpPluginSpec?.endsWith("/.well-known/base-mcp-plugin.md")
       || !root.baseMcpDemo?.quote?.includes("/base-plugin/coffee/quote")
       || !root.baseMcpDemo?.preparePayment?.includes("/base-plugin/coffee/prepare-payment")
@@ -79,6 +80,19 @@ async function main() {
     }
     if (!("endpoints" in manifest) || !(manifest as { endpoints?: { openapi?: string; baseMcpPluginSpec?: string } }).endpoints?.openapi?.endsWith("/openapi.json")) {
       throw new Error(`Manifest did not expose OpenAPI discovery: ${JSON.stringify(manifest)}`);
+    }
+    const mcpManifest = await getJson(origin, "/.well-known/sllr-mcp.json") as {
+      name?: string;
+      tools?: Array<{ name?: string; path?: string }>;
+      safety?: { noAutonomousPayment?: boolean };
+    };
+    if (
+      mcpManifest.name !== "SLL-R Merchant MCP"
+      || !mcpManifest.safety?.noAutonomousPayment
+      || !mcpManifest.tools?.some((tool) => tool.name === "quote_order" && tool.path === "/merchants/{merchantId}/quote")
+      || !mcpManifest.tools?.some((tool) => tool.name === "create_order" && tool.path === "/merchants/{merchantId}/orders")
+    ) {
+      throw new Error(`SLL-R MCP manifest did not expose generic merchant tools: ${JSON.stringify(mcpManifest)}`);
     }
 
     const aiPlugin = await getJson(origin, "/.well-known/ai-plugin.json") as {

@@ -76,6 +76,7 @@ export function sllrManifest(origin: string) {
     },
     endpoints: {
       manifest: `${origin}/.well-known/sllr-agent.json`,
+      mcpManifest: `${origin}/.well-known/sllr-mcp.json`,
       aiPluginManifest: `${origin}/.well-known/ai-plugin.json`,
       baseMcpPluginSpec: `${origin}/.well-known/base-mcp-plugin.md`,
       openapi: `${origin}/openapi.json`,
@@ -114,6 +115,7 @@ export function sllrManifest(origin: string) {
       "SLL-R receipt memory handoff",
       "Solana receipt cNFT ready proof",
       "OpenAPI tool discovery",
+      "generic merchant MCP tool discovery",
       "Base MCP custom plugin instructions",
       "Shopify Storefront MCP connect plan",
       "Shopify paid order webhook proof",
