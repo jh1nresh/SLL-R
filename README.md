@@ -40,6 +40,8 @@ Target users:
 - Noun Coffee: Base/USDC coffee storefront quote and checkout handoff.
 - Shopify merchants: Noun Coffee, Raposa Shop, and SOLYD can expose Storefront
   MCP / cart handoff / paid-order webhook proof without replacing checkout.
+- Content-commerce merchants: Changbaishan Rice-style grocery sellers can map
+  product stories to Shopify SKUs, checkout, and receipt memory.
 - Raposa / SOLYD Solana rail: Solana Pay URL or Helio checkout handoff with
   payment proof promoted into SLL-R receipt memory.
 - AgentShack builders: reusable seller-agent template for their own merchants.

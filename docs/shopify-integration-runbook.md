@@ -31,6 +31,14 @@ For Noun Coffee, Raposa, or SOLYD, ask for:
 6. Agreement to store `sllr_order_id` in cart attributes, note attributes, or
    checkout metadata so paid webhooks can attach proof to the SLL-R order.
 
+For content-commerce merchants such as Changbaishan Rice, also ask for:
+
+1. A product story / post URL that explains the origin and quality claims.
+2. The SKU that each story maps to.
+3. Fulfillment promise: shipping days, pack size, and return/refund policy.
+4. Whether claims such as `fresh-milled`, `unpolished`, or `natural` can appear
+   as structured product tags.
+
 ## SLL-R Endpoints
 
 ```text
@@ -62,6 +70,26 @@ Without merchant credentials, SLL-R returns a checkout/product-page handoff and 
 connect plan. This is intentional. It should not claim that Noun, Raposa, or
 SOLYD received a real order until Shopify checkout or webhook proof is attached.
 
+`GET /shopify/merchants/{merchantId}/products` returns product mapping metadata:
+
+```json
+{
+  "mapping": {
+    "source": "product_url",
+    "requiredMetadataKeys": ["sllr_order_id", "sllr_merchant_id"],
+    "proofPath": "orders/paid webhook or fulfillment webhook"
+  },
+  "cartMetadataKeys": [
+    "sllr_order_id",
+    "sllr_merchant_id",
+    "sllr_receipt_callback"
+  ]
+}
+```
+
+This is the minimum contract that lets SLL-R connect an agent-created order to a
+Shopify paid-order webhook.
+
 For local demos without a Shopify app secret, webhook proof endpoints require
 `demo=true`. Production must configure `SLLR_SHOPIFY_WEBHOOK_SECRET` and verify
 the raw webhook body against `X-Shopify-Hmac-SHA256`.
@@ -80,6 +108,12 @@ curl https://sll-r.vercel.app/shopify/merchants/noun-coffee/connect
 curl -X POST https://sll-r.vercel.app/shopify/merchants/noun-coffee/cart \
   -H "content-type: application/json" \
   -d '{"itemId":"dalat-highlands"}'
+```
+
+```bash
+curl -X POST https://sll-r.vercel.app/merchants/changbaishan-rice/quote \
+  -H "content-type: application/json" \
+  -d '{"userIntent":"fresh-milled unpolished natural rice under $25","maxSpendUsd":"25.00","deliverByDays":7}'
 ```
 
 ## Production Notes

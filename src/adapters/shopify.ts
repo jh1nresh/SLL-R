@@ -7,6 +7,7 @@ const DEFAULT_SHOPIFY_DOMAINS: Record<string, string> = {
   "noun-coffee": "noun.coffee",
   "raposa-shop": "raposacoffee.com",
   solyd: "solyd.store",
+  "changbaishan-rice": "changbaishan-rice.example",
 };
 
 function merchantEnvKey(merchantId: string) {
@@ -61,6 +62,11 @@ function productSummary(merchantId: string, item: CatalogItem) {
     tags: item.tags || [],
     productUrl: productCheckoutUrl(merchantId, item),
     shopifyVariantGid: null,
+    mapping: {
+      source: item.productUrl ? "product_url" : "storefront_domain",
+      requiredMetadataKeys: ["sllr_order_id", "sllr_merchant_id"],
+      proofPath: "orders/paid webhook or fulfillment webhook",
+    },
   };
 }
 
@@ -150,6 +156,7 @@ export function shopifyProducts(merchantId: string) {
       ...shopifyEndpoints(merchant.id),
     },
     products: merchant.catalog.map((item) => productSummary(merchant.id, item)),
+    cartMetadataKeys: ["sllr_order_id", "sllr_merchant_id", "sllr_receipt_callback"],
     note: "Products come from the current SLL-R merchant profile until the merchant provides Storefront MCP or Storefront API access.",
   };
 }

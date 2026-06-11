@@ -276,7 +276,7 @@ async function main() {
       merchants?: Array<{ id?: string; storefrontMcp?: string | null; ucpCatalogMcp?: string | null }>;
     };
     const shopifyIds = shopifyMerchants.merchants?.map((merchant) => merchant.id) || [];
-    for (const merchantId of ["noun-coffee", "raposa-shop", "solyd"]) {
+    for (const merchantId of ["noun-coffee", "raposa-shop", "solyd", "changbaishan-rice"]) {
       if (!shopifyIds.includes(merchantId)) {
         throw new Error(`Shopify merchant ${merchantId} was not listed: ${JSON.stringify(shopifyMerchants)}`);
       }
@@ -299,6 +299,47 @@ async function main() {
     };
     if (!nounShopifyProducts.products?.some((item) => item.id === "dalat-highlands" && item.productUrl?.includes("noun.coffee"))) {
       throw new Error(`Noun Coffee Shopify products did not expose checkout handoff: ${JSON.stringify(nounShopifyProducts)}`);
+    }
+
+    const riceQuote = await postJson(origin, "/merchants/changbaishan-rice/quote", {
+      userIntent: "fresh-milled unpolished natural rice under $25",
+      maxSpendUsd: "25.00",
+      deliverByDays: 7,
+    }) as { quote?: { feasible?: boolean; item?: { id?: string } } };
+    if (!riceQuote.quote?.feasible || riceQuote.quote.item?.id !== "fresh-milled-rice-5kg") {
+      throw new Error(`Changbaishan Rice quote failed: ${JSON.stringify(riceQuote)}`);
+    }
+    const riceProducts = await getJson(origin, "/shopify/merchants/changbaishan-rice/products") as {
+      products?: Array<{ id?: string; productUrl?: string | null; mapping?: { requiredMetadataKeys?: string[] } }>;
+      cartMetadataKeys?: string[];
+    };
+    const riceProduct = riceProducts.products?.find((item) => item.id === "fresh-milled-rice-5kg");
+    if (!riceProduct?.productUrl?.includes("changbaishan-rice.example") || !riceProduct.mapping?.requiredMetadataKeys?.includes("sllr_order_id") || !riceProducts.cartMetadataKeys?.includes("sllr_receipt_callback")) {
+      throw new Error(`Changbaishan Rice Shopify mapping metadata failed: ${JSON.stringify(riceProducts)}`);
+    }
+    const riceOrder = await postJson(origin, "/merchants/changbaishan-rice/orders", {
+      userIntent: "fresh-milled unpolished natural rice under $25",
+      maxSpendUsd: "25.00",
+      deliverByDays: 7,
+      paymentMode: "checkout",
+    }) as { order?: { id?: string; item?: { id?: string; subtotalUsd?: string } } };
+    if (!riceOrder.order?.id || riceOrder.order.item?.id !== "fresh-milled-rice-5kg") {
+      throw new Error(`Changbaishan Rice order failed: ${JSON.stringify(riceOrder)}`);
+    }
+    const riceCart = await postJson(origin, "/shopify/merchants/changbaishan-rice/cart", {
+      orderId: riceOrder.order.id,
+    }) as { mode?: string; checkoutHandoff?: { url?: string }; cartMetadata?: { sllr_order_id?: string | null } };
+    if (riceCart.mode !== "checkout_handoff" || !riceCart.checkoutHandoff?.url?.includes("changbaishan-rice.example") || riceCart.cartMetadata?.sllr_order_id !== riceOrder.order.id) {
+      throw new Error(`Changbaishan Rice cart handoff failed: ${JSON.stringify(riceCart)}`);
+    }
+    const ricePaid = await postJson(origin, "/webhooks/shopify/orders-paid", {
+      sllr_order_id: riceOrder.order.id,
+      current_total_price: riceOrder.order.item?.subtotalUsd,
+      admin_graphql_api_id: "gid://shopify/Order/rice-smoke",
+      demo: true,
+    }) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
+    if (ricePaid.proofLevel !== "receipt_memory_issued" || ricePaid.order?.payment?.provider !== "shopify" || !ricePaid.order.receipt?.receiptHash) {
+      throw new Error(`Changbaishan Rice paid webhook did not issue receipt memory: ${JSON.stringify(ricePaid)}`);
     }
 
     const baseMerchants = await getJson(origin, "/base-plugin/coffee/merchants") as {
