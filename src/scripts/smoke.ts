@@ -523,7 +523,103 @@ async function withFakeRedis<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+// Minimal in-process Supabase PostgREST server to exercise the SupabaseStore
+// path encoding (kv upsert/select, index insert/select) end to end.
+async function withFakeSupabase<T>(run: () => Promise<T>): Promise<T> {
+  const kv = new Map<string, unknown>();
+  const index = new Map<string, Set<string>>();
+  const key = "fake-service-role-key";
+  const server = createServer((request, response) => {
+    if (request.headers.apikey !== key || request.headers.authorization !== `Bearer ${key}`) {
+      response.writeHead(401);
+      return response.end(JSON.stringify({ message: "unauthorized" }));
+    }
+    const url = new URL(request.url || "/", "http://supabase.test");
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      const eqValue = (param: string) => (url.searchParams.get(param) || "").replace(/^eq\./, "");
+      const sendJson = (status: number, payload: unknown) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(payload === undefined ? "" : JSON.stringify(payload));
+      };
+      if (request.method === "GET" && url.pathname === "/rest/v1/sllr_kv") {
+        const k = eqValue("key");
+        return sendJson(200, kv.has(k) ? [{ value: kv.get(k) }] : []);
+      }
+      if (request.method === "POST" && url.pathname === "/rest/v1/sllr_kv") {
+        const prefer = String(request.headers.prefer || "");
+        const rows = JSON.parse(Buffer.concat(chunks).toString("utf8") || "[]") as Array<{ key: string; value: unknown }>;
+        // Mirror PostgREST: a PK conflict without merge-duplicates is a 409.
+        if (!url.searchParams.has("on_conflict") || !prefer.includes("resolution=merge-duplicates")) {
+          if (rows.some((row) => kv.has(row.key))) return sendJson(409, { message: "duplicate key" });
+        }
+        for (const row of rows) kv.set(row.key, row.value);
+        return sendJson(201, undefined);
+      }
+      if (request.method === "GET" && url.pathname === "/rest/v1/sllr_index") {
+        const members = [...(index.get(eqValue("index_key")) ?? [])];
+        return sendJson(200, members.map((member) => ({ member })));
+      }
+      if (request.method === "POST" && url.pathname === "/rest/v1/sllr_index") {
+        const prefer = String(request.headers.prefer || "");
+        const rows = JSON.parse(Buffer.concat(chunks).toString("utf8") || "[]") as Array<{ index_key: string; member: string }>;
+        // Mirror PostgREST: a composite-PK conflict without ignore-duplicates is a 409.
+        if (!url.searchParams.has("on_conflict") || !prefer.includes("resolution=ignore-duplicates")) {
+          if (rows.some((row) => index.get(row.index_key)?.has(row.member))) return sendJson(409, { message: "duplicate member" });
+        }
+        for (const row of rows) {
+          const set = index.get(row.index_key) ?? new Set<string>();
+          set.add(row.member);
+          index.set(row.index_key, set);
+        }
+        return sendJson(201, undefined);
+      }
+      sendJson(404, { message: `unsupported ${request.method} ${url.pathname}` });
+    });
+  });
+  server.listen(0);
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Failed to start fake Supabase.");
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_URL = `http://127.0.0.1:${address.port}`;
+  process.env.SUPABASE_SERVICE_ROLE_KEY = key;
+  resetStoreForTest();
+  try {
+    return await run();
+  } finally {
+    if (prevUrl === undefined) delete process.env.SUPABASE_URL; else process.env.SUPABASE_URL = prevUrl;
+    if (prevKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = prevKey;
+    resetStoreForTest();
+    server.close();
+  }
+}
+
 async function smokeStoreBackend() {
+  await withFakeSupabase(async () => {
+    if (storeBackendName() !== "supabase") {
+      throw new Error(`Store should select supabase backend when SUPABASE env is set, got ${storeBackendName()}`);
+    }
+    const store = sllrStore();
+    if (await store.getJson("sllr:test:missing") !== null) {
+      throw new Error("Supabase missing key should round-trip as null.");
+    }
+    await store.setJson("sllr:test:order", { id: "ord_supa", status: "pending_payment" });
+    await store.setJson("sllr:test:order", { id: "ord_supa", status: "accepted" });
+    const loaded = await store.getJson<{ id?: string; status?: string }>("sllr:test:order");
+    if (loaded?.id !== "ord_supa" || loaded.status !== "accepted") {
+      throw new Error(`Supabase JSON upsert round-trip failed: ${JSON.stringify(loaded)}`);
+    }
+    await store.addToIndex("sllr:test:index", "ord_supa");
+    await store.addToIndex("sllr:test:index", "ord_supa");
+    await store.addToIndex("sllr:test:index", "ord_supa_2");
+    const members = await store.indexMembers("sllr:test:index");
+    if (members.length !== 2 || !members.includes("ord_supa") || !members.includes("ord_supa_2")) {
+      throw new Error(`Supabase index insert/select failed: ${JSON.stringify(members)}`);
+    }
+  });
   await withFakeRedis(async () => {
     if (storeBackendName() !== "redis_rest") {
       throw new Error(`Store should select redis_rest backend when KV env is set, got ${storeBackendName()}`);

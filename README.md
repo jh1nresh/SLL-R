@@ -135,17 +135,21 @@ package for the first pilot meeting.
 ## State & Persistence
 
 SLL-R stores orders and runtime demo merchants through a small key-value
-abstraction with two backends:
+abstraction with three backends (selection order: Supabase → Redis/KV → memory):
 
 - **memory** (default): in-process. Survives for the process lifetime only.
   Fine for local dev, a single long-running process (Railway/Render/Fly), and
   demo recordings.
+- **supabase**: Supabase Postgres via the PostgREST HTTP API (zero SDK
+  dependency). Create two tables then set `SUPABASE_URL` +
+  `SUPABASE_SERVICE_ROLE_KEY` — see [Supabase store runbook](./docs/supabase-store-runbook.md).
 - **redis_rest**: Vercel KV / Upstash Redis over the REST API (zero SDK
-  dependency). Required for **serverless** (Vercel), where each invocation is a
-  fresh instance, and for horizontal scale. Configure `KV_REST_API_URL` +
-  `KV_REST_API_TOKEN` (or the `UPSTASH_REDIS_REST_*` equivalents).
+  dependency). Configure `KV_REST_API_URL` + `KV_REST_API_TOKEN` (or the
+  `UPSTASH_REDIS_REST_*` equivalents).
 
-`GET /health` reports the active backend: `{ "ok": true, "store": "redis_rest" }`.
+Either durable backend is required for **serverless** (Vercel), where each
+invocation is a fresh instance, and for horizontal scale.
+`GET /health` reports the active backend: `{ "ok": true, "store": "supabase" }`.
 
 Receipt memory is gated: set `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` so only the
 merchant can issue receipts (and verify payment proof). See [env.example](./env.example).
