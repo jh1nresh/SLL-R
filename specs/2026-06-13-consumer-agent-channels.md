@@ -32,12 +32,15 @@ Hard asymmetry that sets the build order:
 - **LINE = buildable now** (open Messaging API, direct webhook). LINE Pay
   in-thread. Immediately dogfoodable with the founder's TW network + Louisa.
 - **iMessage = two paths (pick per stage):**
-  - **Fast / third-party infra** (Sendblue, Bloo, AgentPhone, Linq, Chert — the
-    infra layer the current wave of iMessage AI assistants uses, per a16z's
-    Justine Moore landscape). API access to iMessage blue-bubble send/receive in
-    days, no Apple MSP gate. Trade-offs: Apple-ToS gray (numbers can be banned),
-    and NO native Apple Pay — payment is a Stripe link in-thread. Good for a fast
-    US dogfood adapter NOW, in parallel with LINE.
+  - **Fast / third-party infra — CHOSEN: Sendblue.** REST API + inbound webhooks
+    + Node/Python SDK, explicitly built for AI agents on iMessage (real blue
+    bubbles, RCS/SMS fallback, 30-sec number, no A2P registration, SOC2/HIPAA).
+    Maps 1:1 to ChannelAdapter: inbound webhook → agent → `messages.send`.
+    Pricing: free sandbox (10 contacts) → ~$100/mo per line (1,000 inbound/day,
+    unlimited messages). Trade-offs: NO Apple Pay (payment = Stripe link
+    in-thread), and Apple-ToS gray (numbers can be clamped) — fine for dogfood /
+    early, do not bet the company on it. Alternatives in the same category:
+    Bloo, AgentPhone, Linq, Chert.
   - **Official / Apple Messages for Business** (via an Apple-approved MSP +
     Experience Review). Slow/gated, but legitimate and gives native Apple Pay
     in-thread. The eventual upgrade once approved.
@@ -98,9 +101,15 @@ interface ChannelAdapter {
   follows the user, and the same person on web today + iMessage tomorrow is one
   buyerId. Web uses a cookie/session; iMessage uses the Business Chat opaque id;
   LINE uses LINE userId.
-- **Payment per channel:** web→Stripe Checkout URL, iMessage→Apple Pay sheet,
+- **Payment per channel:** web→Stripe Checkout URL, iMessage(Sendblue)→Stripe
+  Checkout link (Apple Pay only via the official Apple MFB upgrade),
   LINE→LINE Pay URL, WhatsApp→Stripe link. The order/receipt path in SLL-R is
   identical; only the in-thread payment rendering differs.
+- **Sendblue iMessage adapter wiring (concrete):** Sendblue calls our
+  `POST /channels/imessage/webhook` on each inbound text → `onMessage(fromNumber,
+  text)`; agent replies via Sendblue `messages.send({number, content})`;
+  `resolveBuyerId(fromNumber)` issues/looks up a buyer session keyed by the phone
+  number; `sendPayment` posts a Stripe Checkout link as a message.
 
 ## Agent core behavior
 
