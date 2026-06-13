@@ -4,8 +4,10 @@ export function sllrMcpManifest(origin: string) {
     version: "0.1.0",
     description: "Generic merchant ordering tools for catalog discovery, quote, order, payment options, fulfillment status, and receipt memory.",
     transport: {
-      type: "https",
+      type: "streamable_http",
+      url: `${origin}/mcp`,
       baseUrl: origin,
+      note: "POST JSON-RPC MCP messages to /mcp. The REST paths below are the equivalent OpenAPI surface for non-MCP agents.",
     },
     safety: {
       paymentApproval: "Always show payment rail, merchant, amount, recipient or checkout URL, and proof requirements before asking the user to approve payment.",
@@ -75,6 +77,20 @@ export function sllrMcpManifest(origin: string) {
         description: "List SLL-R orders for a merchant, optionally filtered by status.",
       },
       {
+        name: "get_payment_options",
+        method: "POST",
+        path: "/merchants/{merchantId}/payment-options",
+        description: "List payment options for an existing order across the merchant's enabled rails: counter, Shopify checkout, Base USDC, Solana Pay, Helio.",
+        inputSchema: {
+          type: "object",
+          required: ["orderId"],
+          properties: {
+            orderId: { type: "string" },
+            payer: { type: "string" },
+          },
+        },
+      },
+      {
         name: "attach_payment_proof",
         method: "POST",
         path: "/merchants/{merchantId}/payment",
@@ -91,6 +107,23 @@ export function sllrMcpManifest(origin: string) {
         method: "GET",
         path: "/orders/{orderId}",
         description: "Read current order state, payment status, fulfillment state, and receipt handoff.",
+      },
+      {
+        name: "create_demo_merchant",
+        method: "POST",
+        path: "/demo-merchants",
+        description: "Ingest a public Shopify storefront's products.json into a runtime demo merchant with counter + Shopify checkout rails.",
+        inputSchema: {
+          type: "object",
+          required: ["storeDomain"],
+          properties: {
+            storeDomain: { type: "string" },
+            name: { type: "string" },
+            category: { type: "string" },
+            location: { type: "string" },
+            fulfillment: { type: "string", enum: ["pickup", "shipping", "both"] },
+          },
+        },
       },
     ],
     adapters: {

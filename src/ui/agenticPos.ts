@@ -1,4 +1,4 @@
-import { merchantForId, merchantProfiles } from "../merchants/profiles.js";
+import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (char) => ({
@@ -152,7 +152,7 @@ function page(title: string, body: string) {
 }
 
 function merchantOptions(selectedId: string) {
-  return Object.values(merchantProfiles).map((merchant) => (
+  return allMerchantProfiles().map((merchant) => (
     `<option value="${escapeHtml(merchant.id)}"${merchant.id === selectedId ? " selected" : ""}>${escapeHtml(merchant.name)}</option>`
   )).join("");
 }

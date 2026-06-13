@@ -8,8 +8,16 @@ hard-coding a coffee, Shopify, Base, or Solana-specific flow.
 ## Discovery
 
 ```text
-GET /.well-known/sllr-mcp.json
-GET /openapi.json
+POST /mcp                          (MCP Streamable HTTP endpoint)
+GET  /.well-known/sllr-mcp.json    (descriptive manifest)
+GET  /openapi.json                 (equivalent REST surface)
+```
+
+`/mcp` is a stateless Streamable HTTP MCP server: JSON-RPC `initialize`,
+`tools/list`, and `tools/call` over POST. MCP clients connect with:
+
+```bash
+claude mcp add --transport http sllr https://<sllr-host>/mcp
 ```
 
 The generic MCP manifest lists merchant tools. Base MCP, Solana Pay, Shopify,
@@ -77,6 +85,21 @@ and counter pay are payment adapters, not separate products.
    (`x-sllr-merchant-payment-secret` header or `verificationToken` in the body);
    `demo: true` is only accepted when no secret is configured.
 
+## Receipt Memory Requires Proof
+
+Receipt memory is only issued after one of:
+
+- **Verified payment proof** — `attach_payment_proof` with a configured verifier
+  secret (or `demo=true` locally) issues receipt memory automatically.
+- **Merchant fulfillment proof** — a staff terminal action (claim/fulfill) or
+  `issue_receipt`. These are gated by the merchant verifier secret
+  (`SLLR_MERCHANT_PAYMENT_VERIFY_SECRET`): the caller must supply it as the
+  `x-sllr-merchant-payment-secret` header or `verificationToken`, and `demo=true`
+  is only accepted when no secret is configured. Buyer agents cannot mint receipt
+  memory — their path to a receipt is to pay.
+
+Set `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` for any real pilot.
+
 ## Safety Rules
 
 - Do not submit a payment without explicit user approval.
@@ -85,6 +108,18 @@ and counter pay are payment adapters, not separate products.
 - Do not issue receipt memory from order intent alone.
 - If a payment rail only returns a checkout handoff, wait for webhook proof or
   merchant fulfillment proof before marking the order complete.
+
+## Demo Merchant Ingestion
+
+`create_demo_merchant` ingests a public Shopify storefront's `products.json`
+into a runtime demo merchant (counter + Shopify checkout rails). Use it to
+demo SLL-R against a real store's catalog without merchant setup:
+
+```text
+Use SLL-R MCP. Create a demo merchant from panthercoffee.com, then quote a bag of Brasil specialty coffee under $30 and show me payment options.
+```
+
+Set `SLLR_DEMO_MERCHANT_SECRET` on public deployments to gate ingestion.
 
 ## Example Prompts
 

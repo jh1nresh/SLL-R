@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { attachPaymentProof, getOrder } from "../core/orders.js";
-import { merchantForId, merchantProfiles } from "../merchants/profiles.js";
+import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
 import type { PaymentRail, SellerOrder } from "../types.js";
 
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -76,8 +76,8 @@ function helioCheckoutUrl(order: SellerOrder, reference: string) {
   return url.toString();
 }
 
-function requireSolanaOrder(orderId: string) {
-  const order = getOrder(orderId);
+async function requireSolanaOrder(orderId: string) {
+  const order = await getOrder(orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
   const merchant = merchantForId(order.merchantId);
   if (!merchant || (!merchant.paymentRails.includes("solana_pay") && !merchant.paymentRails.includes("helio"))) {
@@ -91,7 +91,7 @@ export function solanaPayMerchants(origin: string) {
     product: "SLL-R Solana payment adapter",
     docsUrl: "https://github.com/JhiNResH/SLL-R/blob/main/docs/solana-pay-demo-runbook.md",
     manifestUrl: `${origin}/.well-known/sllr-agent.json`,
-    merchants: Object.values(merchantProfiles)
+    merchants: allMerchantProfiles()
       .filter((merchant) => merchant.paymentRails.includes("solana_pay") || merchant.paymentRails.includes("helio"))
       .map((merchant) => ({
         id: merchant.id,
@@ -104,8 +104,8 @@ export function solanaPayMerchants(origin: string) {
   };
 }
 
-export function solanaPayPreparePayment(orderId: string) {
-  const order = requireSolanaOrder(orderId);
+export async function solanaPayPreparePayment(orderId: string) {
+  const order = await requireSolanaOrder(orderId);
   const reference = orderReference(order.id);
   const recipient = solanaAddressEnv();
   const helioUrl = helioCheckoutUrl(order, reference);
@@ -168,7 +168,7 @@ function requireVerifier(headers: Record<string, string | string[] | undefined>,
 export async function solanaPayVerifyPayment(headers: Record<string, string | string[] | undefined>, payload: Record<string, unknown>) {
   const orderId = String(payload.orderId || "");
   if (!orderId) throw Object.assign(new Error("Missing orderId."), { status: 400 });
-  const order = requireSolanaOrder(orderId);
+  const order = await requireSolanaOrder(orderId);
   const reference = String(payload.reference || "");
   if (!reference) throw Object.assign(new Error("Missing payment reference."), { status: 400 });
   if (reference && reference !== orderReference(order.id)) {
@@ -200,7 +200,7 @@ export async function helioWebhook(headers: Record<string, string | string[] | u
   ]);
   const orderId = String(payload.orderId || "");
   if (!orderId) throw Object.assign(new Error("Missing orderId."), { status: 400 });
-  const order = requireSolanaOrder(orderId);
+  const order = await requireSolanaOrder(orderId);
   const reference = String(payload.reference || "");
   if (reference && reference !== orderReference(order.id)) {
     throw Object.assign(new Error("Payment reference does not match this SLL-R order."), { status: 409 });

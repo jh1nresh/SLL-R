@@ -1,7 +1,7 @@
 import { attachPaymentProof, createOrder, getOrder } from "../core/orders.js";
 import { centsFromUsd } from "../core/money.js";
 import { quoteOrder } from "../core/quote.js";
-import { merchantForId, merchantProfiles } from "../merchants/profiles.js";
+import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
 import type { CatalogItem, OrderRequest, QuoteRequest, SellerOrder } from "../types.js";
 
 const BASE_CHAIN_ID = 8453;
@@ -34,8 +34,8 @@ function requireBaseCoffeeMerchant(merchantId: string) {
   return merchant;
 }
 
-function requireBaseCoffeeOrder(orderId: string) {
-  const order = getOrder(orderId);
+async function requireBaseCoffeeOrder(orderId: string) {
+  const order = await getOrder(orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
   requireBaseCoffeeMerchant(order.merchantId);
   return order;
@@ -84,7 +84,7 @@ export function baseCoffeeMerchants(origin: string) {
       manifestUrl: `${origin}/.well-known/sllr-agent.json`,
       docsUrl: "https://github.com/JhiNResH/SLL-R/blob/main/docs/plugins/sllr-base-coffee.md",
     },
-    merchants: Object.values(merchantProfiles)
+    merchants: allMerchantProfiles()
       .filter((merchant) => merchant.paymentRails.includes("base_usdc"))
       .map((merchant) => ({
         id: merchant.id,
@@ -130,12 +130,12 @@ export function baseCoffeeQuote(searchParams: URLSearchParams) {
   };
 }
 
-export function baseCoffeeOrder(searchParams: URLSearchParams) {
+export async function baseCoffeeOrder(searchParams: URLSearchParams) {
   const request = requestFromSearch(searchParams) as OrderRequest;
   request.agentId = searchParams.get("agentId") || "base-mcp-buyer-agent";
   request.customerLabel = searchParams.get("customerLabel") || "Base MCP buyer";
   request.paymentMode = "checkout";
-  const result = createOrder(request);
+  const result = await createOrder(request);
   return {
     product: "SLL-R Base coffee order",
     status: result.order.status,
@@ -146,8 +146,8 @@ export function baseCoffeeOrder(searchParams: URLSearchParams) {
   };
 }
 
-export function baseCoffeePayment(orderId: string, payer?: string | null) {
-  const order = requireBaseCoffeeOrder(orderId);
+export async function baseCoffeePayment(orderId: string, payer?: string | null) {
+  const order = await requireBaseCoffeeOrder(orderId);
   if (!order.payment.mode || order.payment.mode === "counter") {
     throw Object.assign(new Error("Base coffee payment can only prepare checkout or crypto orders."), { status: 409 });
   }
@@ -192,12 +192,12 @@ export function baseCoffeePayment(orderId: string, payer?: string | null) {
   };
 }
 
-export function baseCoffeeStatus(orderId: string) {
+export async function baseCoffeeStatus(orderId: string) {
   return requireBaseCoffeeOrder(orderId);
 }
 
 export async function baseCoffeeRecordDemoPayment(orderId: string, paymentId?: string | null, amountUsd?: string | null) {
-  const order = requireBaseCoffeeOrder(orderId);
+  const order = await requireBaseCoffeeOrder(orderId);
   return attachPaymentProof({
     orderId: order.id,
     merchantId: order.merchantId,

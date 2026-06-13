@@ -4,9 +4,9 @@ import { merchantForId } from "../merchants/profiles.js";
 import type { CatalogItem, PaymentRail, SellerOrder } from "../types.js";
 import { getOrder } from "./orders.js";
 
-function requireOrder(merchantId: string, orderId: string) {
+async function requireOrder(merchantId: string, orderId: string) {
   if (!orderId) throw Object.assign(new Error("Missing orderId."), { status: 400 });
-  const order = getOrder(orderId);
+  const order = await getOrder(orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
   if (order.merchantId !== merchantId) {
     throw Object.assign(new Error(`Order ${order.id} is for ${order.merchantId}, not ${merchantId}.`), { status: 409 });
@@ -56,10 +56,10 @@ function adapterErrorOption(rail: PaymentRail, order: SellerOrder, error: unknow
   };
 }
 
-export function merchantPaymentOptions(merchantId: string, payload: Record<string, unknown>, origin: string) {
+export async function merchantPaymentOptions(merchantId: string, payload: Record<string, unknown>, origin: string) {
   const merchant = merchantForId(merchantId);
   if (!merchant) throw Object.assign(new Error(`Unknown merchant: ${merchantId}`), { status: 404 });
-  const order = requireOrder(merchantId, String(payload.orderId || ""));
+  const order = await requireOrder(merchantId, String(payload.orderId || ""));
   const item = merchant.catalog.find((candidate) => candidate.id === order.item.id);
   const payer = typeof payload.payer === "string" ? payload.payer : null;
 
@@ -75,7 +75,7 @@ export function merchantPaymentOptions(merchantId: string, payload: Record<strin
 
   if (merchant.paymentRails.includes("base_usdc")) {
     try {
-      paymentOptions.push(baseCoffeePayment(order.id, payer));
+      paymentOptions.push(await baseCoffeePayment(order.id, payer));
     } catch (error) {
       paymentOptions.push(adapterErrorOption("base_usdc", order, error));
     }
@@ -83,7 +83,7 @@ export function merchantPaymentOptions(merchantId: string, payload: Record<strin
 
   if (merchant.paymentRails.includes("solana_pay") || merchant.paymentRails.includes("helio")) {
     try {
-      paymentOptions.push(solanaPayPreparePayment(order.id));
+      paymentOptions.push(await solanaPayPreparePayment(order.id));
     } catch (error) {
       paymentOptions.push(adapterErrorOption(merchant.paymentRails.includes("solana_pay") ? "solana_pay" : "helio", order, error));
     }

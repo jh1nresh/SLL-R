@@ -1,4 +1,5 @@
 import type { CatalogItem, MerchantProfile } from "../types.js";
+import { sllrStore, storeBackendName } from "../core/store.js";
 
 const nounCoffeeInStoreMenu = [
   {
@@ -472,6 +473,59 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
   },
 };
 
+// Demo merchants ingested at runtime (for example from a public Shopify
+// products.json feed). Backed by the durable store so they survive serverless
+// cold starts; mirrored into an in-process cache so merchantForId stays sync.
+const MAX_DEMO_MERCHANTS = 24;
+const DEMO_KEY_PREFIX = "sllr:demo-merchant:";
+const DEMO_INDEX = "sllr:demo-merchant-ids";
+const demoMerchantProfiles = new Map<string, MerchantProfile>();
+
+function demoKey(merchantId: string) {
+  return `${DEMO_KEY_PREFIX}${merchantId}`;
+}
+
+// Load persisted demo merchants into the in-process cache. Call once per
+// request before any merchantForId lookup so a fresh serverless instance sees
+// demo merchants created by an earlier request on another instance. On the
+// memory backend the in-process Map is already authoritative (the store lives
+// in this same process), so hydration is skipped and adds no per-request cost.
+export async function hydrateDemoMerchants() {
+  if (storeBackendName() === "memory") return;
+  const store = sllrStore();
+  const ids = await store.indexMembers(DEMO_INDEX);
+  if (ids.length === 0) return;
+  const profiles = await Promise.all(ids.map((id) => store.getJson<MerchantProfile>(demoKey(id))));
+  for (const profile of profiles) {
+    if (!profile) continue;
+    if (!demoMerchantProfiles.has(profile.id) && demoMerchantProfiles.size >= MAX_DEMO_MERCHANTS) break;
+    demoMerchantProfiles.set(profile.id, profile);
+  }
+}
+
+export async function registerDemoMerchantProfile(profile: MerchantProfile) {
+  if (!profile.id.startsWith("demo-")) {
+    throw Object.assign(new Error("Demo merchant ids must start with demo-."), { status: 400 });
+  }
+  if (merchantProfiles[profile.id]) {
+    throw Object.assign(new Error(`Merchant id ${profile.id} is reserved.`), { status: 409 });
+  }
+  if (!demoMerchantProfiles.has(profile.id) && demoMerchantProfiles.size >= MAX_DEMO_MERCHANTS) {
+    throw Object.assign(new Error(`Demo merchant limit reached (${MAX_DEMO_MERCHANTS}). Reuse an existing demo merchant id.`), { status: 409 });
+  }
+  // Re-registering the same id replaces the profile so a demo can re-ingest a
+  // fresher catalog without losing the slot.
+  demoMerchantProfiles.set(profile.id, profile);
+  const store = sllrStore();
+  await store.setJson(demoKey(profile.id), profile);
+  await store.addToIndex(DEMO_INDEX, profile.id);
+  return profile;
+}
+
+export function allMerchantProfiles(): MerchantProfile[] {
+  return [...Object.values(merchantProfiles), ...demoMerchantProfiles.values()];
+}
+
 export function merchantForId(merchantId: string) {
-  return merchantProfiles[merchantId] || null;
+  return merchantProfiles[merchantId] || demoMerchantProfiles.get(merchantId) || null;
 }

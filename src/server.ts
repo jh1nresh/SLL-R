@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { URL } from "node:url";
 import { acceptOrder, claimOrder, createOrder, fulfillOrder, getOrder, listOrders, markOrderReady, rejectOrder } from "./core/orders.js";
 import { quoteOrder } from "./core/quote.js";
-import { merchantForId, merchantProfiles } from "./merchants/profiles.js";
+import { allMerchantProfiles, hydrateDemoMerchants, merchantForId } from "./merchants/profiles.js";
 import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
@@ -15,9 +15,12 @@ import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuot
 import { helioWebhook, solanaPayMerchants, solanaPayPreparePayment, solanaPayVerifyPayment } from "./adapters/solanaPay.js";
 import { baseMcpPluginSpec } from "./baseMcpPlugin.js";
 import { sllrMcpManifest } from "./mcpManifest.js";
+import { handleMcpPost, rejectMcpBrowserOrigin } from "./mcpServer.js";
+import { storeBackendName } from "./core/store.js";
 import { aiPluginManifest, sllrOpenApi } from "./openapi.js";
 import { solanaSllrPluginSpec } from "./solanaPlugin.js";
 import { shopifyCartHandoff, shopifyConnectPlan, shopifyMerchants, shopifyOrdersFulfilledWebhook, shopifyOrdersPaidWebhook, shopifyProducts, shopifyRefundsCreateWebhook } from "./adapters/shopify.js";
+import { createDemoMerchant, listDemoMerchants } from "./adapters/shopifyCatalog.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -89,6 +92,7 @@ function rootDiscovery(origin: string) {
     description: "Seller-side agent runtime for merchant quote, order, payment proof, and verified receipt memory.",
     status: "ready",
     agentDiscovery: {
+      mcp: `${origin}/mcp`,
       sllrManifest: `${origin}/.well-known/sllr-agent.json`,
       sllrMcpManifest: `${origin}/.well-known/sllr-mcp.json`,
       aiPluginManifest: `${origin}/.well-known/ai-plugin.json`,
@@ -132,12 +136,15 @@ function rootDiscovery(origin: string) {
 export async function handleSllrRequest(request: IncomingMessage, response: ServerResponse) {
   try {
     const url = new URL(request.url || "/", originFrom(request));
+    // Load any persisted demo merchants into the in-process cache so a fresh
+    // serverless instance resolves merchants created by an earlier request.
+    await hydrateDemoMerchants();
 
     if (request.method === "GET" && url.pathname === "/") {
         return json(response, 200, rootDiscovery(originFrom(request)));
       }
     if (request.method === "GET" && url.pathname === "/health") {
-        return json(response, 200, { ok: true, product: "SLL-R" });
+        return json(response, 200, { ok: true, product: "SLL-R", store: storeBackendName() });
       }
       if (request.method === "GET" && url.pathname === "/sllr-logo.svg") {
         return svg(response, 200, `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="SLL-R"><rect width="512" height="512" rx="96" fill="#163b2b"/><path d="M120 132h272v248H120z" fill="#f8f4ea"/><path d="M164 318c28 18 70 18 98-1 24-16 36-43 36-80v-72h-52v75c0 21-6 35-17 43-13 9-32 8-48-3l-17 38z" fill="#163b2b"/><path d="M356 164a36 36 0 1 1-72 0 36 36 0 0 1 72 0z" fill="#111"/><path d="m305 164 12 13 25-29" fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><path d="M159 365h194" stroke="#163b2b" stroke-width="12" stroke-linecap="round" stroke-dasharray="1 28"/></svg>`);
@@ -147,6 +154,38 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "GET" && url.pathname === "/raposa/order") {
         return html(response, 200, raposaOrderPage());
+      }
+      if (url.pathname === "/mcp") {
+        if (request.method === "POST") {
+          if (rejectMcpBrowserOrigin(request.headers.origin, originFrom(request))) {
+            return json(response, 403, {
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32000, message: "Forbidden: cross-origin browser requests are not allowed on the MCP endpoint." },
+            });
+          }
+          const contentType = request.headers["content-type"] || "";
+          if (!contentType.includes("application/json")) {
+            return json(response, 415, {
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32000, message: "Unsupported media type: MCP requests must use content-type application/json." },
+            });
+          }
+          const result = await handleMcpPost((await readBody(request)).json, originFrom(request));
+          if (result.payload === null) {
+            response.writeHead(result.status);
+            return response.end();
+          }
+          return json(response, result.status, result.payload);
+        }
+        // Stateless server: no SSE stream, no sessions to delete.
+        response.writeHead(405, { allow: "POST", "content-type": "application/json" });
+        return response.end(JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32000, message: "Method not allowed. SLL-R MCP is a stateless Streamable HTTP endpoint; use POST." },
+        }));
       }
       if (request.method === "GET" && url.pathname === "/.well-known/sllr-agent.json") {
         return json(response, 200, sllrManifest(originFrom(request)));
@@ -171,7 +210,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         const merchant = merchantId ? merchantForId(merchantId) : null;
         return json(response, merchantId && !merchant ? 404 : 200, {
           product: "SLL-R seller operating agent",
-          merchants: merchant ? [merchant] : Object.values(merchantProfiles),
+          merchants: merchant ? [merchant] : allMerchantProfiles(),
         });
       }
       if (request.method === "GET" && url.pathname === "/merchants") {
@@ -185,13 +224,19 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return page ? html(response, 200, page) : json(response, 404, { error: `Unknown merchant: ${merchantId}` });
         }
         if (request.method === "POST" && action === "message") {
-          return json(response, 200, standaloneAgentMessage(merchantId, await body(request), originFrom(request)));
+          return json(response, 200, await standaloneAgentMessage(merchantId, await body(request), originFrom(request)));
         }
       }
       const terminalRoute = url.pathname.match(/^\/terminal\/([^/]+)$/);
       if (terminalRoute && request.method === "GET") {
         const page = merchantTerminalPage(terminalRoute[1], originFrom(request));
         return page ? html(response, 200, page) : json(response, 404, { error: `Unknown merchant: ${terminalRoute[1]}` });
+      }
+      if (request.method === "GET" && url.pathname === "/demo-merchants") {
+        return json(response, 200, listDemoMerchants(originFrom(request)));
+      }
+      if (request.method === "POST" && url.pathname === "/demo-merchants") {
+        return json(response, 201, await createDemoMerchant(request.headers, await body(request), originFrom(request)));
       }
       if (request.method === "GET" && url.pathname === "/shopify/merchants") {
         return json(response, 200, shopifyMerchants(originFrom(request)));
@@ -206,7 +251,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, 200, shopifyProducts(merchantId));
         }
         if (request.method === "POST" && action === "cart") {
-          return json(response, 200, shopifyCartHandoff(merchantId, await body(request), originFrom(request)));
+          return json(response, 200, await shopifyCartHandoff(merchantId, await body(request), originFrom(request)));
         }
       }
       const merchantRoute = url.pathname.match(/^\/merchants\/([^/]+)(?:\/([^/]+))?$/);
@@ -222,16 +267,16 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, 200, quoteMerchantOrder(merchantId, await body(request)));
         }
         if (request.method === "POST" && action === "orders") {
-          return json(response, 201, createMerchantOrder(merchantId, await body(request)));
+          return json(response, 201, await createMerchantOrder(merchantId, await body(request)));
         }
         if (request.method === "GET" && action === "orders") {
-          return json(response, 200, listMerchantOrders(merchantId, url.searchParams.get("status")));
+          return json(response, 200, await listMerchantOrders(merchantId, url.searchParams.get("status")));
         }
         if (request.method === "POST" && action === "payment") {
           return json(response, 200, await attachMerchantPayment(merchantId, request.headers, await body(request)));
         }
         if (request.method === "POST" && action === "payment-options") {
-          return json(response, 200, merchantPaymentOptions(merchantId, await body(request), originFrom(request)));
+          return json(response, 200, await merchantPaymentOptions(merchantId, await body(request), originFrom(request)));
         }
         if (request.method === "POST" && action === "receipt") {
           return json(response, 200, await issueMerchantReceipt(merchantId, request.headers, await body(request)));
@@ -249,17 +294,17 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         return json(response, 200, baseCoffeeQuote(url.searchParams));
       }
       if (request.method === "GET" && url.pathname === "/base-plugin/coffee/order") {
-        return json(response, 201, baseCoffeeOrder(url.searchParams));
+        return json(response, 201, await baseCoffeeOrder(url.searchParams));
       }
       if (request.method === "GET" && url.pathname === "/base-plugin/coffee/prepare-payment") {
         const orderId = url.searchParams.get("orderId") || "";
         if (!orderId) return json(response, 400, { error: "Missing orderId." });
-        return json(response, 200, baseCoffeePayment(orderId, url.searchParams.get("from")));
+        return json(response, 200, await baseCoffeePayment(orderId, url.searchParams.get("from")));
       }
       if (request.method === "GET" && url.pathname === "/base-plugin/coffee/status") {
         const orderId = url.searchParams.get("orderId") || "";
         if (!orderId) return json(response, 400, { error: "Missing orderId." });
-        return json(response, 200, { product: "SLL-R Base coffee status", order: baseCoffeeStatus(orderId) });
+        return json(response, 200, { product: "SLL-R Base coffee status", order: await baseCoffeeStatus(orderId) });
       }
       if (request.method === "GET" && url.pathname === "/solana-pay/merchants") {
         return json(response, 200, solanaPayMerchants(originFrom(request)));
@@ -267,7 +312,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       if (request.method === "GET" && url.pathname === "/solana-pay/prepare-payment") {
         const orderId = url.searchParams.get("orderId") || "";
         if (!orderId) return json(response, 400, { error: "Missing orderId." });
-        return json(response, 200, solanaPayPreparePayment(orderId));
+        return json(response, 200, await solanaPayPreparePayment(orderId));
       }
       if (request.method === "POST" && url.pathname === "/solana-pay/verify-payment") {
         const order = await solanaPayVerifyPayment(request.headers, await body(request) as never);
@@ -327,7 +372,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         return json(response, 200, { product: "SLL-R quote", quote: quoteOrder(await body(request) as never) });
       }
       if (request.method === "POST" && url.pathname === "/orders") {
-        const result = createOrder(await body(request) as never);
+        const result = await createOrder(await body(request) as never);
         return json(response, 201, {
           product: "SLL-R order handoff",
           status: result.order.status,
@@ -339,7 +384,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       if (request.method === "GET" && url.pathname === "/orders") {
         return json(response, 200, {
           product: "SLL-R merchant terminal",
-          orders: listOrders({
+          orders: await listOrders({
             merchantId: url.searchParams.get("merchantId") || undefined,
             status: url.searchParams.get("status") as never || undefined,
           }),
@@ -349,15 +394,15 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       if (orderRoute) {
         const [, orderId, action] = orderRoute;
         if (request.method === "GET" && !action) {
-          const order = getOrder(orderId);
+          const order = await getOrder(orderId);
           return json(response, order ? 200 : 404, order ? { product: "SLL-R merchant terminal", order } : { error: `Unknown order: ${orderId}` });
         }
         if (request.method === "POST" && action === "accept") {
-          const order = acceptOrder(orderId, await body(request) as never);
+          const order = await acceptOrder(orderId, await body(request) as never);
           return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
         }
         if (request.method === "POST" && action === "reject") {
-          const order = rejectOrder(orderId, await body(request) as never);
+          const order = await rejectOrder(orderId, await body(request) as never);
           return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
         }
         if (request.method === "POST" && action === "fulfill") {
@@ -372,7 +417,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           });
         }
         if (request.method === "POST" && action === "ready") {
-          const order = markOrderReady(orderId, await body(request) as never);
+          const order = await markOrderReady(orderId, await body(request) as never);
           return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
         }
         if (request.method === "POST" && action === "claim") {

@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { attachPaymentProof, fulfillOrder, getOrder } from "../core/orders.js";
-import { merchantForId, merchantProfiles } from "../merchants/profiles.js";
+import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
 import type { CatalogItem, MerchantProfile } from "../types.js";
 
 const DEFAULT_SHOPIFY_DOMAINS: Record<string, string> = {
@@ -123,7 +123,7 @@ export function shopifyMerchants(origin: string) {
   return {
     product: "SLL-R Shopify adapter",
     docsUrl: "https://github.com/JhiNResH/SLL-R/blob/main/docs/shopify-integration-runbook.md",
-    merchants: Object.values(merchantProfiles)
+    merchants: allMerchantProfiles()
       .filter((merchant) => merchant.paymentRails.includes("shopify"))
       .map((merchant) => ({
         id: merchant.id,
@@ -161,11 +161,11 @@ export function shopifyProducts(merchantId: string) {
   };
 }
 
-export function shopifyCartHandoff(merchantId: string, payload: Record<string, unknown>, origin: string) {
+export async function shopifyCartHandoff(merchantId: string, payload: Record<string, unknown>, origin: string) {
   const merchant = requireShopifyMerchant(merchantId);
   const orderId = typeof payload.orderId === "string" ? payload.orderId : "";
   const itemId = typeof payload.itemId === "string" ? payload.itemId : "";
-  const order = orderId ? getOrder(orderId) : null;
+  const order = orderId ? await getOrder(orderId) : null;
   if (orderId && !order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
   if (order && order.merchantId !== merchant.id) {
     throw Object.assign(new Error(`Order ${order.id} is for ${order.merchantId}, not ${merchant.id}.`), { status: 409 });
@@ -260,7 +260,7 @@ export async function shopifyOrdersPaidWebhook(headers: Record<string, string | 
   if (!orderId) {
     throw Object.assign(new Error("Shopify paid webhook is missing sllr_order_id metadata."), { status: 409 });
   }
-  const order = getOrder(orderId);
+  const order = await getOrder(orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
   return attachPaymentProof({
     orderId: order.id,
@@ -277,7 +277,7 @@ export async function shopifyOrdersFulfilledWebhook(headers: Record<string, stri
   if (!orderId) {
     throw Object.assign(new Error("Shopify fulfillment webhook is missing sllr_order_id metadata."), { status: 409 });
   }
-  const order = getOrder(orderId);
+  const order = await getOrder(orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
   return fulfillOrder(order.id, {
     merchantId: order.merchantId,

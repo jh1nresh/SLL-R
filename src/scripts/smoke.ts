@@ -1,5 +1,7 @@
 import { once } from "node:events";
+import { createServer } from "node:http";
 import { createSllrServer } from "../server.js";
+import { resetStoreForTest, sllrStore, storeBackendName } from "../core/store.js";
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -45,6 +47,509 @@ async function postJsonFailure(origin: string, path: string, payload: unknown) {
   return { status: response.status, json };
 }
 
+let nextMcpRequestId = 0;
+
+async function mcpRequest(origin: string, method: string, params?: unknown) {
+  const response = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++nextMcpRequestId, method, ...(params === undefined ? {} : { params }) }),
+  });
+  const json = await response.json() as { result?: Record<string, unknown>; error?: { code?: number; message?: string } };
+  if (!response.ok || json.error) {
+    throw new Error(`MCP ${method} failed: ${JSON.stringify(json)}`);
+  }
+  if (!json.result) throw new Error(`MCP ${method} returned no result: ${JSON.stringify(json)}`);
+  return json.result;
+}
+
+async function mcpToolCall(origin: string, name: string, args: Record<string, unknown>) {
+  const result = await mcpRequest(origin, "tools/call", { name, arguments: args }) as {
+    isError?: boolean;
+    content?: Array<{ type?: string; text?: string }>;
+    structuredContent?: Record<string, unknown>;
+  };
+  return result;
+}
+
+async function smokeMcp(origin: string) {
+  const initialize = await mcpRequest(origin, "initialize", {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "sllr-smoke", version: "0.0.1" },
+  }) as { protocolVersion?: string; serverInfo?: { name?: string }; instructions?: string; capabilities?: { tools?: unknown } };
+  if (
+    initialize.protocolVersion !== "2025-06-18"
+    || initialize.serverInfo?.name !== "sllr-merchant-mcp"
+    || !initialize.capabilities?.tools
+    || !initialize.instructions?.includes("Never submit or record a payment")
+  ) {
+    throw new Error(`MCP initialize was not useful: ${JSON.stringify(initialize)}`);
+  }
+
+  const initialized = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+  });
+  if (initialized.status !== 202) {
+    throw new Error(`MCP initialized notification should return 202, got ${initialized.status}`);
+  }
+
+  const getStream = await fetch(`${origin}/mcp`);
+  if (getStream.status !== 405) {
+    throw new Error(`MCP GET should return 405 for the stateless server, got ${getStream.status}`);
+  }
+
+  const toolsList = await mcpRequest(origin, "tools/list") as { tools?: Array<{ name?: string; inputSchema?: unknown }> };
+  const toolNames = toolsList.tools?.map((tool) => tool.name) || [];
+  for (const required of ["list_merchants", "get_menu", "quote_order", "create_order", "get_payment_options", "attach_payment_proof", "check_order_status", "issue_receipt", "create_demo_merchant"]) {
+    if (!toolNames.includes(required)) {
+      throw new Error(`MCP tools/list is missing ${required}: ${JSON.stringify(toolNames)}`);
+    }
+  }
+  if (toolsList.tools?.some((tool) => !tool.inputSchema)) {
+    throw new Error(`MCP tools/list returned a tool without inputSchema: ${JSON.stringify(toolsList)}`);
+  }
+
+  const merchants = await mcpToolCall(origin, "list_merchants", {});
+  const merchantList = merchants.structuredContent as { merchants?: Array<{ id?: string }> } | undefined;
+  if (merchants.isError || !merchantList?.merchants?.some((merchant) => merchant.id === "raposa-coffee")) {
+    throw new Error(`MCP list_merchants failed: ${JSON.stringify(merchants)}`);
+  }
+
+  const quote = await mcpToolCall(origin, "quote_order", {
+    merchantId: "raposa-coffee",
+    userIntent: "I need an iced latte in 10 minutes.",
+    deadlineMinutes: 10,
+    maxSpendUsd: "10.00",
+  });
+  const quoteContent = quote.structuredContent as { quote?: { feasible?: boolean; item?: { id?: string } } } | undefined;
+  if (quote.isError || !quoteContent?.quote?.feasible || quoteContent.quote.item?.id !== "iced-latte") {
+    throw new Error(`MCP quote_order failed: ${JSON.stringify(quote)}`);
+  }
+
+  const order = await mcpToolCall(origin, "create_order", {
+    merchantId: "raposa-coffee",
+    userIntent: "I need an iced latte in 10 minutes.",
+    deadlineMinutes: 10,
+    maxSpendUsd: "10.00",
+    agentId: "mcp-smoke",
+    customerLabel: "MCP smoke customer",
+    paymentMode: "counter",
+  });
+  const orderContent = order.structuredContent as { order?: { id?: string; status?: string } } | undefined;
+  const orderId = orderContent?.order?.id;
+  if (order.isError || !orderId || orderContent?.order?.status !== "pending_payment") {
+    throw new Error(`MCP create_order failed: ${JSON.stringify(order)}`);
+  }
+
+  const paymentOptions = await mcpToolCall(origin, "get_payment_options", {
+    merchantId: "raposa-coffee",
+    orderId,
+  });
+  const optionsContent = paymentOptions.structuredContent as {
+    paymentOptions?: Array<{ rail?: string }>;
+    safety?: { requiresUserApproval?: boolean };
+  } | undefined;
+  if (
+    paymentOptions.isError
+    || !optionsContent?.safety?.requiresUserApproval
+    || !optionsContent.paymentOptions?.some((option) => option.rail === "counter")
+  ) {
+    throw new Error(`MCP get_payment_options failed: ${JSON.stringify(paymentOptions)}`);
+  }
+
+  const status = await mcpToolCall(origin, "check_order_status", { orderId });
+  const statusContent = status.structuredContent as { order?: { id?: string } } | undefined;
+  if (status.isError || statusContent?.order?.id !== orderId) {
+    throw new Error(`MCP check_order_status failed: ${JSON.stringify(status)}`);
+  }
+
+  const previousVerifierSecret = process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+  delete process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+  try {
+    const proofWithoutVerifier = await mcpToolCall(origin, "attach_payment_proof", {
+      merchantId: "raposa-coffee",
+      orderId,
+      provider: "counter",
+      paymentId: "mcp_counter_no_verifier",
+    });
+    if (!proofWithoutVerifier.isError || !proofWithoutVerifier.content?.[0]?.text?.includes("SLLR_MERCHANT_PAYMENT_VERIFY_SECRET")) {
+      throw new Error(`MCP attach_payment_proof without verifier should fail safely: ${JSON.stringify(proofWithoutVerifier)}`);
+    }
+
+    const demoProof = await mcpToolCall(origin, "attach_payment_proof", {
+      merchantId: "raposa-coffee",
+      orderId,
+      provider: "counter",
+      paymentId: "mcp_counter_demo",
+      demo: true,
+    });
+    const demoProofContent = demoProof.structuredContent as { proofLevel?: string; order?: { payment?: { paymentId?: string } } } | undefined;
+    if (demoProof.isError || demoProofContent?.proofLevel !== "receipt_memory_issued" || demoProofContent.order?.payment?.paymentId !== "mcp_counter_demo") {
+      throw new Error(`MCP attach_payment_proof demo path failed: ${JSON.stringify(demoProof)}`);
+    }
+  } finally {
+    if (previousVerifierSecret === undefined) {
+      delete process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+    } else {
+      process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET = previousVerifierSecret;
+    }
+  }
+
+  const unknownOrder = await mcpToolCall(origin, "check_order_status", { orderId: "ord_does_not_exist" });
+  if (!unknownOrder.isError) {
+    throw new Error(`MCP check_order_status for unknown order should set isError: ${JSON.stringify(unknownOrder)}`);
+  }
+
+  const unknownTool = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++nextMcpRequestId, method: "tools/call", params: { name: "not_a_tool", arguments: {} } }),
+  }).then((response) => response.json()) as { error?: { code?: number } };
+  if (unknownTool.error?.code !== -32602) {
+    throw new Error(`MCP unknown tool should return -32602: ${JSON.stringify(unknownTool)}`);
+  }
+
+  const browserOrigin = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://evil.example" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++nextMcpRequestId, method: "tools/list" }),
+  });
+  if (browserOrigin.status !== 403) {
+    throw new Error(`MCP cross-origin browser request should return 403, got ${browserOrigin.status}`);
+  }
+
+  const wrongContentType = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++nextMcpRequestId, method: "tools/list" }),
+  });
+  if (wrongContentType.status !== 415) {
+    throw new Error(`MCP non-JSON content type should return 415, got ${wrongContentType.status}`);
+  }
+
+  const batchRejected = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify([{ jsonrpc: "2.0", id: ++nextMcpRequestId, method: "tools/list" }]),
+  });
+  if (batchRejected.status !== 400) {
+    throw new Error(`MCP batch request should return 400, got ${batchRejected.status}`);
+  }
+
+  const receiptOrder = await mcpToolCall(origin, "create_order", {
+    merchantId: "raposa-coffee",
+    userIntent: "I need a cold brew in 15 minutes.",
+    deadlineMinutes: 15,
+    maxSpendUsd: "10.00",
+    agentId: "mcp-smoke",
+    paymentMode: "counter",
+  });
+  const receiptOrderId = (receiptOrder.structuredContent as { order?: { id?: string } } | undefined)?.order?.id;
+  if (receiptOrder.isError || !receiptOrderId) {
+    throw new Error(`MCP receipt test order failed: ${JSON.stringify(receiptOrder)}`);
+  }
+  const receipt = await mcpToolCall(origin, "issue_receipt", {
+    merchantId: "raposa-coffee",
+    orderId: receiptOrderId,
+    actor: "raposa-staff",
+    note: "Counter paid and handed off during MCP smoke.",
+    demo: true,
+  });
+  const receiptContent = receipt.structuredContent as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } } | undefined;
+  if (receipt.isError || receiptContent?.proofLevel !== "receipt_memory_issued" || !receiptContent.order?.receipt?.receiptHash) {
+    throw new Error(`MCP issue_receipt failed: ${JSON.stringify(receipt)}`);
+  }
+}
+
+async function smokeReceiptGating(origin: string) {
+  const previousSecret = process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+  process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET = "verify-smoke-secret";
+  try {
+    const order = await postJson(origin, "/merchants/raposa-coffee/orders", {
+      userIntent: "I need an iced latte in 10 minutes.",
+      deadlineMinutes: 10,
+      maxSpendUsd: "10.00",
+      paymentMode: "counter",
+    }) as { order?: { id?: string } };
+    const orderId = order.order?.id;
+    if (!orderId) throw new Error(`Receipt-gating test order failed: ${JSON.stringify(order)}`);
+
+    // Buyer-style caller with no verifier secret must not be able to mint a receipt.
+    const receiptNoSecret = await postJsonFailure(origin, "/merchants/raposa-coffee/receipt", {
+      orderId,
+      actor: "attacker",
+      note: "Trying to mint a receipt with no proof.",
+    });
+    if (receiptNoSecret.status !== 401) {
+      throw new Error(`Receipt without verifier secret should be 401: ${JSON.stringify(receiptNoSecret)}`);
+    }
+
+    // Same via MCP issue_receipt — must surface an error, not a receipt.
+    const mcpReceiptNoSecret = await mcpToolCall(origin, "issue_receipt", {
+      merchantId: "raposa-coffee",
+      orderId,
+      actor: "attacker",
+    });
+    if (!mcpReceiptNoSecret.isError || !mcpReceiptNoSecret.content?.[0]?.text?.includes("verifier secret")) {
+      throw new Error(`MCP issue_receipt without verifier secret should fail: ${JSON.stringify(mcpReceiptNoSecret)}`);
+    }
+
+    // Staff fulfill action without the secret is rejected too.
+    const fulfillNoSecret = await postJsonFailure(origin, `/orders/${orderId}/fulfill`, {
+      merchantId: "raposa-coffee",
+      actor: "attacker",
+    });
+    if (fulfillNoSecret.status !== 401) {
+      throw new Error(`Staff fulfill without verifier secret should be 401: ${JSON.stringify(fulfillNoSecret)}`);
+    }
+
+    // With the verifier secret, the merchant receipt path works.
+    const receiptWithSecret = await postJson(origin, "/merchants/raposa-coffee/receipt", {
+      orderId,
+      actor: "raposa-staff",
+      note: "Counter paid and handed off.",
+      verificationToken: "verify-smoke-secret",
+    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } };
+    if (receiptWithSecret.proofLevel !== "receipt_memory_issued" || !receiptWithSecret.order?.receipt?.receiptHash) {
+      throw new Error(`Receipt with verifier secret failed: ${JSON.stringify(receiptWithSecret)}`);
+    }
+  } finally {
+    if (previousSecret === undefined) {
+      delete process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+    } else {
+      process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET = previousSecret;
+    }
+  }
+}
+
+async function smokeDemoMerchants(origin: string) {
+  const fixtureProducts = [
+    {
+      title: "House Blend 12oz",
+      handle: "house-blend-12oz",
+      product_type: "Coffee Beans",
+      tags: "coffee, beans, medium roast",
+      variants: [{ id: 1, title: "Default", price: "18.00", available: true }],
+    },
+    {
+      title: "Single Origin Drip",
+      handle: "single-origin-drip",
+      product_type: "Drinks",
+      tags: ["coffee", "drip"],
+      variants: [
+        { id: 2, title: "Small", price: "5.00", available: false },
+        { id: 3, title: "Large", price: "6.50", available: true },
+      ],
+    },
+    { title: "No Variants", handle: "no-variants", variants: [] },
+    { title: "Bad Price", handle: "bad-price", variants: [{ id: 4, price: "free", available: true }] },
+  ];
+
+  const created = await postJson(origin, "/demo-merchants", {
+    storeDomain: "demo-roaster-smoke.com",
+    name: "Demo Roaster",
+    category: "coffee_shop",
+    location: "Austin",
+    fulfillment: "pickup",
+    products: fixtureProducts,
+  }) as {
+    merchant?: { id?: string; catalogItems?: number; paymentRails?: string[] };
+    demo?: { agentPage?: string; examplePrompt?: string };
+    source?: string;
+  };
+  if (
+    created.merchant?.id !== "demo-roaster-smoke-com"
+    || created.merchant.catalogItems !== 2
+    || !created.merchant.paymentRails?.includes("counter")
+    || !created.merchant.paymentRails.includes("shopify")
+    || created.source !== "provided_products"
+    || !created.demo?.agentPage?.endsWith("/agent/demo-roaster-smoke-com")
+  ) {
+    throw new Error(`Demo merchant ingestion failed: ${JSON.stringify(created)}`);
+  }
+
+  const merchantList = await getJson(origin, "/merchants") as { merchants?: Array<{ id?: string }> };
+  if (!merchantList.merchants?.some((merchant) => merchant.id === "demo-roaster-smoke-com")) {
+    throw new Error(`Demo merchant did not appear in /merchants: ${JSON.stringify(merchantList)}`);
+  }
+
+  const demoList = await getJson(origin, "/demo-merchants") as { merchants?: Array<{ id?: string }> };
+  if (!demoList.merchants?.some((merchant) => merchant.id === "demo-roaster-smoke-com")) {
+    throw new Error(`Demo merchant list endpoint failed: ${JSON.stringify(demoList)}`);
+  }
+
+  const demoQuote = await postJson(origin, "/merchants/demo-roaster-smoke-com/quote", {
+    userIntent: "Get me the house blend coffee beans under $20.",
+    maxSpendUsd: "20.00",
+  }) as { quote?: { feasible?: boolean; item?: { id?: string } } };
+  if (!demoQuote.quote?.feasible || demoQuote.quote.item?.id !== "house-blend-12oz") {
+    throw new Error(`Demo merchant quote failed: ${JSON.stringify(demoQuote)}`);
+  }
+
+  const demoOrder = await postJson(origin, "/merchants/demo-roaster-smoke-com/orders", {
+    userIntent: "Get me the house blend coffee beans under $20.",
+    maxSpendUsd: "20.00",
+    agentId: "demo-smoke",
+    paymentMode: "counter",
+  }) as { order?: { id?: string } };
+  if (!demoOrder.order?.id) {
+    throw new Error(`Demo merchant order failed: ${JSON.stringify(demoOrder)}`);
+  }
+
+  const demoOptions = await postJson(origin, `/merchants/demo-roaster-smoke-com/payment-options`, {
+    orderId: demoOrder.order.id,
+  }) as { paymentOptions?: Array<{ rail?: string; url?: string | null }> };
+  const shopifyOption = demoOptions.paymentOptions?.find((option) => option.rail === "shopify");
+  const counterOption = demoOptions.paymentOptions?.find((option) => option.rail === "counter");
+  if (!counterOption || !shopifyOption?.url?.endsWith("/products/house-blend-12oz")) {
+    throw new Error(`Demo merchant payment options failed: ${JSON.stringify(demoOptions)}`);
+  }
+
+  const demoAgentPage = await fetch(`${origin}/agent/demo-roaster-smoke-com`).then((response) => response.text());
+  if (!demoAgentPage.includes("Demo Roaster")) {
+    throw new Error("Demo merchant standalone agent page did not render.");
+  }
+
+  for (const badDomain of ["127.0.0.1", "localhost", "service.internal", "10.0.0.5", "demo", "127.1", "0x7f.0.0.1", "127.000.000.001", "192.168.1.1"]) {
+    const rejected = await postJsonFailure(origin, "/demo-merchants", { storeDomain: badDomain, products: fixtureProducts });
+    if (rejected.status !== 400) {
+      throw new Error(`Demo merchant storeDomain ${badDomain} should be rejected with 400: ${JSON.stringify(rejected)}`);
+    }
+  }
+
+  const badFulfillment = await postJsonFailure(origin, "/demo-merchants", {
+    storeDomain: "demo-roaster-smoke.com",
+    fulfillment: "teleport",
+    products: fixtureProducts,
+  });
+  if (badFulfillment.status !== 400) {
+    throw new Error(`Invalid fulfillment should be rejected: ${JSON.stringify(badFulfillment)}`);
+  }
+
+  const emptyCatalog = await postJsonFailure(origin, "/demo-merchants", {
+    storeDomain: "empty-roaster-smoke.com",
+    products: [{ title: "No Variants", handle: "no-variants", variants: [] }],
+  });
+  if (emptyCatalog.status !== 422) {
+    throw new Error(`Empty mapped catalog should be rejected with 422: ${JSON.stringify(emptyCatalog)}`);
+  }
+
+  const previousDemoSecret = process.env.SLLR_DEMO_MERCHANT_SECRET;
+  process.env.SLLR_DEMO_MERCHANT_SECRET = "demo-smoke-secret";
+  try {
+    const missingSecret = await postJsonFailure(origin, "/demo-merchants", {
+      storeDomain: "demo-roaster-smoke.com",
+      products: fixtureProducts,
+    });
+    if (missingSecret.status !== 401) {
+      throw new Error(`Demo merchant without secret should be rejected with 401: ${JSON.stringify(missingSecret)}`);
+    }
+    const withSecret = await postJson(origin, "/demo-merchants", {
+      storeDomain: "demo-roaster-smoke.com",
+      products: fixtureProducts,
+      secret: "demo-smoke-secret",
+    }) as { merchant?: { id?: string } };
+    if (withSecret.merchant?.id !== "demo-roaster-smoke-com") {
+      throw new Error(`Demo merchant with secret failed: ${JSON.stringify(withSecret)}`);
+    }
+  } finally {
+    if (previousDemoSecret === undefined) {
+      delete process.env.SLLR_DEMO_MERCHANT_SECRET;
+    } else {
+      process.env.SLLR_DEMO_MERCHANT_SECRET = previousDemoSecret;
+    }
+  }
+}
+
+// Minimal in-process Upstash / Vercel KV REST server to exercise the
+// RedisRestStore command encoding (GET/SET/SADD/SMEMBERS) end to end.
+async function withFakeRedis<T>(run: () => Promise<T>): Promise<T> {
+  const values = new Map<string, string>();
+  const sets = new Map<string, Set<string>>();
+  const token = "fake-redis-token";
+  const server = createServer((request, response) => {
+    if (request.headers.authorization !== `Bearer ${token}`) {
+      response.writeHead(401);
+      return response.end(JSON.stringify({ error: "unauthorized" }));
+    }
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      let command: unknown;
+      try {
+        command = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        response.writeHead(400);
+        return response.end(JSON.stringify({ error: "bad json" }));
+      }
+      if (!Array.isArray(command) || typeof command[0] !== "string") {
+        response.writeHead(400);
+        return response.end(JSON.stringify({ error: "bad command" }));
+      }
+      const [op, key, value] = command as string[];
+      let result: unknown = null;
+      if (op === "SET") { values.set(key, value); result = "OK"; }
+      else if (op === "GET") { result = values.has(key) ? values.get(key) : null; }
+      else if (op === "SADD") {
+        const set = sets.get(key) ?? new Set<string>();
+        set.add(value);
+        sets.set(key, set);
+        result = 1;
+      } else if (op === "SMEMBERS") { result = [...(sets.get(key) ?? [])]; }
+      else { response.writeHead(400); return response.end(JSON.stringify({ error: `unsupported ${op}` })); }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ result }));
+    });
+  });
+  server.listen(0);
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Failed to start fake Redis.");
+  const prevUrl = process.env.KV_REST_API_URL;
+  const prevToken = process.env.KV_REST_API_TOKEN;
+  process.env.KV_REST_API_URL = `http://127.0.0.1:${address.port}`;
+  process.env.KV_REST_API_TOKEN = token;
+  resetStoreForTest();
+  try {
+    return await run();
+  } finally {
+    if (prevUrl === undefined) delete process.env.KV_REST_API_URL; else process.env.KV_REST_API_URL = prevUrl;
+    if (prevToken === undefined) delete process.env.KV_REST_API_TOKEN; else process.env.KV_REST_API_TOKEN = prevToken;
+    resetStoreForTest();
+    server.close();
+  }
+}
+
+async function smokeStoreBackend() {
+  await withFakeRedis(async () => {
+    if (storeBackendName() !== "redis_rest") {
+      throw new Error(`Store should select redis_rest backend when KV env is set, got ${storeBackendName()}`);
+    }
+    const store = sllrStore();
+    if (await store.getJson("sllr:test:missing") !== null) {
+      throw new Error("Missing key should round-trip as null.");
+    }
+    await store.setJson("sllr:test:order", { id: "ord_redis", status: "pending_payment" });
+    const loaded = await store.getJson<{ id?: string; status?: string }>("sllr:test:order");
+    if (loaded?.id !== "ord_redis" || loaded.status !== "pending_payment") {
+      throw new Error(`Redis-backed JSON round-trip failed: ${JSON.stringify(loaded)}`);
+    }
+    await store.addToIndex("sllr:test:index", "ord_redis");
+    await store.addToIndex("sllr:test:index", "ord_redis");
+    await store.addToIndex("sllr:test:index", "ord_redis_2");
+    const members = await store.indexMembers("sllr:test:index");
+    if (members.length !== 2 || !members.includes("ord_redis") || !members.includes("ord_redis_2")) {
+      throw new Error(`Redis-backed index (SADD/SMEMBERS) failed: ${JSON.stringify(members)}`);
+    }
+  });
+  if (storeBackendName() !== "memory") {
+    throw new Error("Store should fall back to memory backend after KV env is cleared.");
+  }
+}
+
 async function main() {
   const server = createSllrServer();
   server.listen(0);
@@ -66,6 +571,7 @@ async function main() {
     };
     if (
       root.product !== "SLL-R"
+      || !(root.agentDiscovery as { mcp?: string } | undefined)?.mcp?.endsWith("/mcp")
       || !root.agentDiscovery?.openapi?.endsWith("/openapi.json")
       || !root.agentDiscovery?.sllrMcpManifest?.endsWith("/.well-known/sllr-mcp.json")
       || !root.agentDiscovery?.baseMcpPluginSpec?.endsWith("/.well-known/base-mcp-plugin.md")
@@ -89,17 +595,26 @@ async function main() {
     }
     const mcpManifest = await getJson(origin, "/.well-known/sllr-mcp.json") as {
       name?: string;
+      transport?: { type?: string; url?: string };
       tools?: Array<{ name?: string; path?: string }>;
       safety?: { noAutonomousPayment?: boolean };
     };
     if (
       mcpManifest.name !== "SLL-R Merchant MCP"
+      || mcpManifest.transport?.type !== "streamable_http"
+      || !mcpManifest.transport.url?.endsWith("/mcp")
       || !mcpManifest.safety?.noAutonomousPayment
       || !mcpManifest.tools?.some((tool) => tool.name === "quote_order" && tool.path === "/merchants/{merchantId}/quote")
       || !mcpManifest.tools?.some((tool) => tool.name === "create_order" && tool.path === "/merchants/{merchantId}/orders")
+      || !mcpManifest.tools?.some((tool) => tool.name === "get_payment_options" && tool.path === "/merchants/{merchantId}/payment-options")
     ) {
       throw new Error(`SLL-R MCP manifest did not expose generic merchant tools: ${JSON.stringify(mcpManifest)}`);
     }
+
+    await smokeStoreBackend();
+    await smokeMcp(origin);
+    await smokeReceiptGating(origin);
+    await smokeDemoMerchants(origin);
 
     const aiPlugin = await getJson(origin, "/.well-known/ai-plugin.json") as {
       name_for_model?: string;

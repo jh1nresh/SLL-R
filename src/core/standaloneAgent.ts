@@ -43,7 +43,7 @@ function checkoutHandoffFor(merchantId: string, itemId?: string) {
   };
 }
 
-export function standaloneAgentMessage(merchantId: string, payload: Record<string, unknown>, origin: string) {
+export async function standaloneAgentMessage(merchantId: string, payload: Record<string, unknown>, origin: string) {
   const merchant = merchantForId(merchantId);
   if (!merchant) throw Object.assign(new Error(`Unknown merchant: ${merchantId}`), { status: 404 });
 
@@ -89,7 +89,7 @@ export function standaloneAgentMessage(merchantId: string, payload: Record<strin
           ? "checkout"
           : undefined,
   };
-  const result = createOrder(orderInput);
+  const result = await createOrder(orderInput);
   return {
     product: "SLL-R standalone ordering agent",
     merchant: { id: merchant.id, name: merchant.name },

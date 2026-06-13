@@ -4,8 +4,50 @@ import type { CatalogItem, MerchantActionRequest, MerchantOrderFilter, MerchantP
 import { issueSllrReceipt } from "../adapters/sllrReceipts.js";
 import { centsFromUsd } from "./money.js";
 import { quoteOrder } from "./quote.js";
+import { sllrStore } from "./store.js";
 
-const orders = new Map<string, SellerOrder>();
+const ORDER_KEY_PREFIX = "sllr:order:";
+const ORDER_INDEX = "sllr:order-ids";
+const MERCHANT_ORDER_INDEX_PREFIX = "sllr:order-ids:";
+
+function orderKey(orderId: string) {
+  return `${ORDER_KEY_PREFIX}${orderId}`;
+}
+
+function merchantOrderIndex(merchantId: string) {
+  return `${MERCHANT_ORDER_INDEX_PREFIX}${merchantId}`;
+}
+
+async function loadOrdersByIds(ids: string[]): Promise<SellerOrder[]> {
+  const store = sllrStore();
+  const loaded = await Promise.all(ids.map((id) => store.getJson<SellerOrder>(orderKey(id))));
+  return loaded.filter((order): order is SellerOrder => order !== null);
+}
+
+async function saveOrder(order: SellerOrder) {
+  const store = sllrStore();
+  await store.setJson(orderKey(order.id), order);
+  // Per-merchant index keeps the hot path (pickup-queue scan on create) and
+  // merchant-scoped listings from loading every order in the system. The global
+  // index backs the unfiltered terminal listing.
+  await store.addToIndex(merchantOrderIndex(order.merchantId), order.id);
+  await store.addToIndex(ORDER_INDEX, order.id);
+  return order;
+}
+
+async function loadOrder(orderId: string) {
+  return sllrStore().getJson<SellerOrder>(orderKey(orderId));
+}
+
+async function ordersForMerchant(merchantId: string): Promise<SellerOrder[]> {
+  const ids = await sllrStore().indexMembers(merchantOrderIndex(merchantId));
+  return loadOrdersByIds(ids);
+}
+
+async function allOrders(): Promise<SellerOrder[]> {
+  const ids = await sllrStore().indexMembers(ORDER_INDEX);
+  return loadOrdersByIds(ids);
+}
 
 const capacityByClass = {
   espresso: 8,
@@ -27,15 +69,15 @@ function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60_000);
 }
 
-function activePickupOrders(merchantId: string, productionClass: string) {
-  return Array.from(orders.values()).filter((order) => (
-    order.merchantId === merchantId
-    && order.promise.productionClass === productionClass
+async function activePickupOrders(merchantId: string, productionClass: string) {
+  const merchantOrders = await ordersForMerchant(merchantId);
+  return merchantOrders.filter((order) => (
+    order.promise.productionClass === productionClass
     && !["rejected", "claimed", "fulfilled", "receipt_issued"].includes(order.status)
   ));
 }
 
-function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: OrderRequest, now: Date): SellerOrder["promise"] {
+async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: OrderRequest, now: Date): Promise<SellerOrder["promise"]> {
   if (!item.fulfillment.includes("pickup")) {
     return {
       status: "not_applicable",
@@ -51,7 +93,7 @@ function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: Orde
   }
 
   const productionClass = productionClassFor(item);
-  const activeAhead = activePickupOrders(merchant.id, productionClass).length;
+  const activeAhead = (await activePickupOrders(merchant.id, productionClass)).length;
   const capacity = capacityByClass[productionClass];
   const capacityWindowMinutes = 15;
   const prepMinutes = Math.max(item.prepMinutes || 5, 1);
@@ -72,7 +114,7 @@ function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: Orde
   };
 }
 
-export function createOrder(input: OrderRequest) {
+export async function createOrder(input: OrderRequest) {
   const quote = quoteOrder(input);
   if (!quote.feasible || !quote.item) {
     throw Object.assign(new Error("Quote is not feasible. Ask the buyer agent to accept an alternative first."), {
@@ -97,7 +139,7 @@ export function createOrder(input: OrderRequest) {
     status: "pending_payment",
     proofLevel: "order_intent_only",
     item: quote.item,
-    promise: pickupPromise(merchant, catalogItem, input, nowDate),
+    promise: await pickupPromise(merchant, catalogItem, input, nowDate),
     payment: {
       mode: paymentMode,
       status: "required",
@@ -114,23 +156,23 @@ export function createOrder(input: OrderRequest) {
     createdAt: now,
     updatedAt: now,
   };
-  orders.set(order.id, order);
+  await saveOrder(order);
   return { order, quote };
 }
 
-export function getOrder(orderId: string) {
-  return orders.get(orderId) || null;
+export async function getOrder(orderId: string) {
+  return (await loadOrder(orderId)) || null;
 }
 
-export function listOrders(filter: MerchantOrderFilter = {}) {
-  return Array.from(orders.values())
-    .filter((order) => !filter.merchantId || order.merchantId === filter.merchantId)
+export async function listOrders(filter: MerchantOrderFilter = {}) {
+  const scoped = filter.merchantId ? await ordersForMerchant(filter.merchantId) : await allOrders();
+  return scoped
     .filter((order) => !filter.status || order.status === filter.status)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
-function requireOrderForMerchant(orderId: string, input: MerchantActionRequest) {
-  const order = getOrder(orderId);
+async function requireOrderForMerchant(orderId: string, input: MerchantActionRequest) {
+  const order = await getOrder(orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
   if (order.merchantId !== input.merchantId) {
     throw Object.assign(new Error(`Merchant ${input.merchantId} cannot operate order for ${order.merchantId}.`), { status: 409 });
@@ -147,8 +189,8 @@ function terminalUpdate(input: MerchantActionRequest, status: SellerOrder["termi
   };
 }
 
-export function acceptOrder(orderId: string, input: MerchantActionRequest) {
-  const order = requireOrderForMerchant(orderId, input);
+export async function acceptOrder(orderId: string, input: MerchantActionRequest) {
+  const order = await requireOrderForMerchant(orderId, input);
   if (order.status === "rejected") {
     throw Object.assign(new Error("Rejected orders cannot be accepted."), { status: 409 });
   }
@@ -160,12 +202,12 @@ export function acceptOrder(orderId: string, input: MerchantActionRequest) {
     terminal: terminalUpdate(input, "accepted"),
     updatedAt: new Date().toISOString(),
   };
-  orders.set(updated.id, updated);
+  await saveOrder(updated);
   return updated;
 }
 
-export function rejectOrder(orderId: string, input: MerchantActionRequest) {
-  const order = requireOrderForMerchant(orderId, input);
+export async function rejectOrder(orderId: string, input: MerchantActionRequest) {
+  const order = await requireOrderForMerchant(orderId, input);
   if (order.status === "payment_backed" || order.status === "fulfilled" || order.status === "receipt_issued") {
     throw Object.assign(new Error("Orders with payment, fulfillment, or receipt proof cannot be rejected."), { status: 409 });
   }
@@ -176,12 +218,12 @@ export function rejectOrder(orderId: string, input: MerchantActionRequest) {
     terminal: terminalUpdate(input, "rejected"),
     updatedAt: new Date().toISOString(),
   };
-  orders.set(updated.id, updated);
+  await saveOrder(updated);
   return updated;
 }
 
 export async function fulfillOrder(orderId: string, input: MerchantActionRequest) {
-  const order = requireOrderForMerchant(orderId, input);
+  const order = await requireOrderForMerchant(orderId, input);
   if (order.status === "rejected") {
     throw Object.assign(new Error("Rejected orders cannot be fulfilled."), { status: 409 });
   }
@@ -198,12 +240,12 @@ export async function fulfillOrder(orderId: string, input: MerchantActionRequest
   fulfilled.status = "receipt_issued";
   fulfilled.proofLevel = "receipt_memory_issued";
   fulfilled.updatedAt = new Date().toISOString();
-  orders.set(fulfilled.id, fulfilled);
+  await saveOrder(fulfilled);
   return fulfilled;
 }
 
-export function markOrderReady(orderId: string, input: MerchantActionRequest) {
-  const order = requireOrderForMerchant(orderId, input);
+export async function markOrderReady(orderId: string, input: MerchantActionRequest) {
+  const order = await requireOrderForMerchant(orderId, input);
   if (order.status === "rejected") {
     throw Object.assign(new Error("Rejected orders cannot be marked ready."), { status: 409 });
   }
@@ -226,12 +268,12 @@ export function markOrderReady(orderId: string, input: MerchantActionRequest) {
     },
     updatedAt: readyAt.toISOString(),
   };
-  orders.set(updated.id, updated);
+  await saveOrder(updated);
   return updated;
 }
 
 export async function claimOrder(orderId: string, input: MerchantActionRequest) {
-  const order = requireOrderForMerchant(orderId, input);
+  const order = await requireOrderForMerchant(orderId, input);
   if (order.status === "rejected") {
     throw Object.assign(new Error("Rejected orders cannot be claimed."), { status: 409 });
   }
@@ -257,12 +299,12 @@ export async function claimOrder(orderId: string, input: MerchantActionRequest) 
   claimed.status = "receipt_issued";
   claimed.proofLevel = "receipt_memory_issued";
   claimed.updatedAt = new Date().toISOString();
-  orders.set(claimed.id, claimed);
+  await saveOrder(claimed);
   return claimed;
 }
 
 export async function attachPaymentProof(input: PaymentWebhook) {
-  const order = getOrder(input.orderId);
+  const order = await getOrder(input.orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${input.orderId}`), { status: 404 });
   if (order.merchantId !== input.merchantId) {
     throw Object.assign(new Error(`Payment merchant ${input.merchantId} does not match order merchant ${order.merchantId}.`), { status: 409 });
@@ -287,6 +329,6 @@ export async function attachPaymentProof(input: PaymentWebhook) {
   updated.status = "receipt_issued";
   updated.proofLevel = "receipt_memory_issued";
   updated.updatedAt = new Date().toISOString();
-  orders.set(updated.id, updated);
+  await saveOrder(updated);
   return updated;
 }

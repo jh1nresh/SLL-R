@@ -132,6 +132,24 @@ Use `GET /pilot-kit?merchantId=raposa-coffee` or
 `GET /pilot-kit?merchantId=solyd` to generate a merchant-specific onboarding
 package for the first pilot meeting.
 
+## State & Persistence
+
+SLL-R stores orders and runtime demo merchants through a small key-value
+abstraction with two backends:
+
+- **memory** (default): in-process. Survives for the process lifetime only.
+  Fine for local dev, a single long-running process (Railway/Render/Fly), and
+  demo recordings.
+- **redis_rest**: Vercel KV / Upstash Redis over the REST API (zero SDK
+  dependency). Required for **serverless** (Vercel), where each invocation is a
+  fresh instance, and for horizontal scale. Configure `KV_REST_API_URL` +
+  `KV_REST_API_TOKEN` (or the `UPSTASH_REDIS_REST_*` equivalents).
+
+`GET /health` reports the active backend: `{ "ok": true, "store": "redis_rest" }`.
+
+Receipt memory is gated: set `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` so only the
+merchant can issue receipts (and verify payment proof). See [env.example](./env.example).
+
 ## Run Locally
 
 ```bash
@@ -147,9 +165,27 @@ Default server:
 http://localhost:3100
 ```
 
+## Connect As MCP
+
+SLL-R exposes a real MCP server (stateless Streamable HTTP) at `/mcp`:
+
+```bash
+claude mcp add --transport http sllr http://localhost:3100/mcp
+```
+
+Tools: `list_merchants`, `get_merchant`, `get_menu`, `quote_order`,
+`create_order`, `list_orders`, `check_order_status`, `get_payment_options`,
+`attach_payment_proof`, `issue_receipt`, `create_demo_merchant`.
+
+Payment safety is enforced server-side: `attach_payment_proof` requires the
+merchant verifier secret (`verificationToken`) in production and only accepts
+`demo: true` when no secret is configured. See
+[SLL-R MCP runbook](./docs/sllr-mcp-runbook.md).
+
 ## Endpoints
 
 ```text
+POST /mcp
 GET  /.well-known/sllr-agent.json
 GET  /.well-known/sllr-mcp.json
 GET  /.well-known/ai-plugin.json
@@ -171,6 +207,8 @@ GET  /merchants/{merchantId}/orders
 POST /merchants/{merchantId}/payment-options
 POST /merchants/{merchantId}/payment
 POST /merchants/{merchantId}/receipt
+GET  /demo-merchants
+POST /demo-merchants
 GET  /shopify/merchants
 GET  /shopify/merchants/{merchantId}/connect
 GET  /shopify/merchants/{merchantId}/products
@@ -295,6 +333,29 @@ curl "http://localhost:3100/base-plugin/coffee/order?merchantId=noun-coffee&inte
 `GET /base-plugin/coffee/prepare-payment` returns a checkout handoff by default.
 For a Base MCP demo transaction, set `SLLR_BASE_COFFEE_RECIPIENT` to a demo EVM
 address; SLL-R will return a Base USDC transfer call to that configured address.
+
+## Example Demo Merchant Ingestion
+
+Turn any public Shopify storefront into a quotable SLL-R demo merchant from
+its `products.json` feed — no merchant setup required. This powers the
+"60-second demo with your actual menu" outreach flow:
+
+```bash
+curl -X POST http://localhost:3100/demo-merchants \
+  -H "content-type: application/json" \
+  -d '{
+    "storeDomain": "panthercoffee.com",
+    "name": "Panther Coffee",
+    "category": "coffee_shop",
+    "location": "Miami",
+    "fulfillment": "shipping"
+  }'
+```
+
+The response includes the agent page, terminal page, and an example MCP
+prompt. The same flow is exposed as the `create_demo_merchant` MCP tool.
+Demo merchants get `counter` + `shopify` payment rails, live in memory, and
+reset on restart. Set `SLLR_DEMO_MERCHANT_SECRET` on public deployments.
 
 ## Example Shopify Adapter
 

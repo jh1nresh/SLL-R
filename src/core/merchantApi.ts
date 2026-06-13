@@ -1,6 +1,6 @@
 import { attachPaymentProof, createOrder, fulfillOrder, getOrder, listOrders } from "./orders.js";
 import { quoteOrder } from "./quote.js";
-import { merchantForId, merchantProfiles } from "../merchants/profiles.js";
+import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
 import type { MerchantProfile, OrderRequest, PaymentRail, QuoteRequest } from "../types.js";
 
 function requireMerchant(merchantId: string) {
@@ -62,7 +62,7 @@ export function requirePaymentVerifier(headers: Record<string, string | string[]
 export function listMerchants() {
   return {
     product: "SLL-R merchant runtime",
-    merchants: Object.values(merchantProfiles).map(merchantSummary),
+    merchants: allMerchantProfiles().map(merchantSummary),
   };
 }
 
@@ -99,9 +99,9 @@ export function quoteMerchantOrder(merchantId: string, payload: Record<string, u
   };
 }
 
-export function createMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
+export async function createMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
   requireMerchant(merchantId);
-  const result = createOrder(bodyWithMerchant(merchantId, payload) as OrderRequest);
+  const result = await createOrder(bodyWithMerchant(merchantId, payload) as OrderRequest);
   return {
     product: "SLL-R merchant order",
     status: result.order.status,
@@ -111,11 +111,11 @@ export function createMerchantOrder(merchantId: string, payload: Record<string, 
   };
 }
 
-export function listMerchantOrders(merchantId: string, status?: string | null) {
+export async function listMerchantOrders(merchantId: string, status?: string | null) {
   requireMerchant(merchantId);
   return {
     product: "SLL-R merchant orders",
-    orders: listOrders({
+    orders: await listOrders({
       merchantId,
       status: status as never || undefined,
     }),
@@ -126,7 +126,7 @@ export async function attachMerchantPayment(merchantId: string, headers: Record<
   const merchant = requireMerchant(merchantId);
   const orderId = String(payload.orderId || "");
   if (!orderId) throw Object.assign(new Error("Missing orderId."), { status: 400 });
-  const order = getOrder(orderId);
+  const order = await getOrder(orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
   if (order.merchantId !== merchant.id) {
     throw Object.assign(new Error(`Merchant ${merchant.id} cannot attach payment proof for ${order.merchantId}.`), { status: 409 });
