@@ -432,9 +432,17 @@ curl -X POST http://localhost:3100/orders/ord_.../fulfill \
   -d '{
     "merchantId": "raposa-coffee",
     "actor": "raposa-staff",
-    "note": "Paid at counter and handed off."
+    "note": "Paid at counter and handed off.",
+    "demo": true
   }'
 ```
+
+`fulfill`, `claim`, and `POST /merchants/{merchantId}/receipt` issue receipt
+memory, so they require the same verifier as payment proof: configure
+`SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` and pass it in
+`x-sllr-merchant-payment-secret` (the terminal pages read it from
+`localStorage.sllrStaffSecret`); `demo: true` is only accepted when no secret
+is configured.
 
 Raposa promise flow:
 
@@ -454,7 +462,8 @@ curl -X POST http://localhost:3100/orders/ord_.../claim \
   -d '{
     "merchantId": "raposa-coffee",
     "actor": "raposa-staff",
-    "note": "Paid at counter and claimed."
+    "note": "Paid at counter and claimed.",
+    "demo": true
   }'
 ```
 

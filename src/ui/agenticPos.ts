@@ -336,10 +336,14 @@ function timeText(value) {
 }
 
 async function action(orderId, actionName, note) {
+  const staffSecret = window.localStorage.getItem("sllrStaffSecret");
   const response = await fetch("/orders/" + encodeURIComponent(orderId) + "/" + actionName, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ merchantId, actor: "sllr-terminal", note })
+    headers: {
+      "content-type": "application/json",
+      ...(staffSecret ? { "x-sllr-merchant-payment-secret": staffSecret } : {})
+    },
+    body: JSON.stringify({ merchantId, actor: "sllr-terminal", note, demo: !staffSecret })
   });
   if (!response.ok) {
     const json = await response.json().catch(() => ({}));

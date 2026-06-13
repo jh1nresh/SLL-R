@@ -1,10 +1,10 @@
 import { once } from "node:events";
 import { createSllrServer } from "../server.js";
 
-async function postJson(origin: string, path: string, payload: unknown) {
+async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(payload),
   });
   const json = await response.json() as Record<string, unknown>;
@@ -186,10 +186,19 @@ async function main() {
     if (raposaReady.order?.status !== "ready" || !raposaReady.order.promise?.readyAt) {
       throw new Error(`Raposa ready failed: ${JSON.stringify(raposaReady)}`);
     }
+    const raposaClaimUnverified = await postJsonFailure(origin, `/orders/${raposaOrder.order.id}/claim`, {
+      merchantId: "raposa-coffee",
+      actor: "smoke-staff",
+      note: "Claim without verifier proof should be rejected.",
+    });
+    if (raposaClaimUnverified.status !== 403) {
+      throw new Error(`Claim without verifier secret or demo flag should be rejected: ${JSON.stringify(raposaClaimUnverified)}`);
+    }
     const raposaClaimed = await postJson(origin, `/orders/${raposaOrder.order.id}/claim`, {
       merchantId: "raposa-coffee",
       actor: "smoke-staff",
       note: "Paid at counter and claimed during smoke test.",
+      demo: true,
     }) as { order?: { status?: string; proofLevel?: string; receipt?: { receiptHash?: string } } };
     if (raposaClaimed.order?.status !== "receipt_issued" || raposaClaimed.order.proofLevel !== "receipt_memory_issued" || !raposaClaimed.order.receipt?.receiptHash) {
       throw new Error(`Raposa claim did not issue receipt memory: ${JSON.stringify(raposaClaimed)}`);
@@ -530,6 +539,7 @@ async function main() {
       merchantId: "raposa-coffee",
       actor: "raposa-staff",
       note: "Paid at counter and claimed.",
+      demo: true,
     }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string }; promise?: { claimedAt?: string } } };
     if (claimed.proofLevel !== "receipt_memory_issued" || !claimed.order?.receipt?.receiptHash || !claimed.order.promise?.claimedAt) {
       throw new Error(`Customer claim did not issue receipt handoff: ${JSON.stringify(claimed)}`);
@@ -645,13 +655,57 @@ async function main() {
       paymentMode: "counter",
     }) as { order?: { id?: string } };
     if (!receiptOrder.order?.id) throw new Error(`Receipt test order was not created: ${JSON.stringify(receiptOrder)}`);
+    const receiptUnverified = await postJsonFailure(origin, "/merchants/raposa-coffee/receipt", {
+      orderId: receiptOrder.order.id,
+      actor: "raposa-staff",
+      note: "Receipt without verifier proof should be rejected.",
+    });
+    if (receiptUnverified.status !== 403) {
+      throw new Error(`Receipt without verifier secret or demo flag should be rejected: ${JSON.stringify(receiptUnverified)}`);
+    }
     const receipt = await postJson(origin, "/merchants/raposa-coffee/receipt", {
       orderId: receiptOrder.order.id,
       actor: "raposa-staff",
       note: "Counter paid and handed off.",
+      demo: true,
     }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } };
     if (receipt.proofLevel !== "receipt_memory_issued" || !receipt.order?.receipt?.receiptHash) {
       throw new Error(`Merchant-scoped receipt endpoint did not issue receipt memory: ${JSON.stringify(receipt)}`);
+    }
+
+    const secretReceiptOrder = await postJson(origin, "/merchants/raposa-coffee/orders", {
+      agentId: "buy-r-smoke",
+      userIntent: "Get me a croissant under $10",
+      maxSpendUsd: "10.00",
+      deadlineMinutes: 15,
+      paymentMode: "counter",
+    }) as { order?: { id?: string } };
+    if (!secretReceiptOrder.order?.id) throw new Error(`Secret receipt test order was not created: ${JSON.stringify(secretReceiptOrder)}`);
+    const previousVerifierSecret = process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+    process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET = "smoke-verifier-secret";
+    try {
+      const receiptDemoBypass = await postJsonFailure(origin, "/merchants/raposa-coffee/receipt", {
+        orderId: secretReceiptOrder.order.id,
+        actor: "raposa-staff",
+        demo: true,
+      });
+      if (receiptDemoBypass.status !== 401) {
+        throw new Error(`demo=true should not bypass a configured verifier secret: ${JSON.stringify(receiptDemoBypass)}`);
+      }
+      const secretReceipt = await postJson(origin, "/merchants/raposa-coffee/receipt", {
+        orderId: secretReceiptOrder.order.id,
+        actor: "raposa-staff",
+        note: "Counter paid, verified by staff secret.",
+      }, { "x-sllr-merchant-payment-secret": "smoke-verifier-secret" }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } };
+      if (secretReceipt.proofLevel !== "receipt_memory_issued" || !secretReceipt.order?.receipt?.receiptHash) {
+        throw new Error(`Receipt with verifier secret did not issue receipt memory: ${JSON.stringify(secretReceipt)}`);
+      }
+    } finally {
+      if (previousVerifierSecret === undefined) {
+        delete process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+      } else {
+        process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET = previousVerifierSecret;
+      }
     }
 
     const nonBaseStatusFailure = await getJsonFailure(origin, `/base-plugin/coffee/status?orderId=${orderResult.order.id}`);

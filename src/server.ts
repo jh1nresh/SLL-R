@@ -6,7 +6,7 @@ import { merchantForId, merchantProfiles } from "./merchants/profiles.js";
 import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
-import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder } from "./core/merchantApi.js";
+import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder, requirePaymentVerifier } from "./core/merchantApi.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { merchantTerminalPage, standaloneAgentPage } from "./ui/agenticPos.js";
@@ -234,7 +234,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, 200, merchantPaymentOptions(merchantId, await body(request), originFrom(request)));
         }
         if (request.method === "POST" && action === "receipt") {
-          return json(response, 200, await issueMerchantReceipt(merchantId, await body(request)));
+          return json(response, 200, await issueMerchantReceipt(merchantId, request.headers, await body(request)));
         }
       }
       if (request.method === "GET" && url.pathname === "/pilot-kit") {
@@ -361,7 +361,9 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
         }
         if (request.method === "POST" && action === "fulfill") {
-          const order = await fulfillOrder(orderId, await body(request) as never);
+          const payload = await body(request);
+          requirePaymentVerifier(request.headers, payload);
+          const order = await fulfillOrder(orderId, payload as never);
           return json(response, 200, {
             product: "SLL-R merchant terminal",
             status: order.status,
@@ -374,7 +376,9 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
         }
         if (request.method === "POST" && action === "claim") {
-          const order = await claimOrder(orderId, await body(request) as never);
+          const payload = await body(request);
+          requirePaymentVerifier(request.headers, payload);
+          const order = await claimOrder(orderId, payload as never);
           return json(response, 200, {
             product: "SLL-R merchant terminal",
             status: order.status,

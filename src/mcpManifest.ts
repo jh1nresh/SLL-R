@@ -84,7 +84,7 @@ export function sllrMcpManifest(origin: string) {
         name: "issue_receipt",
         method: "POST",
         path: "/merchants/{merchantId}/receipt",
-        description: "Issue receipt memory for an order after payment or fulfillment proof.",
+        description: "Issue receipt memory for an order after payment or fulfillment proof. Requires the merchant verifier secret (x-sllr-merchant-payment-secret header or verificationToken); demo=true is only accepted when no secret is configured.",
       },
       {
         name: "check_order_status",

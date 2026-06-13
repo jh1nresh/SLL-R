@@ -278,7 +278,7 @@ export function sllrOpenApi(origin: string) {
         post: {
           tags: ["Merchant Runtime"],
           operationId: "issueMerchantReceipt",
-          summary: "Issue SLL-R receipt memory for a merchant order.",
+          summary: "Issue SLL-R receipt memory for a merchant order. Requires the merchant verifier secret, or demo=true when no secret is configured.",
           parameters: [{ $ref: "#/components/parameters/MerchantId" }],
           requestBody: {
             required: true,

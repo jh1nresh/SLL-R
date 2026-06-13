@@ -208,10 +208,14 @@ function escapeText(value) {
 }
 
 async function action(orderId, actionName, note) {
+  const staffSecret = window.localStorage.getItem("sllrStaffSecret");
   const response = await fetch("/orders/" + encodeURIComponent(orderId) + "/" + actionName, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ merchantId, actor: "raposa-staff", note })
+    headers: {
+      "content-type": "application/json",
+      ...(staffSecret ? { "x-sllr-merchant-payment-secret": staffSecret } : {})
+    },
+    body: JSON.stringify({ merchantId, actor: "raposa-staff", note, demo: !staffSecret })
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));

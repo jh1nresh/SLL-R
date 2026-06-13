@@ -48,11 +48,11 @@ function secretFrom(headers: Record<string, string | string[] | undefined>, body
   return null;
 }
 
-function requirePaymentVerifier(headers: Record<string, string | string[] | undefined>, body: Record<string, unknown>) {
+export function requirePaymentVerifier(headers: Record<string, string | string[] | undefined>, body: Record<string, unknown>) {
   const expected = process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET?.trim();
   if (!expected) {
     if (body.demo === true) return;
-    throw Object.assign(new Error("SLLR_MERCHANT_PAYMENT_VERIFY_SECRET is not configured. Send demo=true for local demos, or configure a verifier secret before accepting merchant payment proof."), { status: 403 });
+    throw Object.assign(new Error("SLLR_MERCHANT_PAYMENT_VERIFY_SECRET is not configured. Send demo=true for local demos, or configure a verifier secret before accepting merchant payment or fulfillment proof."), { status: 403 });
   }
   if (secretFrom(headers, body) !== expected) {
     throw Object.assign(new Error("Merchant payment verifier secret is missing or invalid."), { status: 401 });
@@ -151,10 +151,11 @@ export async function attachMerchantPayment(merchantId: string, headers: Record<
   };
 }
 
-export async function issueMerchantReceipt(merchantId: string, payload: Record<string, unknown>) {
+export async function issueMerchantReceipt(merchantId: string, headers: Record<string, string | string[] | undefined>, payload: Record<string, unknown>) {
   requireMerchant(merchantId);
   const orderId = String(payload.orderId || "");
   if (!orderId) throw Object.assign(new Error("Missing orderId."), { status: 400 });
+  requirePaymentVerifier(headers, payload);
   const order = await fulfillOrder(orderId, {
     merchantId,
     actor: typeof payload.actor === "string" ? payload.actor : "merchant",

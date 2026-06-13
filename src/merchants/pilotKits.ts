@@ -140,7 +140,9 @@ export function pilotKitForMerchant(merchantId: string, origin: string) {
           merchantId,
           actor: `${merchant.id}-staff`,
           note: "Paid or fulfilled through the existing merchant workflow.",
+          demo: true,
         },
+        note: "Production replaces demo=true with SLLR_MERCHANT_PAYMENT_VERIFY_SECRET in x-sllr-merchant-payment-secret.",
       },
     },
     nextMeetingAsk: [

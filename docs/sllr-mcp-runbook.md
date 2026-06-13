@@ -73,6 +73,10 @@ and counter pay are payment adapters, not separate products.
    POST /merchants/{merchantId}/receipt
    ```
 
+   This endpoint requires the merchant verifier secret
+   (`x-sllr-merchant-payment-secret` header or `verificationToken` in the body);
+   `demo: true` is only accepted when no secret is configured.
+
 ## Safety Rules
 
 - Do not submit a payment without explicit user approval.
