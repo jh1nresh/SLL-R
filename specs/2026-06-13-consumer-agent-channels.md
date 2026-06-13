@@ -17,19 +17,29 @@ receipt, buyer taste memory. It does not converse. This spec defines the
 **channel-adapter** layer so the same agent reaches users through web,
 iMessage, WhatsApp, or LINE without redesign.
 
-## Market context (drives the first channel)
+## Market context (drives channel order)
 
-Launch market = **US** (merchant acquisition via Google Maps Places — the
-existing `sllr_places_lead_search.py` lead engine; 140 cafe leads). US consumers
-do not use LINE. So:
-- **Google Maps = merchant acquisition** (find + outreach to cafes). Already built.
-- **First consumer channel = web chat** (open, instant, Stripe Checkout) — also
-  doubles as the per-merchant demo we send in outreach.
-- **iMessage / Apple Messages for Business** = the US premium channel (native
-  Apple Pay in-thread, list/time pickers) but requires an Apple-approved MSP +
-  Experience Review → slower, so it comes after web.
-- **LINE** (LINE Pay in-thread) = parked for a future Taiwan launch.
-- **WhatsApp** = later, for non-Apple US / Europe / LatAm.
+The founder is a Taiwanese person based in the US, so the two target channels
+are their own daily life and network: **iMessage (US) + LINE (Taiwan)** — ideal
+for dogfooding. Each consumer channel must be paired with merchants in the same
+market:
+- **US side:** merchant acquisition via Google Maps Places (`sllr_places_lead_search.py`,
+  140 cafe leads) → consumers on **iMessage**.
+- **Taiwan side:** Taiwan merchants (Louisa demo exists; add more drink shops) →
+  consumers on **LINE**.
+
+Hard asymmetry that sets the build order:
+- **LINE = buildable now** (open Messaging API, direct webhook). LINE Pay
+  in-thread. Immediately dogfoodable with the founder's TW network + Louisa.
+- **iMessage / Apple Messages for Business = ops-gated.** Apple offers no direct
+  API: you MUST go through an Apple-approved MSP + an Experience Review approval.
+  Native Apple Pay in-thread (great), but you cannot code the adapter until MSP +
+  Apple access lands. So iMessage is started as an ops/approval task in parallel,
+  built when access arrives.
+- **Web chat** (Stripe Checkout) = optional interim/fallback that works today and
+  doubles as the merchant-outreach demo while iMessage approval is pending.
+  Skippable if LINE already covers live dogfooding.
+- **WhatsApp** = later (non-Apple US / Europe / LatAm).
 
 ## Architecture
 
@@ -39,10 +49,10 @@ SLL-R (MCP server) = brain: tools + taste memory keyed by buyerId
         │
 Consumer Agent (LLM host): conversation + taste reasoning; calls SLL-R tools
         │  (channel-agnostic core)
-        ├── Web adapter        → Stripe Checkout      (FIRST: US, open, fast)
-        ├── iMessage adapter    → Apple Pay            (US premium; via MSP, gated)
-        ├── WhatsApp adapter    → Stripe link          (later)
-        └── LINE adapter        → LINE Pay             (parked: Taiwan)
+        ├── LINE adapter        → LINE Pay      (BUILD FIRST: open API, TW, dogfood)
+        ├── iMessage adapter    → Apple Pay     (ops-gated: needs MSP + Apple review)
+        ├── Web adapter         → Stripe Checkout (optional interim + merchant demo)
+        └── WhatsApp adapter    → Stripe link   (later)
 
 Also still available, unchanged: ChatGPT / Claude connect SLL-R MCP directly
 (developer / power-user / interop entrance).
@@ -97,25 +107,28 @@ interface ChannelAdapter {
 6. Always show merchant, item, amount, payment rail before payment approval
    (existing SLL-R safety contract).
 
-## Acceptance criteria (v0 = web adapter, US)
+## Acceptance criteria (v0 = LINE adapter, Taiwan)
 
-- A consumer opens a merchant's web chat link (no install, no MCP), orders in
-  natural language, sees a quote + pickup promise, confirms, pays via Stripe
-  Checkout, and the order appears in the merchant terminal already-paid; receipt
+- A consumer messages the SLL-R LINE Official Account (no install beyond "add
+  friend", no MCP), orders a drink from a Taiwan merchant (e.g. Louisa) in
+  natural language, sees a quote + pickup promise, confirms, pays via LINE Pay
+  in-thread, and the order appears in the merchant terminal already-paid; receipt
   memory issues and binds to a buyerId.
-- The agent core is channel-agnostic: the web adapter implements ChannelAdapter;
-  adding iMessage/LINE later requires no change to the agent core.
+- The agent core is channel-agnostic: the LINE adapter implements ChannelAdapter;
+  adding iMessage later requires no change to the agent core.
 - The agent only orders items SLL-R returned (no hallucinated menu items).
-- Returning consumer (same web session/buyerId) sees their prior orders.
+- A returning consumer (same LINE userId → buyerId) sees their prior orders.
 
 ## Sequencing
 1. Agent core (LLM loop + SLL-R MCP client + buyer-session identity) + the
    ChannelAdapter abstraction.
-2. **Web adapter + Stripe Checkout** (US MVP; also the outreach demo).
-3. Deploy; point a merchant's QR / link at it (Google Maps leads).
-4. iMessage / Apple Messages for Business adapter (Apple Pay) — needs an MSP +
-   Experience Review; start the approval in parallel.
-5. WhatsApp, then LINE (Taiwan) adapters — same pattern.
+2. **LINE adapter + LINE Pay** (open API, build now; dogfood with TW network +
+   Louisa). Requires LINE_PAY_* keys for live payment (demo otherwise).
+3. **In parallel (ops, not code): start iMessage onboarding** — pick an
+   Apple-approved MSP, register on Apple Business Register, begin Experience
+   Review. Build the iMessage adapter (Apple Pay) when access lands.
+4. Optional: web adapter + Stripe Checkout as an interim/merchant-demo surface.
+5. WhatsApp later — same pattern.
 
 ## Out of scope (later specs)
 - The taste-graph / `recommend_for_buyer` layer (separate spec
