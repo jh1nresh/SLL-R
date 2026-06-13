@@ -283,6 +283,7 @@ export function merchantTerminalPage(merchantId: string, origin: string) {
     </div>
     <div class="row">
       <a class="button secondary" href="/agent/${escapeHtml(merchant.id)}">Customer agent</a>
+      <button id="staffKeyBtn" class="secondary" title="Set the staff key used to confirm orders">🔑 <span id="keyStatus">key not set</span></button>
       <button id="refresh">Refresh</button>
     </div>
   </div>
@@ -319,6 +320,36 @@ const merchantId = ${JSON.stringify(merchant.id)};
 const ordersEl = document.getElementById("orders");
 const countEl = document.getElementById("count");
 const refreshButton = document.getElementById("refresh");
+const staffKeyButton = document.getElementById("staffKeyBtn");
+const keyStatusEl = document.getElementById("keyStatus");
+
+// One-time ?staffKey=... link saves the staff key to this browser then strips
+// it from the URL; staff can also set/update it via the 🔑 button. The key is
+// never embedded in the page source.
+(function initStaffKey() {
+  const fromUrl = new URLSearchParams(location.search).get("staffKey");
+  if (fromUrl) {
+    window.localStorage.setItem("sllrStaffSecret", fromUrl);
+    history.replaceState(null, "", location.pathname);
+  }
+})();
+
+function refreshKeyStatus() {
+  const set = !!window.localStorage.getItem("sllrStaffSecret");
+  if (keyStatusEl) keyStatusEl.textContent = set ? "key set" : "key not set";
+}
+
+function promptStaffKey() {
+  const current = window.localStorage.getItem("sllrStaffSecret") || "";
+  const next = window.prompt("Paste the merchant staff key (leave blank to clear):", current);
+  if (next === null) return;
+  if (next.trim()) window.localStorage.setItem("sllrStaffSecret", next.trim());
+  else window.localStorage.removeItem("sllrStaffSecret");
+  refreshKeyStatus();
+}
+
+if (staffKeyButton) staffKeyButton.addEventListener("click", promptStaffKey);
+refreshKeyStatus();
 
 function escapeText(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -347,7 +378,12 @@ async function action(orderId, actionName, note) {
   });
   if (!response.ok) {
     const json = await response.json().catch(() => ({}));
-    alert(json.error || "Action failed");
+    if (response.status === 401) {
+      alert("Staff key required or invalid. Set it with the 🔑 button, then retry.");
+      promptStaffKey();
+    } else {
+      alert(json.error || "Action failed");
+    }
   }
   await loadOrders();
 }
