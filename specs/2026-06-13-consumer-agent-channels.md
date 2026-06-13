@@ -31,11 +31,18 @@ market:
 Hard asymmetry that sets the build order:
 - **LINE = buildable now** (open Messaging API, direct webhook). LINE Pay
   in-thread. Immediately dogfoodable with the founder's TW network + Louisa.
-- **iMessage / Apple Messages for Business = ops-gated.** Apple offers no direct
-  API: you MUST go through an Apple-approved MSP + an Experience Review approval.
-  Native Apple Pay in-thread (great), but you cannot code the adapter until MSP +
-  Apple access lands. So iMessage is started as an ops/approval task in parallel,
-  built when access arrives.
+- **iMessage = two paths (pick per stage):**
+  - **Fast / third-party infra** (Sendblue, Bloo, AgentPhone, Linq, Chert — the
+    infra layer the current wave of iMessage AI assistants uses, per a16z's
+    Justine Moore landscape). API access to iMessage blue-bubble send/receive in
+    days, no Apple MSP gate. Trade-offs: Apple-ToS gray (numbers can be banned),
+    and NO native Apple Pay — payment is a Stripe link in-thread. Good for a fast
+    US dogfood adapter NOW, in parallel with LINE.
+  - **Official / Apple Messages for Business** (via an Apple-approved MSP +
+    Experience Review). Slow/gated, but legitimate and gives native Apple Pay
+    in-thread. The eventual upgrade once approved.
+  Either way the ChannelAdapter interface is identical; only the transport
+  provider + payment rendering differ.
 - **Web chat** (Stripe Checkout) = optional interim/fallback that works today and
   doubles as the merchant-outreach demo while iMessage approval is pending.
   Skippable if LINE already covers live dogfooding.
@@ -49,8 +56,9 @@ SLL-R (MCP server) = brain: tools + taste memory keyed by buyerId
         │
 Consumer Agent (LLM host): conversation + taste reasoning; calls SLL-R tools
         │  (channel-agnostic core)
-        ├── LINE adapter        → LINE Pay      (BUILD FIRST: open API, TW, dogfood)
-        ├── iMessage adapter    → Apple Pay     (ops-gated: needs MSP + Apple review)
+        ├── LINE adapter        → LINE Pay      (open API, TW dogfood — build now)
+        ├── iMessage adapter    → Stripe link (fast, via Sendblue-style infra, US dogfood now)
+        │                         → Apple Pay  (later upgrade via official Apple MFB + MSP)
         ├── Web adapter         → Stripe Checkout (optional interim + merchant demo)
         └── WhatsApp adapter    → Stripe link   (later)
 
@@ -124,11 +132,21 @@ interface ChannelAdapter {
    ChannelAdapter abstraction.
 2. **LINE adapter + LINE Pay** (open API, build now; dogfood with TW network +
    Louisa). Requires LINE_PAY_* keys for live payment (demo otherwise).
-3. **In parallel (ops, not code): start iMessage onboarding** — pick an
-   Apple-approved MSP, register on Apple Business Register, begin Experience
-   Review. Build the iMessage adapter (Apple Pay) when access lands.
-4. Optional: web adapter + Stripe Checkout as an interim/merchant-demo surface.
-5. WhatsApp later — same pattern.
+3. **iMessage adapter via third-party infra** (Sendblue/Bloo/AgentPhone) — fast
+   US dogfood now, payment = Stripe link. Parallel with LINE. (Accept the
+   Apple-ToS gray risk for dogfood/early; do not bet the company on it.)
+4. **In parallel (ops): start official Apple MFB onboarding** — pick an
+   Apple-approved MSP + Experience Review → later upgrade for native Apple Pay.
+5. Optional: web adapter + Stripe Checkout (interim/merchant demo).
+6. WhatsApp later — same pattern.
+
+## Positioning warning (do NOT become a generic assistant)
+The current iMessage AI-assistant wave (Interaction, Ollie, Lindy, Tomo, etc.;
+a16z-tracked) is crowded with GENERAL personal assistants. SLL-R is NOT that —
+it is a commerce vertical: ordering + in-thread payment + receipt + cross-merchant
+taste graph. We merely live inside iMessage/LINE; the messaging infra
+(Sendblue/AgentPhone) is borrowed plumbing, not the product. Stay in the
+commerce/receipt lane.
 
 ## Out of scope (later specs)
 - The taste-graph / `recommend_for_buyer` layer (separate spec
