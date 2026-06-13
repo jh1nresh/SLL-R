@@ -20,6 +20,7 @@ import { storeBackendName } from "./core/store.js";
 import { aiPluginManifest, sllrOpenApi } from "./openapi.js";
 import { solanaSllrPluginSpec } from "./solanaPlugin.js";
 import { shopifyCartHandoff, shopifyConnectPlan, shopifyMerchants, shopifyOrdersFulfilledWebhook, shopifyOrdersPaidWebhook, shopifyProducts, shopifyRefundsCreateWebhook } from "./adapters/shopify.js";
+import { stripeWebhook } from "./adapters/stripe.js";
 import { createDemoMerchant, listDemoMerchants } from "./adapters/shopifyCatalog.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
@@ -331,6 +332,13 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           proofLevel: order.proofLevel,
           order,
         });
+      }
+      if (request.method === "POST" && url.pathname === "/webhooks/stripe") {
+        const parsed = await readBody(request);
+        const result = await stripeWebhook(request.headers, parsed.raw, parsed.json);
+        return json(response, 200, "ignored" in result
+          ? result
+          : { product: "SLL-R Stripe payment proof adapter", status: result.status, proofLevel: result.proofLevel, order: result });
       }
       if (request.method === "POST" && url.pathname === "/webhooks/shopify/orders-paid") {
         const parsed = await readBody(request);

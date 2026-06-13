@@ -64,6 +64,9 @@ and counter pay are payment adapters, not separate products.
    Current compatible rails:
 
    - `counter`: user pays at pickup or merchant marks paid in terminal.
+   - `stripe`: prepay in-flow via a Stripe hosted Checkout URL (card / Apple /
+     Google Pay); the `checkout.session.completed` webhook attaches proof. The
+     merchant only fulfills and never handles payment.
    - `shopify`: open merchant checkout and verify paid webhook.
    - `base_usdc`: prepare Base USDC calldata for Base MCP `send_calls`.
    - `solana_pay`: prepare Solana Pay URL with a unique reference.

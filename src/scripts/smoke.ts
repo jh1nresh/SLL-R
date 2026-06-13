@@ -1,5 +1,6 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { createHmac } from "node:crypto";
 import { createSllrServer } from "../server.js";
 import { resetStoreForTest, sllrStore, storeBackendName } from "../core/store.js";
 
@@ -646,6 +647,136 @@ async function smokeStoreBackend() {
   }
 }
 
+// In-process fake Stripe API + signed-webhook test for the prepay-in-flow path.
+async function smokeStripePrepay(origin: string) {
+  // Fake Stripe API: only the checkout session create endpoint.
+  const stripeApi = createServer((request, response) => {
+    if (request.headers.authorization !== "Bearer sk_test_smoke") {
+      response.writeHead(401); return response.end(JSON.stringify({ error: { message: "bad key" } }));
+    }
+    const chunks: Buffer[] = [];
+    request.on("data", (c) => chunks.push(Buffer.from(c)));
+    request.on("end", () => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ id: "cs_test_smoke123", url: "https://checkout.stripe.test/c/cs_test_smoke123" }));
+    });
+  });
+  stripeApi.listen(0);
+  await once(stripeApi, "listening");
+  const addr = stripeApi.address();
+  if (!addr || typeof addr === "string") throw new Error("Failed to start fake Stripe.");
+
+  const prevBase = process.env.STRIPE_API_BASE;
+  const prevKey = process.env.STRIPE_SECRET_KEY;
+  const prevWh = process.env.STRIPE_WEBHOOK_SECRET;
+  process.env.STRIPE_API_BASE = `http://127.0.0.1:${addr.port}`;
+  process.env.STRIPE_SECRET_KEY = "sk_test_smoke";
+  try {
+    // SOLYD supports the stripe rail. Create an order, then payment-options
+    // should return a real Stripe checkout_url.
+    const order = await postJson(origin, "/merchants/solyd/orders", {
+      userIntent: "Ship me a black MagSafe iPhone 16 case under $100",
+      maxSpendUsd: "100.00",
+      deliverByDays: 7,
+      paymentMode: "checkout",
+    }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+    const orderId = order.order?.id;
+    if (!orderId) throw new Error(`Stripe test order failed: ${JSON.stringify(order)}`);
+
+    const options = await postJson(origin, "/merchants/solyd/payment-options", { orderId }) as {
+      paymentOptions?: Array<{ rail?: string; type?: string; url?: string }>;
+    };
+    const stripeOption = options.paymentOptions?.find((o) => o.rail === "stripe");
+    if (!stripeOption || stripeOption.type !== "checkout_url" || !stripeOption.url?.includes("checkout.stripe.test")) {
+      throw new Error(`Stripe prepare-payment did not return a checkout URL: ${JSON.stringify(options.paymentOptions)}`);
+    }
+
+    // Webhook demo path (no STRIPE_WEBHOOK_SECRET): demo=true issues receipt.
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    const amountCents = Math.round(Number(order.order?.item?.subtotalUsd) * 100);
+    const demoEvent = {
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_test_smoke123", payment_status: "paid", amount_total: amountCents, metadata: { sllr_order_id: orderId, sllr_merchant_id: "solyd" } } },
+      demo: true,
+    };
+    const demoPaid = await postJson(origin, "/webhooks/stripe", demoEvent) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
+    if (demoPaid.proofLevel !== "receipt_memory_issued" || demoPaid.order?.payment?.provider !== "stripe" || !demoPaid.order.receipt?.receiptHash) {
+      throw new Error(`Stripe demo webhook did not issue receipt memory: ${JSON.stringify(demoPaid)}`);
+    }
+
+    // An unpaid completed session must NOT issue receipt memory (ignored).
+    const unpaidOrder = await postJson(origin, "/merchants/solyd/orders", {
+      userIntent: "Ship me a clear MagSafe iPhone 16 case under $100",
+      maxSpendUsd: "100.00", deliverByDays: 7, paymentMode: "checkout",
+    }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+    const unpaid = await postJson(origin, "/webhooks/stripe", {
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_test_unpaid", payment_status: "unpaid", amount_total: Math.round(Number(unpaidOrder.order?.item?.subtotalUsd) * 100), metadata: { sllr_order_id: unpaidOrder.order?.id, sllr_merchant_id: "solyd" } } },
+      demo: true,
+    }) as { ignored?: string; proofLevel?: string };
+    if (unpaid.ignored !== "checkout.session.completed" || unpaid.proofLevel === "receipt_memory_issued") {
+      throw new Error(`Stripe unpaid session should be ignored, not receipted: ${JSON.stringify(unpaid)}`);
+    }
+
+    // Underpayment must be rejected (fresh order, demo path).
+    const underOrder = await postJson(origin, "/merchants/solyd/orders", {
+      userIntent: "Ship me a black MagSafe iPhone 16 case under $100",
+      maxSpendUsd: "100.00",
+      deliverByDays: 7,
+      paymentMode: "checkout",
+    }) as { order?: { id?: string } };
+    const underPaid = await postJsonFailure(origin, "/webhooks/stripe", {
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_test_under", payment_status: "paid", amount_total: 100, metadata: { sllr_order_id: underOrder.order?.id, sllr_merchant_id: "solyd" } } },
+      demo: true,
+    });
+    if (underPaid.status !== 409) {
+      throw new Error(`Stripe underpayment should be rejected with 409: ${JSON.stringify(underPaid)}`);
+    }
+
+    // Signed-webhook path on a fresh order.
+    const order2 = await postJson(origin, "/merchants/solyd/orders", {
+      userIntent: "Ship me a clear MagSafe iPhone 16 case under $100",
+      maxSpendUsd: "100.00",
+      deliverByDays: 7,
+      paymentMode: "checkout",
+    }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+    const order2Id = order2.order?.id as string;
+    const whSecret = "whsec_smoke_secret";
+    process.env.STRIPE_WEBHOOK_SECRET = whSecret;
+    const body2 = JSON.stringify({
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_test_smoke456", payment_status: "paid", amount_total: Math.round(Number(order2.order?.item?.subtotalUsd) * 100), metadata: { sllr_order_id: order2Id, sllr_merchant_id: "solyd" } } },
+    });
+    const ts = "1700000000";
+    const sig = createHmac("sha256", whSecret).update(`${ts}.${body2}`, "utf8").digest("hex");
+    const signedRes = await fetch(`${origin}/webhooks/stripe`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "stripe-signature": `t=${ts},v1=${sig}` },
+      body: body2,
+    });
+    const signed = await signedRes.json() as { proofLevel?: string };
+    if (!signedRes.ok || signed.proofLevel !== "receipt_memory_issued") {
+      throw new Error(`Stripe signed webhook did not issue receipt memory: ${JSON.stringify(signed)}`);
+    }
+
+    // Bad signature must be rejected.
+    const badRes = await fetch(`${origin}/webhooks/stripe`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "stripe-signature": `t=${ts},v1=deadbeef` },
+      body: body2,
+    });
+    if (badRes.status !== 401) {
+      throw new Error(`Stripe webhook with bad signature should be 401, got ${badRes.status}`);
+    }
+  } finally {
+    if (prevBase === undefined) delete process.env.STRIPE_API_BASE; else process.env.STRIPE_API_BASE = prevBase;
+    if (prevKey === undefined) delete process.env.STRIPE_SECRET_KEY; else process.env.STRIPE_SECRET_KEY = prevKey;
+    if (prevWh === undefined) delete process.env.STRIPE_WEBHOOK_SECRET; else process.env.STRIPE_WEBHOOK_SECRET = prevWh;
+    stripeApi.close();
+  }
+}
+
 async function main() {
   const server = createSllrServer();
   server.listen(0);
@@ -710,6 +841,7 @@ async function main() {
     await smokeStoreBackend();
     await smokeMcp(origin);
     await smokeReceiptGating(origin);
+    await smokeStripePrepay(origin);
     await smokeDemoMerchants(origin);
 
     const aiPlugin = await getJson(origin, "/.well-known/ai-plugin.json") as {

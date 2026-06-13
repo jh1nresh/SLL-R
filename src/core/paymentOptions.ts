@@ -1,5 +1,6 @@
 import { baseCoffeePayment } from "../adapters/baseCoffeePlugin.js";
 import { solanaPayPreparePayment } from "../adapters/solanaPay.js";
+import { stripePreparePayment } from "../adapters/stripe.js";
 import { merchantForId } from "../merchants/profiles.js";
 import type { CatalogItem, PaymentRail, SellerOrder } from "../types.js";
 import { getOrder } from "./orders.js";
@@ -89,7 +90,15 @@ export async function merchantPaymentOptions(merchantId: string, payload: Record
     }
   }
 
-  for (const rail of ["stripe", "moonpay", "binance_pay"] as PaymentRail[]) {
+  if (merchant.paymentRails.includes("stripe")) {
+    try {
+      paymentOptions.push(await stripePreparePayment(order, origin));
+    } catch (error) {
+      paymentOptions.push(adapterErrorOption("stripe", order, error));
+    }
+  }
+
+  for (const rail of ["moonpay", "binance_pay"] as PaymentRail[]) {
     if (merchant.paymentRails.includes(rail)) {
       paymentOptions.push({
         rail,

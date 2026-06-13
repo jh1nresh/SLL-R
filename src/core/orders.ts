@@ -306,6 +306,12 @@ export async function claimOrder(orderId: string, input: MerchantActionRequest) 
 export async function attachPaymentProof(input: PaymentWebhook) {
   const order = await getOrder(input.orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${input.orderId}`), { status: 404 });
+  // Idempotency: payment webhooks can be delivered or replayed more than once
+  // (Stripe/Shopify both retry). Once proof is verified and the receipt issued,
+  // return the settled order rather than re-issuing.
+  if (order.status === "receipt_issued" || order.payment.status === "verified") {
+    return order;
+  }
   if (order.merchantId !== input.merchantId) {
     throw Object.assign(new Error(`Payment merchant ${input.merchantId} does not match order merchant ${order.merchantId}.`), { status: 409 });
   }
