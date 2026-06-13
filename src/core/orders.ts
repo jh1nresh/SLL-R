@@ -5,6 +5,7 @@ import { issueSllrReceipt } from "../adapters/sllrReceipts.js";
 import { centsFromUsd } from "./money.js";
 import { quoteOrder } from "./quote.js";
 import { sllrStore } from "./store.js";
+import { buyerOrdersIndex } from "./buyer.js";
 
 const ORDER_KEY_PREFIX = "sllr:order:";
 const ORDER_INDEX = "sllr:order-ids";
@@ -32,6 +33,8 @@ async function saveOrder(order: SellerOrder) {
   // index backs the unfiltered terminal listing.
   await store.addToIndex(merchantOrderIndex(order.merchantId), order.id);
   await store.addToIndex(ORDER_INDEX, order.id);
+  // Buyer index backs "my orders" across merchants (Layer-2 identity).
+  if (order.buyerId) await store.addToIndex(buyerOrdersIndex(order.buyerId), order.id);
   return order;
 }
 
@@ -47,6 +50,11 @@ async function ordersForMerchant(merchantId: string): Promise<SellerOrder[]> {
 async function allOrders(): Promise<SellerOrder[]> {
   const ids = await sllrStore().indexMembers(ORDER_INDEX);
   return loadOrdersByIds(ids);
+}
+
+export async function listOrdersForBuyer(buyerId: string): Promise<SellerOrder[]> {
+  const ids = await sllrStore().indexMembers(buyerOrdersIndex(buyerId));
+  return (await loadOrdersByIds(ids)).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
 const capacityByClass = {
@@ -136,6 +144,7 @@ export async function createOrder(input: OrderRequest) {
     merchantName: merchant.name,
     agentId: input.agentId || "buy-r-demo",
     customerLabel: input.customerLabel || input.agentId || "buyer agent user",
+    buyerId: input.buyerId || null,
     status: "pending_payment",
     proofLevel: "order_intent_only",
     item: quote.item,

@@ -109,6 +109,12 @@ export function sllrMcpManifest(origin: string) {
         description: "Read current order state, payment status, fulfillment state, and receipt handoff.",
       },
       {
+        name: "list_my_orders",
+        method: "GET",
+        path: "/buyer/orders",
+        description: "List the calling buyer's own orders across all merchants. Requires an Authorization: Bearer <buyer token> from POST /buyer/session.",
+      },
+      {
         name: "create_demo_merchant",
         method: "POST",
         path: "/demo-merchants",

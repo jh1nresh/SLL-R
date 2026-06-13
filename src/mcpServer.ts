@@ -8,7 +8,7 @@ import {
   listMerchants,
   quoteMerchantOrder,
 } from "./core/merchantApi.js";
-import { getOrder } from "./core/orders.js";
+import { getOrder, listOrdersForBuyer } from "./core/orders.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { createDemoMerchant } from "./adapters/shopifyCatalog.js";
 
@@ -42,7 +42,7 @@ type ToolDefinition = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  handler: (args: Record<string, unknown>, origin: string) => Promise<unknown> | unknown;
+  handler: (args: Record<string, unknown>, origin: string, buyerId: string | null) => Promise<unknown> | unknown;
 };
 
 const quoteProperties = {
@@ -116,7 +116,25 @@ const tools: ToolDefinition[] = [
         },
       },
     },
-    handler: (args) => createMerchantOrder(requireString(args, "merchantId"), args),
+    handler: (args, _origin, buyerId) => {
+      if (process.env.SLLR_REQUIRE_BUYER_AUTH === "true" && !buyerId) {
+        throw Object.assign(new Error("Buyer authentication required. Connect the MCP server with an 'Authorization: Bearer <token>' from POST /buyer/session."), { status: 401 });
+      }
+      // Never trust a client-supplied buyerId; bind only from the resolved session.
+      const { buyerId: _ignore, ...rest } = args;
+      return createMerchantOrder(requireString(rest, "merchantId"), buyerId ? { ...rest, buyerId } : rest);
+    },
+  },
+  {
+    name: "list_my_orders",
+    description: "List the calling buyer's own orders across all merchants. Requires a buyer session — connect with an 'Authorization: Bearer <token>' from POST /buyer/session.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (_args, _origin, buyerId) => {
+      if (!buyerId) {
+        throw Object.assign(new Error("No buyer session. Connect the MCP server with an Authorization: Bearer <buyer token> header (get one from POST /buyer/session)."), { status: 401 });
+      }
+      return { product: "SLL-R buyer orders", buyerId, orders: await listOrdersForBuyer(buyerId) };
+    },
   },
   {
     name: "list_orders",
@@ -237,7 +255,7 @@ function negotiateProtocolVersion(params: unknown) {
   return LATEST_PROTOCOL_VERSION;
 }
 
-async function callTool(params: unknown, origin: string, id: JsonRpcId): Promise<McpToolResultPayload> {
+async function callTool(params: unknown, origin: string, id: JsonRpcId, buyerId: string | null): Promise<McpToolResultPayload> {
   const name = typeof params === "object" && params && "name" in params
     ? (params as { name?: unknown }).name
     : undefined;
@@ -250,7 +268,7 @@ async function callTool(params: unknown, origin: string, id: JsonRpcId): Promise
     : {};
   const args = typeof rawArguments === "object" && rawArguments ? rawArguments as Record<string, unknown> : {};
   try {
-    const result = await tool.handler(args, origin);
+    const result = await tool.handler(args, origin, buyerId);
     return jsonRpcResult(id, {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       structuredContent: result,
@@ -278,7 +296,7 @@ export function rejectMcpBrowserOrigin(originHeader: string | string[] | undefin
   }
 }
 
-export async function handleMcpPost(body: unknown, origin: string): Promise<McpToolResultPayload> {
+export async function handleMcpPost(body: unknown, origin: string, buyerId: string | null = null): Promise<McpToolResultPayload> {
   if (Array.isArray(body)) {
     return jsonRpcError(null, -32600, "JSON-RPC batching is not supported by this server.", 400);
   }
@@ -314,7 +332,7 @@ export async function handleMcpPost(body: unknown, origin: string): Promise<McpT
         tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
       });
     case "tools/call":
-      return callTool(message.params, origin, id);
+      return callTool(message.params, origin, id, buyerId);
     default:
       return jsonRpcError(id, -32601, `Method not found: ${message.method}`);
   }

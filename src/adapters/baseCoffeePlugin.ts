@@ -130,11 +130,12 @@ export function baseCoffeeQuote(searchParams: URLSearchParams) {
   };
 }
 
-export async function baseCoffeeOrder(searchParams: URLSearchParams) {
+export async function baseCoffeeOrder(searchParams: URLSearchParams, buyerId: string | null = null) {
   const request = requestFromSearch(searchParams) as OrderRequest;
   request.agentId = searchParams.get("agentId") || "base-mcp-buyer-agent";
   request.customerLabel = searchParams.get("customerLabel") || "Base MCP buyer";
   request.paymentMode = "checkout";
+  request.buyerId = buyerId ?? undefined;
   const result = await createOrder(request);
   return {
     product: "SLL-R Base coffee order",

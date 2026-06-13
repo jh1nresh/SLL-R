@@ -777,6 +777,118 @@ async function smokeStripePrepay(origin: string) {
   }
 }
 
+async function smokeBuyerAuth(origin: string) {
+  // Issue a buyer session.
+  const session = await postJson(origin, "/buyer/session", { label: "smoke buyer" }) as { token?: string; buyerId?: string; expiresAt?: string };
+  if (!session.token?.startsWith("sllrb_") || !session.buyerId?.startsWith("buyer_") || !session.expiresAt) {
+    throw new Error(`Buyer session not issued: ${JSON.stringify(session)}`);
+  }
+  const token = session.token;
+
+  // REST order with Bearer token binds to the buyerId.
+  const authedRes = await fetch(`${origin}/merchants/raposa-coffee/orders`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ userIntent: "iced latte in 10 minutes", deadlineMinutes: 10, maxSpendUsd: "10.00", paymentMode: "counter" }),
+  });
+  const authed = await authedRes.json() as { order?: { id?: string; buyerId?: string } };
+  if (!authedRes.ok || authed.order?.buyerId !== session.buyerId) {
+    throw new Error(`Authed order did not bind buyerId: ${JSON.stringify(authed)}`);
+  }
+
+  // GET /buyer/orders with the token lists it.
+  const myOrdersRes = await fetch(`${origin}/buyer/orders`, { headers: { authorization: `Bearer ${token}` } });
+  const myOrders = await myOrdersRes.json() as { buyerId?: string; orders?: Array<{ id?: string }> };
+  if (!myOrdersRes.ok || myOrders.buyerId !== session.buyerId || !myOrders.orders?.some((o) => o.id === authed.order?.id)) {
+    throw new Error(`/buyer/orders did not list the authed order: ${JSON.stringify(myOrders)}`);
+  }
+
+  // /buyer/orders without a token is rejected.
+  const noToken = await fetch(`${origin}/buyer/orders`);
+  if (noToken.status !== 401) throw new Error(`/buyer/orders without token should be 401, got ${noToken.status}`);
+
+  // MCP create_order with the Bearer token binds buyerId; list_my_orders sees it.
+  const mcpCreate = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++nextMcpRequestId, method: "tools/call", params: { name: "create_order", arguments: { merchantId: "raposa-coffee", userIntent: "cortado pickup in 10 min", deadlineMinutes: 10, paymentMode: "counter" } } }),
+  }).then((r) => r.json()) as { result?: { structuredContent?: { order?: { id?: string; buyerId?: string } } } };
+  const mcpOrder = mcpCreate.result?.structuredContent?.order;
+  if (mcpOrder?.buyerId !== session.buyerId) {
+    throw new Error(`MCP create_order did not bind buyerId from Bearer: ${JSON.stringify(mcpCreate)}`);
+  }
+  const mcpMine = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++nextMcpRequestId, method: "tools/call", params: { name: "list_my_orders", arguments: {} } }),
+  }).then((r) => r.json()) as { result?: { structuredContent?: { orders?: Array<{ id?: string }> } } };
+  if (!mcpMine.result?.structuredContent?.orders?.some((o) => o.id === mcpOrder?.id)) {
+    throw new Error(`MCP list_my_orders did not return the buyer's order: ${JSON.stringify(mcpMine)}`);
+  }
+
+  // list_my_orders without a buyer session is an error.
+  const mcpAnon = await mcpToolCall(origin, "list_my_orders", {});
+  if (!mcpAnon.isError || !mcpAnon.content?.[0]?.text?.includes("buyer session")) {
+    throw new Error(`MCP list_my_orders without buyer should fail: ${JSON.stringify(mcpAnon)}`);
+  }
+
+  // Anonymous ordering still works when auth is not required.
+  const anon = await postJson(origin, "/merchants/raposa-coffee/orders", {
+    userIntent: "espresso", maxSpendUsd: "10.00", paymentMode: "counter",
+  }) as { order?: { id?: string; buyerId?: string | null } };
+  if (!anon.order?.id || anon.order.buyerId) {
+    throw new Error(`Anonymous order should succeed with null buyerId: ${JSON.stringify(anon)}`);
+  }
+
+  // FORGERY GUARD: a client-supplied buyerId in the body must be ignored, not
+  // trusted — an anon order claiming the victim's buyerId must NOT bind to it
+  // nor appear in the victim's /buyer/orders.
+  const forged = await postJson(origin, "/merchants/raposa-coffee/orders", {
+    userIntent: "espresso", maxSpendUsd: "10.00", paymentMode: "counter", buyerId: session.buyerId,
+  }) as { order?: { id?: string; buyerId?: string | null } };
+  if (forged.order?.buyerId) {
+    throw new Error(`Client-supplied buyerId must be ignored, got: ${JSON.stringify(forged.order)}`);
+  }
+  const afterForge = await fetch(`${origin}/buyer/orders`, { headers: { authorization: `Bearer ${token}` } }).then((r) => r.json()) as { orders?: Array<{ id?: string }> };
+  if (afterForge.orders?.some((o) => o.id === forged.order?.id)) {
+    throw new Error(`Forged order leaked into victim's /buyer/orders: ${JSON.stringify(afterForge)}`);
+  }
+
+  // Same forgery via MCP must also be ignored.
+  const mcpForged = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++nextMcpRequestId, method: "tools/call", params: { name: "create_order", arguments: { merchantId: "raposa-coffee", userIntent: "espresso", paymentMode: "counter", buyerId: session.buyerId } } }),
+  }).then((r) => r.json()) as { result?: { structuredContent?: { order?: { buyerId?: string | null } } } };
+  if (mcpForged.result?.structuredContent?.order?.buyerId) {
+    throw new Error(`MCP client-supplied buyerId must be ignored: ${JSON.stringify(mcpForged)}`);
+  }
+
+  // With SLLR_REQUIRE_BUYER_AUTH, anonymous create is rejected; authed still works.
+  const prev = process.env.SLLR_REQUIRE_BUYER_AUTH;
+  process.env.SLLR_REQUIRE_BUYER_AUTH = "true";
+  try {
+    const rejected = await postJsonFailure(origin, "/merchants/raposa-coffee/orders", {
+      userIntent: "iced latte", maxSpendUsd: "10.00", paymentMode: "counter",
+    });
+    if (rejected.status !== 401) throw new Error(`Anon order under require-auth should be 401: ${JSON.stringify(rejected)}`);
+    const stillOk = await fetch(`${origin}/merchants/raposa-coffee/orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ userIntent: "cold brew", maxSpendUsd: "10.00", paymentMode: "counter" }),
+    });
+    if (!stillOk.ok) throw new Error(`Authed order under require-auth should succeed, got ${stillOk.status}`);
+  } finally {
+    if (prev === undefined) delete process.env.SLLR_REQUIRE_BUYER_AUTH; else process.env.SLLR_REQUIRE_BUYER_AUTH = prev;
+  }
+
+  // Revocation (last — invalidates `token`): a revoked token no longer authorizes.
+  const revokeRes = await fetch(`${origin}/buyer/session`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } });
+  if (!revokeRes.ok) throw new Error(`Revoke should succeed, got ${revokeRes.status}`);
+  const afterRevoke = await fetch(`${origin}/buyer/orders`, { headers: { authorization: `Bearer ${token}` } });
+  if (afterRevoke.status !== 401) throw new Error(`Revoked token should be 401, got ${afterRevoke.status}`);
+}
+
 async function main() {
   const server = createSllrServer();
   server.listen(0);
@@ -841,6 +953,7 @@ async function main() {
     await smokeStoreBackend();
     await smokeMcp(origin);
     await smokeReceiptGating(origin);
+    await smokeBuyerAuth(origin);
     await smokeStripePrepay(origin);
     await smokeDemoMerchants(origin);
 

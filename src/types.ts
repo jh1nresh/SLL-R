@@ -102,6 +102,7 @@ export type OrderRequest = QuoteRequest & {
   agentId?: string;
   customerLabel?: string;
   paymentMode?: "counter" | "checkout" | "crypto";
+  buyerId?: string;
 };
 
 export type SellerOrder = {
@@ -110,6 +111,7 @@ export type SellerOrder = {
   merchantName: string;
   agentId: string;
   customerLabel: string;
+  buyerId: string | null;
   status: "pending_payment" | "accepted" | "rejected" | "payment_backed" | "ready" | "claimed" | "fulfilled" | "receipt_issued";
   proofLevel: ProofLevel;
   item: NonNullable<QuoteResult["item"]>;

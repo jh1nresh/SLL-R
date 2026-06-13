@@ -88,6 +88,7 @@ export async function standaloneAgentMessage(merchantId: string, payload: Record
         : requestedPaymentMode === "checkout"
           ? "checkout"
           : undefined,
+    buyerId: textFrom(payload.buyerId) || undefined,
   };
   const result = await createOrder(orderInput);
   return {

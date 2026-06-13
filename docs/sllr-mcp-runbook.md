@@ -23,6 +23,25 @@ claude mcp add --transport http sllr https://<sllr-host>/mcp
 The generic MCP manifest lists merchant tools. Base MCP, Solana Pay, Shopify,
 and counter pay are payment adapters, not separate products.
 
+## Buyer session (optional, recommended)
+
+Bind orders and receipts to a buyer identity so the agent can see "my orders"
+across merchants:
+
+```text
+POST /buyer/session            -> { token, buyerId }
+```
+
+Then connect the MCP server (and call order endpoints) with the token:
+
+```text
+Authorization: Bearer <token>
+```
+
+Orders created with the token carry the buyerId; `list_my_orders` (MCP) and
+`GET /buyer/orders` (REST) return that buyer's cross-merchant history. Anonymous
+ordering still works unless the server sets `SLLR_REQUIRE_BUYER_AUTH=true`.
+
 ## Agent Flow
 
 1. List merchants.

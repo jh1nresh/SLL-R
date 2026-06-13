@@ -11,6 +11,8 @@ import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { merchantTerminalPage, standaloneAgentPage } from "./ui/agenticPos.js";
 import { standaloneAgentMessage } from "./core/standaloneAgent.js";
+import { issueBuyerSession, resolveBuyer, revokeBuyerSession, buyerTokenFrom } from "./core/buyer.js";
+import { listOrdersForBuyer } from "./core/orders.js";
 import { baseCoffeeMerchants, baseCoffeeOrder, baseCoffeePayment, baseCoffeeQuote, baseCoffeeRecordDemoPayment, baseCoffeeStatus } from "./adapters/baseCoffeePlugin.js";
 import { helioWebhook, solanaPayMerchants, solanaPayPreparePayment, solanaPayVerifyPayment } from "./adapters/solanaPay.js";
 import { baseMcpPluginSpec } from "./baseMcpPlugin.js";
@@ -62,6 +64,30 @@ async function readBody(request: IncomingMessage) {
 
 async function body(request: IncomingMessage) {
   return (await readBody(request)).json;
+}
+
+// Resolve the buyer session (Authorization: Bearer <buyer token>) and stamp the
+// create-order payload with its buyerId, binding the order to a buyer identity.
+// When SLLR_REQUIRE_BUYER_AUTH=true, ordering without a valid token is rejected.
+function requireBuyerIfConfigured(buyerId: string | null) {
+  if (process.env.SLLR_REQUIRE_BUYER_AUTH === "true" && !buyerId) {
+    throw Object.assign(new Error("Buyer authentication required. Obtain a token from POST /buyer/session and send it as 'Authorization: Bearer <token>'."), { status: 401 });
+  }
+}
+
+async function buyerIdFor(request: IncomingMessage, payload?: Record<string, unknown>) {
+  const session = await resolveBuyer(buyerTokenFrom(request.headers, payload), new Date().toISOString());
+  return session?.buyerId ?? null;
+}
+
+// buyerId must NEVER come from client input. Strip any client-supplied buyerId,
+// then set it only from the validated session token. Enforces require-auth.
+async function bindBuyer(request: IncomingMessage, payload: Record<string, unknown>) {
+  delete payload.buyerId;
+  const buyerId = await buyerIdFor(request, payload);
+  requireBuyerIfConfigured(buyerId);
+  if (buyerId) payload.buyerId = buyerId;
+  return payload;
 }
 
 function originFrom(request: IncomingMessage) {
@@ -173,7 +199,8 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
               error: { code: -32000, message: "Unsupported media type: MCP requests must use content-type application/json." },
             });
           }
-          const result = await handleMcpPost((await readBody(request)).json, originFrom(request));
+          const buyer = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+          const result = await handleMcpPost((await readBody(request)).json, originFrom(request), buyer?.buyerId ?? null);
           if (result.payload === null) {
             response.writeHead(result.status);
             return response.end();
@@ -217,6 +244,35 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       if (request.method === "GET" && url.pathname === "/merchants") {
         return json(response, 200, listMerchants());
       }
+      if (request.method === "POST" && url.pathname === "/buyer/session") {
+        const payload = await body(request);
+        const { token, session } = await issueBuyerSession(
+          typeof payload.label === "string" ? payload.label : "buyer agent user",
+          new Date().toISOString(),
+        );
+        return json(response, 201, {
+          product: "SLL-R buyer session",
+          token,
+          buyerId: session.buyerId,
+          expiresAt: session.expiresAt,
+          usage: "Send this token as 'Authorization: Bearer <token>' on /mcp and order endpoints to bind orders + receipts to your buyer identity.",
+        });
+      }
+      if (request.method === "DELETE" && url.pathname === "/buyer/session") {
+        const revoked = await revokeBuyerSession(buyerTokenFrom(request.headers), new Date().toISOString());
+        return json(response, revoked ? 200 : 404, revoked
+          ? { product: "SLL-R buyer session", revoked: true }
+          : { error: "No matching live buyer session to revoke." });
+      }
+      if (request.method === "GET" && url.pathname === "/buyer/orders") {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token. Obtain one from POST /buyer/session." });
+        return json(response, 200, {
+          product: "SLL-R buyer orders",
+          buyerId: session.buyerId,
+          orders: await listOrdersForBuyer(session.buyerId),
+        });
+      }
       const standaloneAgentRoute = url.pathname.match(/^\/agent\/([^/]+)(?:\/([^/]+))?$/);
       if (standaloneAgentRoute) {
         const [, merchantId, action] = standaloneAgentRoute;
@@ -225,7 +281,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return page ? html(response, 200, page) : json(response, 404, { error: `Unknown merchant: ${merchantId}` });
         }
         if (request.method === "POST" && action === "message") {
-          return json(response, 200, await standaloneAgentMessage(merchantId, await body(request), originFrom(request)));
+          return json(response, 200, await standaloneAgentMessage(merchantId, await bindBuyer(request, await body(request)), originFrom(request)));
         }
       }
       const terminalRoute = url.pathname.match(/^\/terminal\/([^/]+)$/);
@@ -268,7 +324,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, 200, quoteMerchantOrder(merchantId, await body(request)));
         }
         if (request.method === "POST" && action === "orders") {
-          return json(response, 201, await createMerchantOrder(merchantId, await body(request)));
+          return json(response, 201, await createMerchantOrder(merchantId, await bindBuyer(request, await body(request))));
         }
         if (request.method === "GET" && action === "orders") {
           return json(response, 200, await listMerchantOrders(merchantId, url.searchParams.get("status")));
@@ -295,7 +351,9 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         return json(response, 200, baseCoffeeQuote(url.searchParams));
       }
       if (request.method === "GET" && url.pathname === "/base-plugin/coffee/order") {
-        return json(response, 201, await baseCoffeeOrder(url.searchParams));
+        const baseBuyerId = await buyerIdFor(request);
+        requireBuyerIfConfigured(baseBuyerId);
+        return json(response, 201, await baseCoffeeOrder(url.searchParams, baseBuyerId));
       }
       if (request.method === "GET" && url.pathname === "/base-plugin/coffee/prepare-payment") {
         const orderId = url.searchParams.get("orderId") || "";
@@ -380,7 +438,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         return json(response, 200, { product: "SLL-R quote", quote: quoteOrder(await body(request) as never) });
       }
       if (request.method === "POST" && url.pathname === "/orders") {
-        const result = await createOrder(await body(request) as never);
+        const result = await createOrder(await bindBuyer(request, await body(request)) as never);
         return json(response, 201, {
           product: "SLL-R order handoff",
           status: result.order.status,

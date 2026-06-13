@@ -34,6 +34,7 @@ export async function issueSllrReceipt(order: SellerOrder): Promise<ReceiptHando
       merchantId: order.merchantId,
       merchantName: order.merchantName,
       receiptNumber: order.id,
+      buyerId: order.buyerId,
       amountUsd: order.item.subtotalUsd,
       category: order.item.name,
       purpose: "sllr_seller_agent_order",
