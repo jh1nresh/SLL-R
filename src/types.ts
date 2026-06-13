@@ -6,6 +6,7 @@ export type PaymentRail =
   | "moonpay"
   | "helio"
   | "stripe"
+  | "line_pay"
   | "solana_pay"
   | "base_usdc"
   | "binance_pay";

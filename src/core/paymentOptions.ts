@@ -1,6 +1,7 @@
 import { baseCoffeePayment } from "../adapters/baseCoffeePlugin.js";
 import { solanaPayPreparePayment } from "../adapters/solanaPay.js";
 import { stripePreparePayment } from "../adapters/stripe.js";
+import { linePayPreparePayment } from "../adapters/linePay.js";
 import { merchantForId } from "../merchants/profiles.js";
 import type { CatalogItem, PaymentRail, SellerOrder } from "../types.js";
 import { getOrder } from "./orders.js";
@@ -95,6 +96,14 @@ export async function merchantPaymentOptions(merchantId: string, payload: Record
       paymentOptions.push(await stripePreparePayment(order, origin));
     } catch (error) {
       paymentOptions.push(adapterErrorOption("stripe", order, error));
+    }
+  }
+
+  if (merchant.paymentRails.includes("line_pay")) {
+    try {
+      paymentOptions.push(await linePayPreparePayment(order, origin));
+    } catch (error) {
+      paymentOptions.push(adapterErrorOption("line_pay", order, error));
     }
   }
 

@@ -777,6 +777,101 @@ async function smokeStripePrepay(origin: string) {
   }
 }
 
+// In-process fake LINE Pay Online API to exercise the request -> confirm flow.
+async function smokeLinePay(origin: string) {
+  const channelSecret = "line_pay_channel_secret";
+  const validTxId = "2024999999";
+  const linePayApi = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (c) => chunks.push(Buffer.from(c)));
+    request.on("end", () => {
+      const url = new URL(request.url || "/", "http://linepay.test");
+      const body = Buffer.concat(chunks).toString("utf8");
+      const nonce = String(request.headers["x-line-authorization-nonce"] || "");
+      const sig = String(request.headers["x-line-authorization"] || "");
+      // Validate the LINE Pay v3 signature so a wrong scheme fails the test.
+      const expected = createHmac("sha256", channelSecret).update(channelSecret + url.pathname + body + nonce, "utf8").digest("base64");
+      if (!request.headers["x-line-channelid"] || !nonce || sig !== expected) {
+        response.writeHead(401); return response.end(JSON.stringify({ returnCode: "1106", returnMessage: "bad signature" }));
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      if (url.pathname === "/v3/payments/request") {
+        return response.end(JSON.stringify({ returnCode: "0000", returnMessage: "OK", info: { transactionId: validTxId, paymentUrl: { web: "https://sandbox-web-pay.line.me/web/payment/wait?transactionId=" + validTxId, app: "line://pay/payment/x" } } }));
+      }
+      const confirmMatch = url.pathname.match(/^\/v3\/payments\/([^/]+)\/confirm$/);
+      if (confirmMatch) {
+        // Unknown transaction id is rejected upstream (anti-forgery).
+        if (confirmMatch[1] !== validTxId) {
+          return response.end(JSON.stringify({ returnCode: "1198", returnMessage: "transaction not found" }));
+        }
+        return response.end(JSON.stringify({ returnCode: "0000", returnMessage: "OK", info: { orderId: "x", transactionId: validTxId } }));
+      }
+      response.writeHead(404); response.end(JSON.stringify({ returnCode: "1104", returnMessage: "unsupported" }));
+    });
+  });
+  linePayApi.listen(0);
+  await once(linePayApi, "listening");
+  const addr = linePayApi.address();
+  if (!addr || typeof addr === "string") throw new Error("Failed to start fake LINE Pay.");
+
+  const prev = {
+    base: process.env.LINE_PAY_API_BASE, id: process.env.LINE_PAY_CHANNEL_ID,
+    secret: process.env.LINE_PAY_CHANNEL_SECRET, cur: process.env.LINE_PAY_CURRENCY,
+  };
+  try {
+    // Without config, the rail is setup_required.
+    delete process.env.LINE_PAY_CHANNEL_ID; delete process.env.LINE_PAY_CHANNEL_SECRET;
+    const louisaOrder = await postJson(origin, "/merchants/louisa-coffee/orders", {
+      userIntent: "拿鐵 latte pickup in 10 minutes", deadlineMinutes: 10, paymentMode: "counter",
+    }) as { order?: { id?: string; item?: { id?: string } } };
+    const orderId = louisaOrder.order?.id;
+    if (!orderId || louisaOrder.order?.item?.id !== "latte") {
+      throw new Error(`Louisa order failed: ${JSON.stringify(louisaOrder)}`);
+    }
+    const unconfigured = await postJson(origin, "/merchants/louisa-coffee/payment-options", { orderId }) as {
+      paymentOptions?: Array<{ rail?: string; type?: string }>;
+    };
+    if (unconfigured.paymentOptions?.find((o) => o.rail === "line_pay")?.type !== "setup_required") {
+      throw new Error(`LINE Pay should be setup_required without config: ${JSON.stringify(unconfigured.paymentOptions)}`);
+    }
+
+    // Configure the fake LINE Pay and prepare a payment.
+    process.env.LINE_PAY_API_BASE = `http://127.0.0.1:${addr.port}`;
+    process.env.LINE_PAY_CHANNEL_ID = "1234567890";
+    process.env.LINE_PAY_CHANNEL_SECRET = "line_pay_channel_secret";
+    process.env.LINE_PAY_CURRENCY = "TWD";
+    const options = await postJson(origin, "/merchants/louisa-coffee/payment-options", { orderId }) as {
+      paymentOptions?: Array<{ rail?: string; type?: string; url?: string; transactionId?: string; currency?: string }>;
+    };
+    const lp = options.paymentOptions?.find((o) => o.rail === "line_pay");
+    if (lp?.type !== "payment_url" || !lp.url?.includes("line.me") || !lp.transactionId || lp.currency !== "TWD") {
+      throw new Error(`LINE Pay prepare did not return a payment URL: ${JSON.stringify(options.paymentOptions)}`);
+    }
+
+    // Simulate the redirect-back confirm.
+    const confirmRes = await fetch(`${origin}/line-pay/confirm?orderId=${encodeURIComponent(orderId)}&transactionId=${encodeURIComponent(lp.transactionId)}`);
+    const confirmed = await confirmRes.json() as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
+    if (!confirmRes.ok || confirmed.proofLevel !== "receipt_memory_issued" || confirmed.order?.payment?.provider !== "line_pay" || !confirmed.order.receipt?.receiptHash) {
+      throw new Error(`LINE Pay confirm did not issue receipt memory: ${JSON.stringify(confirmed)}`);
+    }
+
+    // Anti-forgery: a confirm with an unknown transactionId is rejected upstream
+    // (returnCode != 0000) and must NOT issue receipt memory.
+    const forgeOrder = await postJson(origin, "/merchants/louisa-coffee/orders", {
+      userIntent: "americano pickup", deadlineMinutes: 10, paymentMode: "counter",
+    }) as { order?: { id?: string } };
+    const forged = await fetch(`${origin}/line-pay/confirm?orderId=${encodeURIComponent(forgeOrder.order?.id || "")}&transactionId=9999000099990000`);
+    if (forged.status !== 502) {
+      throw new Error(`LINE Pay confirm with unknown transactionId should fail (502), got ${forged.status}`);
+    }
+  } finally {
+    for (const [k, v] of [["LINE_PAY_API_BASE", prev.base], ["LINE_PAY_CHANNEL_ID", prev.id], ["LINE_PAY_CHANNEL_SECRET", prev.secret], ["LINE_PAY_CURRENCY", prev.cur]] as const) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    linePayApi.close();
+  }
+}
+
 async function smokeBuyerAuth(origin: string) {
   // Issue a buyer session.
   const session = await postJson(origin, "/buyer/session", { label: "smoke buyer" }) as { token?: string; buyerId?: string; expiresAt?: string };
@@ -955,6 +1050,7 @@ async function main() {
     await smokeReceiptGating(origin);
     await smokeBuyerAuth(origin);
     await smokeStripePrepay(origin);
+    await smokeLinePay(origin);
     await smokeDemoMerchants(origin);
 
     const aiPlugin = await getJson(origin, "/.well-known/ai-plugin.json") as {

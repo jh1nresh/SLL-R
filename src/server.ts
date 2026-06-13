@@ -23,6 +23,7 @@ import { aiPluginManifest, sllrOpenApi } from "./openapi.js";
 import { solanaSllrPluginSpec } from "./solanaPlugin.js";
 import { shopifyCartHandoff, shopifyConnectPlan, shopifyMerchants, shopifyOrdersFulfilledWebhook, shopifyOrdersPaidWebhook, shopifyProducts, shopifyRefundsCreateWebhook } from "./adapters/shopify.js";
 import { stripeWebhook } from "./adapters/stripe.js";
+import { linePayConfirm } from "./adapters/linePay.js";
 import { createDemoMerchant, listDemoMerchants } from "./adapters/shopifyCatalog.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
@@ -386,6 +387,18 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         const order = await helioWebhook(request.headers, await body(request) as never);
         return json(response, 200, {
           product: "SLL-R Helio payment proof adapter",
+          status: order.status,
+          proofLevel: order.proofLevel,
+          order,
+        });
+      }
+      if (url.pathname === "/line-pay/confirm" && (request.method === "GET" || request.method === "POST")) {
+        // LINE Pay redirects the buyer here after authorization; capture + proof.
+        const orderId = url.searchParams.get("orderId") || "";
+        const transactionId = url.searchParams.get("transactionId") || "";
+        const order = await linePayConfirm(orderId, transactionId);
+        return json(response, 200, {
+          product: "SLL-R LINE Pay payment proof adapter",
           status: order.status,
           proofLevel: order.proofLevel,
           order,

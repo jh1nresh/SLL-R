@@ -471,6 +471,37 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
       },
     ],
   },
+  "louisa-coffee": {
+    id: "louisa-coffee",
+    name: "Louisa Coffee",
+    category: "cafe",
+    location: "Taipei",
+    fulfillment: ["pickup"],
+    // Taiwan demo: counter pay + LINE Pay prepay-in-flow. Prices are TWD
+    // (the amount field is a plain decimal; LINE Pay charges TWD whole units).
+    paymentRails: ["counter", "line_pay"],
+    humanApproval: { requiredAboveUsd: "1000.00" },
+    catalog: [
+      { id: "americano", name: "美式咖啡 Americano", amountUsd: "55.00", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 4, inventory: 50, tags: ["coffee", "americano", "espresso", "fast"] },
+      { id: "latte", name: "拿鐵 Latte", amountUsd: "70.00", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 6, inventory: 40, tags: ["coffee", "latte", "milk", "espresso"] },
+      { id: "oat-latte", name: "燕麥拿鐵 Oat Latte", amountUsd: "85.00", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 6, inventory: 30, tags: ["coffee", "latte", "oat", "milk"] },
+      { id: "matcha-latte", name: "抹茶拿鐵 Matcha Latte", amountUsd: "80.00", fulfillment: ["pickup"], productionClass: "cold", prepMinutes: 6, inventory: 25, tags: ["matcha", "latte", "milk"] },
+    ],
+    menuSections: [
+      {
+        id: "louisa-pickup-drinks",
+        name: "Pickup drinks",
+        service: "in_store",
+        source: "SLL-R Louisa Taiwan demo menu",
+        items: [
+          { id: "americano", name: "美式咖啡 Americano", section: "Pickup drinks", description: "Pickup americano.", priceStatus: "listed", amountUsd: "55.00", tags: ["coffee", "americano"] },
+          { id: "latte", name: "拿鐵 Latte", section: "Pickup drinks", description: "Pickup latte.", priceStatus: "listed", amountUsd: "70.00", tags: ["coffee", "latte"] },
+          { id: "oat-latte", name: "燕麥拿鐵 Oat Latte", section: "Pickup drinks", description: "Oat milk latte.", priceStatus: "listed", amountUsd: "85.00", tags: ["coffee", "oat"] },
+          { id: "matcha-latte", name: "抹茶拿鐵 Matcha Latte", section: "Pickup drinks", description: "Matcha latte.", priceStatus: "listed", amountUsd: "80.00", tags: ["matcha"] },
+        ],
+      },
+    ],
+  },
 };
 
 // Demo merchants ingested at runtime (for example from a public Shopify

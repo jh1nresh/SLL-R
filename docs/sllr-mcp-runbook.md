@@ -86,6 +86,9 @@ ordering still works unless the server sets `SLLR_REQUIRE_BUYER_AUTH=true`.
    - `stripe`: prepay in-flow via a Stripe hosted Checkout URL (card / Apple /
      Google Pay); the `checkout.session.completed` webhook attaches proof. The
      merchant only fulfills and never handles payment.
+   - `line_pay`: Taiwan prepay in-flow via a LINE Pay payment URL; after the
+     buyer authorizes in LINE, the `/line-pay/confirm` redirect captures the
+     payment and attaches proof. Merchant only fulfills (e.g. Louisa Coffee).
    - `shopify`: open merchant checkout and verify paid webhook.
    - `base_usdc`: prepare Base USDC calldata for Base MCP `send_calls`.
    - `solana_pay`: prepare Solana Pay URL with a unique reference.

@@ -166,7 +166,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "get_payment_options",
-    description: "List payment options for an existing order across the merchant's enabled rails: counter pay, Shopify checkout, Base USDC, Solana Pay, or Helio. Show these to the user before any payment approval.",
+    description: "List payment options for an existing order across the merchant's enabled rails: counter pay, Stripe checkout (card / Apple / Google Pay), LINE Pay, Shopify checkout, Base USDC, Solana Pay, or Helio. Show these to the user before any payment approval.",
     inputSchema: {
       type: "object",
       required: ["merchantId", "orderId"],
