@@ -1124,6 +1124,7 @@ async function main() {
     }
     const raposaAccepted = await postJson(origin, `/orders/${raposaOrder.order.id}/accept`, {
       merchantId: "raposa-coffee",
+      demo: true,
       actor: "smoke-staff",
       note: "Accepted during smoke test.",
     }) as { order?: { status?: string } };
@@ -1132,6 +1133,7 @@ async function main() {
     }
     const raposaReady = await postJson(origin, `/orders/${raposaOrder.order.id}/ready`, {
       merchantId: "raposa-coffee",
+      demo: true,
       actor: "smoke-staff",
       note: "Ready during smoke test.",
     }) as { order?: { status?: string; promise?: { readyAt?: string | null } } };
@@ -1471,6 +1473,7 @@ async function main() {
 
     const accepted = await postJson(origin, `/orders/${pickupOrder.order.id}/accept`, {
       merchantId: "raposa-coffee",
+      demo: true,
       actor: "raposa-staff",
       note: "Can make it before pickup window.",
     }) as { status?: string; order?: { terminal?: { status?: string } } };
@@ -1480,6 +1483,7 @@ async function main() {
 
     const ready = await postJson(origin, `/orders/${pickupOrder.order.id}/ready`, {
       merchantId: "raposa-coffee",
+      demo: true,
       actor: "raposa-staff",
       note: "Drink is ready.",
     }) as { status?: string; order?: { promise?: { readyAt?: string } } };
@@ -1726,6 +1730,7 @@ async function main() {
       provider: "moonpay",
       amountUsd: orderResult.order.item?.subtotalUsd,
       paymentId: "pay_smoke",
+      demo: true,
     }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string; cnftStatus?: string } } };
     if (paid.proofLevel !== "receipt_memory_issued" || !paid.order?.receipt?.receiptHash) {
       throw new Error(`Payment proof did not issue receipt handoff: ${JSON.stringify(paid)}`);

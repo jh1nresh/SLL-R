@@ -7,8 +7,10 @@ import {
   listMerchantOrders,
   listMerchants,
   quoteMerchantOrder,
+  requirePaymentVerifier,
 } from "./core/merchantApi.js";
-import { getOrder, listOrdersForBuyer } from "./core/orders.js";
+import { acceptOrder, fulfillOrder, getOrder, listOrdersForBuyer, markOrderReady, rejectOrder } from "./core/orders.js";
+import { setItemAvailability } from "./core/availability.js";
 import { recommendForBuyer } from "./core/recommend.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { createDemoMerchant } from "./adapters/shopifyCatalog.js";
@@ -162,8 +164,116 @@ const tools: ToolDefinition[] = [
     },
   },
   {
+    name: "merchant_accept_order",
+    description: "Agent POS: accept an incoming order (-> accepted / payment_backed). Note can carry an ETA. Requires the merchant verifier secret (verificationToken) or demo:true.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "orderId"],
+      properties: {
+        merchantId: { type: "string" },
+        orderId: { type: "string" },
+        note: { type: "string", description: "Optional note shown on the order, e.g. \"ready in 12 min\"." },
+        verificationToken: { type: "string", description: "Merchant verifier secret." },
+      },
+    },
+    handler: async (args) => {
+      requirePaymentVerifier({}, args);
+      const order = await acceptOrder(requireString(args, "orderId"), {
+        merchantId: requireString(args, "merchantId"),
+        actor: "agent-pos",
+        note: typeof args.note === "string" ? args.note : undefined,
+      });
+      return { product: "SLL-R agent POS", status: order.status, order };
+    },
+  },
+  {
+    name: "merchant_mark_ready",
+    description: "Agent POS: mark an accepted order ready for pickup (-> ready). Requires the merchant verifier secret (verificationToken) or demo:true.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "orderId"],
+      properties: {
+        merchantId: { type: "string" },
+        orderId: { type: "string" },
+        verificationToken: { type: "string", description: "Merchant verifier secret." },
+      },
+    },
+    handler: async (args) => {
+      requirePaymentVerifier({}, args);
+      const order = await markOrderReady(requireString(args, "orderId"), {
+        merchantId: requireString(args, "merchantId"),
+        actor: "agent-pos",
+      });
+      return { product: "SLL-R agent POS", status: order.status, order };
+    },
+  },
+  {
+    name: "merchant_reject_order",
+    description: "Agent POS: reject an order the merchant can't fulfill (-> rejected). Requires the merchant verifier secret (verificationToken) or demo:true.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "orderId"],
+      properties: {
+        merchantId: { type: "string" },
+        orderId: { type: "string" },
+        note: { type: "string", description: "Optional reason." },
+        verificationToken: { type: "string", description: "Merchant verifier secret." },
+      },
+    },
+    handler: async (args) => {
+      requirePaymentVerifier({}, args);
+      const order = await rejectOrder(requireString(args, "orderId"), {
+        merchantId: requireString(args, "merchantId"),
+        actor: "agent-pos",
+        note: typeof args.note === "string" ? args.note : undefined,
+      });
+      return { product: "SLL-R agent POS", status: order.status, order };
+    },
+  },
+  {
+    name: "merchant_fulfill_order",
+    description: "Agent POS: mark an order fulfilled/handed over — this issues the SLL-R receipt. Requires the merchant verifier secret (verificationToken) or demo:true.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "orderId"],
+      properties: {
+        merchantId: { type: "string" },
+        orderId: { type: "string" },
+        verificationToken: { type: "string", description: "Merchant verifier secret." },
+      },
+    },
+    handler: async (args) => {
+      requirePaymentVerifier({}, args);
+      const order = await fulfillOrder(requireString(args, "orderId"), {
+        merchantId: requireString(args, "merchantId"),
+        actor: "agent-pos",
+      });
+      return { product: "SLL-R agent POS", status: order.status, proofLevel: order.proofLevel, order };
+    },
+  },
+  {
+    name: "merchant_set_item_availability",
+    description: "Agent POS: 86 an item (mark unavailable) or bring it back. Unavailable items can't be ordered. Requires the merchant verifier secret (verificationToken) or demo:true.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "itemId", "available"],
+      properties: {
+        merchantId: { type: "string" },
+        itemId: { type: "string", description: "Catalog item id, e.g. iced-latte." },
+        available: { type: "boolean", description: "false = 86 it, true = back in stock." },
+        verificationToken: { type: "string", description: "Merchant verifier secret." },
+      },
+    },
+    handler: async (args) => {
+      requirePaymentVerifier({}, args);
+      const merchantId = requireString(args, "merchantId");
+      const unavailable = await setItemAvailability(merchantId, requireString(args, "itemId"), args.available === true);
+      return { product: "SLL-R agent POS", merchantId, unavailableItems: unavailable };
+    },
+  },
+  {
     name: "list_orders",
-    description: "List SLL-R orders for a merchant, optionally filtered by status.",
+    description: "Agent POS feed: list SLL-R orders for a merchant, optionally filtered by status (e.g. pending_payment, accepted, ready).",
     inputSchema: {
       type: "object",
       required: ["merchantId"],
