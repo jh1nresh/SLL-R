@@ -27,7 +27,7 @@ export class GeminiAgent implements LlmAgent {
   }
 
   async send(userText: string): Promise<string> {
-    let response = await this.chat.sendMessage({ message: userText });
+    let response = await this.sendWithRetry({ message: userText });
     // Resolve function calls until the model returns plain text.
     for (let guard = 0; guard < 12; guard++) {
       const calls = response.functionCalls ?? [];
@@ -42,8 +42,33 @@ export class GeminiAgent implements LlmAgent {
         }
         parts.push({ functionResponse: { name: fc.name ?? "", response: { result } } });
       }
-      response = await this.chat.sendMessage({ message: parts });
+      response = await this.sendWithRetry({ message: parts });
     }
     return response.text ?? "";
   }
+
+  // Gemini occasionally returns transient 503 UNAVAILABLE / 429 overloaded. Retry
+  // with exponential backoff so a blip doesn't surface to the customer.
+  private async sendWithRetry(
+    message: Parameters<GeminiAgent["chat"]["sendMessage"]>[0],
+  ): Promise<Awaited<ReturnType<GeminiAgent["chat"]["sendMessage"]>>> {
+    const delays = [400, 1200, 3000];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.chat.sendMessage(message);
+      } catch (error) {
+        if (attempt >= delays.length || !isTransient(error)) throw error;
+        await sleep(delays[attempt]);
+      }
+    }
+  }
+}
+
+function isTransient(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return /\b(503|429|500)\b/.test(msg) || msg.includes("unavailable") || msg.includes("overloaded") || msg.includes("rate limit");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

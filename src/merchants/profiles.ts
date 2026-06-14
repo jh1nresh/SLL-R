@@ -263,7 +263,9 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
     category: "cafe",
     location: "Miami Beach",
     fulfillment: ["pickup"],
-    paymentRails: ["counter", "telegram_staff", "solana_pay"],
+    // stripe = prepay-in-flow (card / Apple Pay) over iMessage; counter stays as
+    // the pay-on-pickup fallback. Requires STRIPE_SECRET_KEY on the backend.
+    paymentRails: ["counter", "stripe", "telegram_staff", "solana_pay"],
     humanApproval: { requiredAboveUsd: "25.00" },
     catalog: [
       { id: "espresso", name: "Espresso", amountUsd: "4.50", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 4, inventory: 40, tags: ["coffee", "espresso", "fast"] },
