@@ -3,6 +3,7 @@ import { loadConfig, loadSendblueConfig } from "./config.js";
 import { createAgentSession, type AgentSession } from "./core.js";
 import { SendblueClient, parseInbound, verifyWebhookSecret } from "./sendblue.js";
 import { OrderRelay } from "./orderRelay.js";
+import { BuyerStore } from "./buyerStore.js";
 
 // Sendblue iMessage server. One public POST route: /sendblue/inbound. Customers
 // text in → their per-number AgentCore replies → we send the reply back. When an
@@ -16,14 +17,25 @@ async function main() {
   const log = (m: string) => process.stdout.write(`${m}\n`);
   const relay = new OrderRelay(sendblue, sb.merchantNumber, log);
 
-  // One agent session per customer phone number (in-memory; chat history lives
-  // in-process). Orders still persist server-side in SLL-R via the buyer token.
+  // Persistent phone → buyer mapping so a returning customer keeps the same
+  // buyerId + order history across restarts (taste memory).
+  const buyers = new BuyerStore(process.env.SLLR_BUYER_STORE?.trim() || ".sllr-buyers.json");
+
+  // One agent session per customer phone number (in-memory chat history; orders
+  // + buyer identity persist via SLL-R + the buyer store).
   const customers = new Map<string, Promise<AgentSession>>();
   function customerAgent(number: string): Promise<AgentSession> {
     let session = customers.get(number);
     if (!session) {
-      session = createAgentSession(config, `iMessage ${number}`, (name, _args, result) => {
-        void relay.onToolResult(number, name, result).catch((e) => log(`[relay] push failed: ${e?.message || e}`));
+      session = createAgentSession(config, `iMessage ${number}`, {
+        buyer: buyers.get(number),
+        onToolResult: (name, _args, result) => {
+          void relay.onToolResult(number, name, result).catch((e) => log(`[relay] push failed: ${e?.message || e}`));
+        },
+      }).then((s) => {
+        // Persist the (possibly newly issued) buyer for next time.
+        buyers.set(number, { token: s.token, buyerId: s.buyerId });
+        return s;
       });
       customers.set(number, session);
     }
