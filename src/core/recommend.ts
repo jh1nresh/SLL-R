@@ -1,5 +1,6 @@
 import { allMerchantProfiles } from "../merchants/profiles.js";
 import { listOrdersForBuyer } from "./orders.js";
+import { distanceKm } from "./nearby.js";
 
 // Cross-merchant taste recommendations. The signal is the buyer's VERIFIED past
 // orders (real purchases, not clicks): we read the tags of what they bought and
@@ -13,16 +14,29 @@ export type Recommendation = {
   merchantName: string;
   item: { id: string; name: string; amountUsd: string };
   reason: string;
+  distanceKm?: number;
 };
 
 export async function recommendForBuyer(
   buyerId: string,
-  opts: { merchantId?: string; limit?: number } = {},
+  opts: { merchantId?: string; limit?: number; location?: { lat: number; lng: number }; radiusKm?: number } = {},
 ): Promise<Recommendation[]> {
   const limit = Math.min(Math.max(opts.limit ?? 3, 1), 8);
   const all = allMerchantProfiles();
   const byId = new Map(all.map((m) => [m.id, m]));
-  const merchants = all.filter((m) => !opts.merchantId || m.id === opts.merchantId);
+  // When a location is given, recommend only merchants near it (taste × place).
+  // Online-only merchants (no geo) drop out of location-scoped recommendations.
+  const radiusKm = opts.radiusKm ?? 25;
+  const merchantDistance = new Map<string, number>();
+  const merchants = all.filter((m) => {
+    if (opts.merchantId && m.id !== opts.merchantId) return false;
+    if (!opts.location) return true;
+    if (!m.geo) return false;
+    const d = distanceKm(opts.location.lat, opts.location.lng, m.geo.lat, m.geo.lng);
+    if (d > radiusKm) return false;
+    merchantDistance.set(m.id, Math.round(d * 10) / 10);
+    return true;
+  });
 
   const past = await listOrdersForBuyer(buyerId);
 
@@ -50,17 +64,21 @@ export async function recommendForBuyer(
       const topTag = tags
         .filter((tag) => tasteTags.has(tag))
         .sort((a, b) => (tasteTags.get(b) ?? 0) - (tasteTags.get(a) ?? 0))[0];
+      const dist = merchantDistance.get(merchant.id);
+      const baseReason = topTag ? `matches your taste for ${topTag}` : "a popular pick to try";
       scored.push({
         merchantId: merchant.id,
         merchantName: merchant.name,
         item: { id: item.id, name: item.name, amountUsd: item.amountUsd },
-        reason: topTag ? `matches your taste for ${topTag}` : "a popular pick to try",
+        reason: dist !== undefined ? `${baseReason}, ${dist} km away` : baseReason,
+        ...(dist !== undefined ? { distanceKm: dist } : {}),
         score,
       });
     }
   }
 
-  scored.sort((a, b) => b.score - a.score);
+  // Taste first; when location-scoped, nearer breaks ties.
+  scored.sort((a, b) => b.score - a.score || (a.distanceKm ?? 0) - (b.distanceKm ?? 0));
 
   let picks: Scored[];
   if (hasTaste) {

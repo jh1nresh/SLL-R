@@ -57,6 +57,7 @@ export type MerchantProfile = {
   name: string;
   category: string;
   location: string;
+  geo?: { lat: number; lng: number };
   fulfillment: FulfillmentMode[];
   paymentRails: PaymentRail[];
   humanApproval: {
