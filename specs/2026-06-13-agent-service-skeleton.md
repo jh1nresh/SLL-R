@@ -17,6 +17,11 @@ consumer on a messaging channel and calls SLL-R's MCP tools to quote, order, and
 pay. New package, e.g. `sllr-agent/` (own `package.json`), deployed as its own
 service (Node server on Railway/Render/Fly, or Vercel functions).
 
+**LLM provider: Gemini for v0** (`@google/genai`, `GEMINI_API_KEY`). The LLM is
+behind a small `LlmAgent` interface so the provider is swappable — Gemini now,
+Claude (`@anthropic-ai/sdk`) later if desired. Nothing else in the service
+depends on the provider.
+
 ```
 Consumer (iMessage / LINE)
    │  channel webhook (inbound)        channel API (outbound)
@@ -30,15 +35,17 @@ ChannelAdapter (Sendblue / LINE) ──► AgentCore (Claude loop) ──► MCP
 
 ```
 sllr-agent/
-  package.json            # deps: @anthropic-ai/sdk, stripe (optional), undici/fetch
+  package.json            # deps: @google/genai, stripe (optional), undici/fetch
   src/
     index.ts              # HTTP server: mounts channel webhooks + health
-    config.ts             # env: ANTHROPIC_API_KEY, SLLR_BASE_URL, SENDBLUE_*, LINE_*, store
+    config.ts             # env: GEMINI_API_KEY, SLLR_BASE_URL, SENDBLUE_*, LINE_*, store
     agent/
-      core.ts             # AgentCore: the Claude tool-use loop (channel-agnostic)
+      core.ts             # AgentCore: the channel-agnostic loop (uses LlmAgent)
+      llm.ts              # LlmAgent interface (provider-agnostic)
+      llm-gemini.ts       # Gemini impl (@google/genai); swap for llm-claude.ts later
       systemPrompt.ts     # ordering-assistant persona + safety contract
       mcpClient.ts        # JSON-RPC client to SLL-R /mcp (initialize, tools/list, tools/call)
-      conversation.ts     # per-buyer message history (load/save via store)
+      conversation.ts     # per-buyer chat history (load/save via store)
     identity/
       store.ts            # KV: channelUserId -> { buyerId, buyerToken }, + conversation history
       buyer.ts            # resolveBuyerId(channelUserId): mint/lookup SLL-R buyer session
@@ -51,48 +58,49 @@ sllr-agent/
   README.md
 ```
 
-## LLM loop — Claude API (core.ts)
+## LLM loop — Gemini (llm-gemini.ts) behind LlmAgent (llm.ts)
 
-- SDK: `@anthropic-ai/sdk` (`new Anthropic()` reads `ANTHROPIC_API_KEY`).
-- Model: **`claude-opus-4-8`** (default per house standard), `thinking:
-  {type:"adaptive"}`, `output_config:{effort:"medium"}` (chat latency; raise to
-  high for harder turns). `max_tokens: 16000`. Cost lever for scale: switch to
-  `claude-haiku-4-5` later if volume demands — a deliberate later decision, not
-  a default downgrade.
-- Tools = SLL-R's MCP tools, fetched once via `mcpClient.listTools()` and mapped
-  to Claude tool defs (`{name, description, input_schema}` — SLL-R's
-  `tools/list` already returns `inputSchema`).
-- **Manual agentic loop** (we control it, so we can gate `attach_payment_proof`
-  / `issue_receipt`, render payment links, and never auto-move money):
+- SDK: `@google/genai` (`new GoogleGenAI({ apiKey: GEMINI_API_KEY })`).
+- Model: **`gemini-2.5-flash`** (cheap, fast, built-in thinking → strong
+  function calling; generous free tier — good for dogfood). `gemini-2.5-pro` for
+  harder turns; newer Gemini models swap in by changing the string.
+- **Tools map directly:** SLL-R `tools/list` returns each tool's `inputSchema`
+  (JSON Schema). Gemini's `functionDeclarations` accept `parametersJsonSchema` —
+  so `{ name, description, parametersJsonSchema: tool.inputSchema }`, **no
+  conversion**. (This is why the `LlmAgent` seam is thin.)
+- **Chat session manages history + thought signatures** (avoids the manual-
+  history thought-signature pitfall for 2.5 thinking models). Persist
+  `chat.getHistory()` per buyer and restore it next turn.
+- **Manual function-call loop** (we control it → keep payment/receipt
+  server-gated, render payment links, never auto-move money):
 
 ```ts
-let messages: Anthropic.MessageParam[] = await convo.load(buyerId);
-messages.push({ role: "user", content: userText });
-while (true) {
-  const res = await client.messages.create({
-    model: "claude-opus-4-8",
-    max_tokens: 16000,
-    thinking: { type: "adaptive" },
-    output_config: { effort: "medium" },
-    system: SYSTEM_PROMPT,
-    tools: sllrTools,                       // from SLL-R tools/list
-    messages,
-  });
-  messages.push({ role: "assistant", content: res.content });
-  if (res.stop_reason !== "tool_use") break;
-  const toolResults: Anthropic.ToolResultBlockParam[] = [];
-  for (const b of res.content) {
-    if (b.type !== "tool_use") continue;
-    // forward to SLL-R MCP with this buyer's Bearer token so orders bind to buyerId
-    const out = await mcp.callTool(b.name, b.input, buyerToken);
-    toolResults.push({ type: "tool_result", tool_use_id: b.id, content: JSON.stringify(out) });
+// llm-gemini.ts — implements LlmAgent.run(history, userText, tools, callTool)
+const chat = ai.chats.create({
+  model: "gemini-2.5-flash",
+  history,                                  // restored from store
+  config: {
+    systemInstruction: SYSTEM_PROMPT,
+    tools: [{ functionDeclarations: tools.map(t => ({
+      name: t.name, description: t.description, parametersJsonSchema: t.inputSchema,
+    })) }],
+  },
+});
+let resp = await chat.sendMessage({ message: userText });
+while (resp.functionCalls?.length) {
+  const responses = [];
+  for (const fc of resp.functionCalls) {
+    const out = await callTool(fc.name, fc.args);   // -> SLL-R tools/call w/ buyer token
+    responses.push({ functionResponse: { name: fc.name, response: { result: out } } });
   }
-  messages.push({ role: "user", content: toolResults });
+  resp = await chat.sendMessage({ message: responses });
 }
-await convo.save(buyerId, messages);
-return finalText(messages);   // the assistant's last text block -> channel adapter sendText
+return { text: resp.text, history: chat.getHistory() };  // save history to store
 ```
 
+- `LlmAgent` interface (llm.ts): `run(history, userText, tools, callTool) ->
+  { text, history }`. AgentCore is written against this; swapping to a
+  `llm-claude.ts` (Anthropic SDK, tool-use loop) needs no AgentCore change.
 - **Safety / persona (systemPrompt.ts):** ordering assistant; before any payment
   show merchant, item, amount, rail; never call `attach_payment_proof` /
   `issue_receipt` itself (those are server/webhook-gated); only order items SLL-R
@@ -154,7 +162,7 @@ provider do, exactly as today.
 ## Config / env
 
 ```
-ANTHROPIC_API_KEY=...
+GEMINI_API_KEY=...             # Gemini for v0 (swap LlmAgent for Claude later)
 SLLR_BASE_URL=https://sll-r.vercel.app
 SENDBLUE_API_KEY=...           # + signing/secret per Sendblue
 SENDBLUE_FROM_NUMBER=...
@@ -175,9 +183,9 @@ SENDBLUE_FROM_NUMBER=...
 - AgentCore is channel-agnostic: adding the LINE adapter needs no core change.
 
 ## Sequencing
-1. `mcpClient` + `AgentCore` loop (Claude tool-use over SLL-R MCP) + identity
-   store + conversation history. Test against SLL-R prod with a CLI harness
-   (stdin→agent→stdout) before any channel.
+1. `mcpClient` + `LlmAgent` (Gemini) + `AgentCore` loop over SLL-R MCP +
+   identity store + chat history. Test against SLL-R prod with a CLI harness
+   (stdin→agent→stdout) before any channel. Only needs `GEMINI_API_KEY`.
 2. Sendblue adapter + webhook server + Stripe-link payment → dogfood by texting.
 3. LINE adapter (TW) → dogfood with the founder's TW network + Louisa.
 4. Wire `recommend_for_buyer` once the taste-graph spec ships.
