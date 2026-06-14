@@ -15,7 +15,9 @@ const BUYER_TOOL_ALLOWLIST = new Set([
   "create_order",
   "list_orders",
   "check_order_status",
-  "get_payment_options",
+  // get_payment_options is intentionally NOT exposed: the server calls it after
+  // create_order and deterministically appends the pay link + pickup code, so the
+  // agent can't skip it or duplicate it.
   "list_my_orders",
 ]);
 

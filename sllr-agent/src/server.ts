@@ -4,6 +4,7 @@ import { createAgentSession, type AgentSession } from "./core.js";
 import { SendblueClient, parseInbound, verifyWebhookSecret } from "./sendblue.js";
 import { OrderRelay } from "./orderRelay.js";
 import { BuyerStore } from "./buyerStore.js";
+import { SllrMcp } from "./mcp.js";
 
 // Sendblue iMessage server. One public POST route: /sendblue/inbound. Customers
 // text in → their per-number AgentCore replies → we send the reply back. When an
@@ -16,6 +17,13 @@ async function main() {
   const sendblue = new SendblueClient(sb);
   const log = (m: string) => process.stdout.write(`${m}\n`);
   const relay = new OrderRelay(sendblue, sb.merchantNumber, log);
+
+  // Shared MCP client for server-side lookups (payment options after an order).
+  const mcp = new SllrMcp(config.sllrBaseUrl);
+  await mcp.initialize();
+  // Orders created during the current turn, keyed by phone — used to append the
+  // pay link + pickup code deterministically, never relying on the LLM to do it.
+  const pendingOrder = new Map<string, { merchantId: string; orderId: string }>();
 
   // Persistent phone → buyer mapping so a returning customer keeps the same
   // buyerId + order history across restarts (taste memory).
@@ -31,6 +39,10 @@ async function main() {
         buyer: buyers.get(number),
         onToolResult: (name, _args, result) => {
           void relay.onToolResult(number, name, result).catch((e) => log(`[relay] push failed: ${e?.message || e}`));
+          if (name === "create_order") {
+            const order = (result as { order?: { id?: string; merchantId?: string } } | undefined)?.order;
+            if (order?.id) pendingOrder.set(number, { merchantId: String(order.merchantId ?? ""), orderId: String(order.id) });
+          }
         },
       }).then((s) => {
         // Persist the (possibly newly issued) buyer for next time.
@@ -60,12 +72,26 @@ async function main() {
     // conversation feels human. Best-effort — never block or fail the turn.
     void sendblue.markRead(msg.fromNumber, msg.sendblueNumber).catch(() => {});
     void sendblue.sendTyping(msg.fromNumber, msg.sendblueNumber).catch(() => {});
+    pendingOrder.delete(msg.fromNumber);
     const { agent } = await customerAgent(msg.fromNumber);
     let reply: string;
     try {
       reply = await agent.send(msg.content);
     } catch (error) {
       reply = `⚠️ Sorry, something went wrong: ${error instanceof Error ? error.message : "agent error"}`;
+    }
+    // Deterministic payment surface: if an order was created this turn, append the
+    // pickup code + pay link ourselves so it never depends on the LLM remembering.
+    const created = pendingOrder.get(msg.fromNumber);
+    if (created) {
+      pendingOrder.delete(msg.fromNumber);
+      try {
+        const opts = await mcp.callTool("get_payment_options", { merchantId: created.merchantId, orderId: created.orderId });
+        const block = paymentBlock(opts);
+        if (block) reply = reply.trim() ? `${reply.trim()}\n\n${block}` : block;
+      } catch (e) {
+        log(`[payment] options lookup failed: ${(e as Error)?.message || e}`);
+      }
     }
     if (reply.trim()) await sendblue.sendMessage(msg.fromNumber, reply, msg.sendblueNumber);
   }
@@ -131,6 +157,21 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json" });
   res.end(payload);
+}
+
+// Build the deterministic payment line(s) from a get_payment_options result:
+// pickup code + a pay-now link (Stripe checkout / Apple Pay) when available,
+// else a counter-pay instruction. This is what the customer actually acts on.
+function paymentBlock(optsResult: unknown): string {
+  const opts = (optsResult as { paymentOptions?: Array<Record<string, unknown>> })?.paymentOptions ?? [];
+  const counter = opts.find((o) => o.rail === "counter");
+  const pay = opts.find((o) => o.type === "checkout_url" && typeof o.url === "string");
+  const lines: string[] = [];
+  const code = counter?.pickupCode;
+  if (typeof code === "string" && code) lines.push(`🎟️ Pickup code: ${code}`);
+  if (pay) lines.push(`💳 Pay now (Apple Pay / card): ${pay.url}`);
+  else lines.push("💵 Pay at the counter when you pick up.");
+  return lines.join("\n");
 }
 
 main().catch((error) => {
