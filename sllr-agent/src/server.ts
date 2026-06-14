@@ -51,7 +51,7 @@ async function main() {
     } catch (error) {
       reply = `⚠️ Sorry, something went wrong: ${error instanceof Error ? error.message : "agent error"}`;
     }
-    if (reply.trim()) await sendblue.sendMessage(msg.fromNumber, reply);
+    if (reply.trim()) await sendblue.sendMessage(msg.fromNumber, reply, msg.sendblueNumber);
   }
 
   const server = createServer((req, res) => {
@@ -67,6 +67,10 @@ async function main() {
     readBody(req).then((raw) => {
       let body: unknown;
       try { body = JSON.parse(raw || "{}"); } catch { return json(res, 400, { error: "invalid JSON" }); }
+
+      if (process.env.SLLR_DEBUG_WEBHOOK === "1") {
+        log(`[debug] POST ${url.pathname}\n  headers=${JSON.stringify(req.headers)}\n  body=${raw.slice(0, 1000)}`);
+      }
 
       if (!verifyWebhookSecret(sb, req.headers, url, body)) {
         return json(res, 401, { error: "bad webhook secret" });

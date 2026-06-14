@@ -12,9 +12,13 @@ export class SendblueClient {
 
   // Send an iMessage (falls back to SMS for non-iMessage numbers on Sendblue's
   // side). Returns the message_handle for tracking, or throws on a hard error.
-  async sendMessage(number: string, content: string): Promise<string> {
+  // fromNumber: the Sendblue number to send FROM — Sendblue requires it. Pass
+  // the inbound's sendblue_number to reply from the same line; falls back to the
+  // configured SENDBLUE_FROM_NUMBER.
+  async sendMessage(number: string, content: string, fromNumber?: string): Promise<string> {
+    const from = (fromNumber || this.config.fromNumber || "").trim();
     const body: Record<string, unknown> = { number, content };
-    if (this.config.fromNumber) body.from_number = this.config.fromNumber;
+    if (from) body.from_number = from;
 
     const res = await fetch(SEND_URL, {
       method: "POST",
@@ -38,11 +42,12 @@ export class SendblueClient {
 }
 
 export type InboundMessage = {
-  fromNumber: string;     // the customer's (or merchant's) number, E.164
-  content: string;        // message text ("" for status/typing events)
-  isOutbound: boolean;    // true = our own outbound status callback, ignore
-  messageHandle: string;  // unique id, used for idempotent dedupe
-  isTyping: boolean;      // typing indicator, not a real message
+  fromNumber: string;      // the customer's (or merchant's) number, E.164
+  content: string;         // message text ("" for status/typing events)
+  isOutbound: boolean;     // true = our own outbound status callback, ignore
+  messageHandle: string;   // unique id, used for idempotent dedupe
+  isTyping: boolean;       // typing indicator, not a real message
+  sendblueNumber: string;  // the Sendblue line it arrived on — reply FROM this
 };
 
 // Normalize Sendblue's inbound webhook JSON into the fields we route on.
@@ -56,6 +61,9 @@ export function parseInbound(body: unknown): InboundMessage {
     isOutbound: b.is_outbound === true,
     messageHandle: typeof b.message_handle === "string" ? b.message_handle : "",
     isTyping: b.isTyping === true || b.is_typing === true,
+    sendblueNumber: typeof b.sendblue_number === "string" && b.sendblue_number
+      ? b.sendblue_number
+      : (typeof b.to_number === "string" ? b.to_number : ""),
   };
 }
 
