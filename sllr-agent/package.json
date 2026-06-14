@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "cli": "node --import tsx src/cli.ts",
+    "server": "node --import tsx src/server.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

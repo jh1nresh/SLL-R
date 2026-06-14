@@ -24,10 +24,19 @@ export type AgentSession = {
   buyerId: string;
 };
 
+// Observer fired after every successful SLL-R tool call. The channel layer uses
+// this to react to side effects (e.g. create_order → push to the merchant)
+// without the LLM ever knowing a merchant channel exists.
+export type ToolResultHook = (name: string, args: Record<string, unknown>, result: unknown) => void;
+
 // Build a consumer ordering agent bound to a buyer session. The agent's tools
 // are SLL-R's MCP tools; tool calls forward to SLL-R with the buyer's Bearer
 // token so orders + receipts bind to this buyerId.
-export async function createAgentSession(config: Config, customerLabel: string): Promise<AgentSession> {
+export async function createAgentSession(
+  config: Config,
+  customerLabel: string,
+  onToolResult?: ToolResultHook,
+): Promise<AgentSession> {
   const mcp = new SllrMcp(config.sllrBaseUrl);
   await mcp.initialize();
 
@@ -47,7 +56,14 @@ export async function createAgentSession(config: Config, customerLabel: string):
   const agent = new GeminiAgent(config.geminiApiKey, config.geminiModel, {
     systemPrompt: SYSTEM_PROMPT,
     tools,
-    callTool: (name, args) => mcp.callTool(name, args, token),
+    callTool: async (name, args) => {
+      const result = await mcp.callTool(name, args, token);
+      if (onToolResult) {
+        // Never let an observer error break the agent turn.
+        try { onToolResult(name, args, result); } catch { /* ignore */ }
+      }
+      return result;
+    },
   });
 
   return { agent, buyerId };
