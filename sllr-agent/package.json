@@ -1,0 +1,22 @@
+{
+  "name": "sllr-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Consumer ordering agent for SLL-R: an LLM (Gemini) that converses with a buyer and calls SLL-R's MCP tools to quote, order, and pay.",
+  "type": "module",
+  "scripts": {
+    "cli": "node --import tsx src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@google/genai": "^2.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.3"
+  }
+}
