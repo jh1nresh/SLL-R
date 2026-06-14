@@ -62,27 +62,79 @@ function orderLandingPage(order: { item?: { name?: string; subtotalUsd?: string 
     : order
       ? `Thanks! Your ${itemName}${amount ? ` (${amount})` : ""} is confirmed. Return to Messages — your pickup code and receipt are on the way.`
       : "We couldn't find that order. Head back to Messages.";
+  return receiptShell(`${heading} · SLL-R`, `
+  <div class="emoji">${emoji}</div>
+  <h1>${heading}</h1>
+  <p>${body}</p>
+  ${ok && amount ? `<div class="amt">Paid ${amount}</div>` : ""}`);
+}
+
+// The verified consumption receipt — SLL-R's trust-layer artifact. Shows the
+// merchant-verified payment + the integrity hash + cNFT mint status.
+function receiptPage(order: Awaited<ReturnType<typeof getOrder>>): string {
+  const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+  if (!order || !order.receipt) {
+    return receiptShell("Receipt not found · SLL-R", `<div class="emoji">🤔</div><h1>Receipt not found</h1><p>We couldn't find a receipt for that order.</p>`);
+  }
+  const merchant = esc(order.merchantName || "Merchant");
+  const item = esc(order.item?.name || "Item");
+  const qty = order.item?.quantity || 1;
+  const amount = order.item?.subtotalUsd ? `$${esc(order.item.subtotalUsd)}` : "";
+  const code = order.id ? esc(order.id.replace(/^ord_/, "").slice(0, 6).toUpperCase()) : "";
+  const when = order.createdAt ? esc(order.createdAt.replace("T", " ").slice(0, 16) + " UTC") : "";
+  const provider = esc((order.payment?.provider || "").replace(/^\w/, (c) => c.toUpperCase()));
+  const verified = order.payment?.status === "verified";
+  const hash = esc(order.receipt.receiptHash || "");
+  const mintable = order.receipt.cnftStatus === "ready_for_mint";
+  const row = (label: string, value: string) => value ? `<div class="row"><span class="k">${label}</span><span class="v">${value}</span></div>` : "";
+  return receiptShell(`Receipt · ${merchant} · SLL-R`, `
+  <div class="emoji">🧾</div>
+  <h1>Verified Receipt</h1>
+  ${verified ? `<div class="badge ok">✓ Payment verified${provider ? ` · ${provider}` : ""}</div>` : `<div class="badge">Pending verification</div>`}
+  <div class="rows">
+    ${row("Merchant", merchant)}
+    ${row("Item", `${item}${qty > 1 ? ` ×${qty}` : ""}`)}
+    ${row("Amount", amount)}
+    ${row("Pickup code", code)}
+    ${row("Date", when)}
+  </div>
+  ${hash ? `<div class="hash"><div class="k">Receipt hash</div><code>${hash}</code></div>` : ""}
+  ${mintable ? `<div class="badge mint">⛓ Ready to mint as on-chain receipt (cNFT)</div>` : ""}
+  <p class="foot">Cryptographically anchored consumption receipt, verified by the merchant's payment. This is your proof of purchase on SLL-R.</p>`);
+}
+
+// Shared dark, mobile-first page shell for order/receipt pages.
+function receiptShell(title: string, inner: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${heading} · SLL-R</title>
+<title>${title}</title>
 <style>
   :root { color-scheme: light dark; }
   body { margin:0; min-height:100vh; display:grid; place-items:center;
     font:17px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     background:#0b0b0c; color:#f2f2f7; padding:24px; box-sizing:border-box; }
-  .card { max-width:380px; text-align:center; background:#1c1c1e; border-radius:20px;
-    padding:36px 28px; box-shadow:0 10px 40px rgba(0,0,0,.4); }
-  .emoji { font-size:56px; line-height:1; }
-  h1 { font-size:22px; margin:18px 0 8px; }
+  .card { max-width:380px; width:100%; text-align:center; background:#1c1c1e; border-radius:20px;
+    padding:32px 26px; box-shadow:0 10px 40px rgba(0,0,0,.4); box-sizing:border-box; }
+  .emoji { font-size:52px; line-height:1; }
+  h1 { font-size:22px; margin:16px 0 10px; }
   p { color:#a1a1a6; margin:0; }
   .amt { margin-top:18px; font-size:15px; color:#30d158; font-weight:600; }
+  .badge { display:inline-block; margin:4px 0 6px; padding:5px 12px; border-radius:999px;
+    font-size:13px; font-weight:600; background:#2c2c2e; color:#a1a1a6; }
+  .badge.ok { background:rgba(48,209,88,.15); color:#30d158; }
+  .badge.mint { background:rgba(94,132,255,.15); color:#7d9bff; margin-top:14px; }
+  .rows { text-align:left; margin:20px 0 4px; border-top:1px solid #2c2c2e; }
+  .row { display:flex; justify-content:space-between; gap:12px; padding:10px 2px;
+    border-bottom:1px solid #2c2c2e; font-size:15px; }
+  .row .k { color:#8e8e93; }
+  .row .v { color:#f2f2f7; font-weight:600; text-align:right; }
+  .hash { text-align:left; margin:16px 0 4px; }
+  .hash .k { color:#8e8e93; font-size:13px; margin-bottom:4px; }
+  .hash code { display:block; word-break:break-all; font-size:12px; color:#c7c7cc;
+    background:#0b0b0c; padding:10px; border-radius:10px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .foot { margin-top:18px; font-size:13px; color:#8e8e93; }
 </style></head>
-<body><div class="card">
-  <div class="emoji">${emoji}</div>
-  <h1>${heading}</h1>
-  <p>${body}</p>
-  ${ok && amount ? `<div class="amt">Paid ${amount}</div>` : ""}
-</div></body></html>`;
+<body><div class="card">${inner}</div></body></html>`;
 }
 
 async function readBody(request: IncomingMessage) {
@@ -508,6 +560,20 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           }),
         });
       }
+      const receiptRoute = url.pathname.match(/^\/receipts\/([^/]+)$/);
+      if (receiptRoute && request.method === "GET") {
+        const order = await getOrder(receiptRoute[1]);
+        const wantsJson = String(request.headers.accept || "").includes("application/json");
+        if (!order || !order.receipt) {
+          return wantsJson
+            ? json(response, 404, { error: `No receipt for order: ${receiptRoute[1]}` })
+            : html(response, 404, receiptPage(null));
+        }
+        return wantsJson
+          ? json(response, 200, { product: "SLL-R receipt", order })
+          : html(response, 200, receiptPage(order));
+      }
+
       const orderRoute = url.pathname.match(/^\/orders\/([^/]+)(?:\/([^/]+))?$/);
       if (orderRoute) {
         const [, orderId, action] = orderRoute;
