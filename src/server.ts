@@ -7,6 +7,7 @@ import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
 import { getUnavailableItems, setItemAvailability } from "./core/availability.js";
+import { nearbyMerchants } from "./core/nearby.js";
 import { issueMerchantToken, requireMerchantAuth } from "./core/merchantAuth.js";
 import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder, requirePaymentVerifier } from "./core/merchantApi.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
@@ -408,6 +409,24 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       const merchantRoute = url.pathname.match(/^\/merchants\/([^/]+)(?:\/([^/]+))?$/);
       if (merchantRoute) {
         const [, merchantId, action] = merchantRoute;
+        // GET /merchants/nearby?lat=&lng=&radiusKm=&category=&limit= — location-aware lookup.
+        if (request.method === "GET" && merchantId === "nearby" && !action) {
+          const lat = Number(url.searchParams.get("lat"));
+          const lng = Number(url.searchParams.get("lng"));
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            return json(response, 400, { error: "lat and lng query params are required (numbers)." });
+          }
+          const radiusKm = url.searchParams.get("radiusKm");
+          const limit = url.searchParams.get("limit");
+          return json(response, 200, {
+            product: "SLL-R nearby merchants",
+            merchants: nearbyMerchants(lat, lng, {
+              radiusKm: radiusKm ? Number(radiusKm) : undefined,
+              category: url.searchParams.get("category") || undefined,
+              limit: limit ? Number(limit) : undefined,
+            }),
+          });
+        }
         if (request.method === "GET" && !action) {
           return json(response, 200, getMerchant(merchantId));
         }

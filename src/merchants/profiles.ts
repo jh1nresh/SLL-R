@@ -262,6 +262,7 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
     name: "Raposa Coffee",
     category: "cafe",
     location: "Miami Beach",
+    geo: { lat: 25.7907, lng: -80.1300 },
     fulfillment: ["pickup"],
     // stripe = prepay-in-flow (card / Apple Pay) over iMessage; counter stays as
     // the pay-on-pickup fallback. Requires STRIPE_SECRET_KEY on the backend.
@@ -435,6 +436,7 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
     name: "Noun Coffee",
     category: "coffee ecommerce",
     location: "Marina del Rey",
+    geo: { lat: 33.9802, lng: -118.4517 },
     fulfillment: ["shipping", "pickup"],
     paymentRails: ["shopify", "base_usdc", "counter"],
     humanApproval: { requiredAboveUsd: "100.00" },

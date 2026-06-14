@@ -12,6 +12,7 @@ import { acceptOrder, fulfillOrder, getOrder, listOrdersForBuyer, markOrderReady
 import { setItemAvailability } from "./core/availability.js";
 import { requireMerchantAuth } from "./core/merchantAuth.js";
 import { recommendForBuyer } from "./core/recommend.js";
+import { nearbyMerchants } from "./core/nearby.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { createDemoMerchant } from "./adapters/shopifyCatalog.js";
 
@@ -147,17 +148,55 @@ const tools: ToolDefinition[] = [
       properties: {
         merchantId: { type: "string", description: "Optional: scope recommendations to a single merchant." },
         limit: { type: "number", description: "Max recommendations to return (default 3)." },
+        lat: { type: "number", description: "Optional buyer latitude — scopes recommendations to nearby merchants." },
+        lng: { type: "number", description: "Optional buyer longitude (with lat)." },
+        radiusKm: { type: "number", description: "Nearby radius when lat/lng given (default 25)." },
       },
     },
     handler: async (args, _origin, buyerId) => {
       if (!buyerId) {
         throw Object.assign(new Error("No buyer session. Connect the MCP server with an Authorization: Bearer <buyer token> header (get one from POST /buyer/session)."), { status: 401 });
       }
+      const lat = Number(args.lat);
+      const lng = Number(args.lng);
+      const location = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : undefined;
       return {
         product: "SLL-R recommendations",
         buyerId,
         recommendations: await recommendForBuyer(buyerId, {
           merchantId: typeof args.merchantId === "string" ? args.merchantId : undefined,
+          limit: typeof args.limit === "number" ? args.limit : undefined,
+          location,
+          radiusKm: typeof args.radiusKm === "number" ? args.radiusKm : undefined,
+        }),
+      };
+    },
+  },
+  {
+    name: "nearby_merchants",
+    description: "Find merchants near a location (lat/lng), sorted by distance. Use the buyer's current location to recommend or order from nearby spots. Online-only merchants (no geo) are excluded.",
+    inputSchema: {
+      type: "object",
+      required: ["lat", "lng"],
+      properties: {
+        lat: { type: "number" },
+        lng: { type: "number" },
+        radiusKm: { type: "number", description: "Default 15." },
+        category: { type: "string", description: "Optional filter, e.g. cafe." },
+        limit: { type: "number", description: "Default 5." },
+      },
+    },
+    handler: (args) => {
+      const lat = Number(args.lat);
+      const lng = Number(args.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        throw Object.assign(new Error("nearby_merchants requires numeric lat and lng."), { status: 400 });
+      }
+      return {
+        product: "SLL-R nearby merchants",
+        merchants: nearbyMerchants(lat, lng, {
+          radiusKm: typeof args.radiusKm === "number" ? args.radiusKm : undefined,
+          category: typeof args.category === "string" ? args.category : undefined,
           limit: typeof args.limit === "number" ? args.limit : undefined,
         }),
       };

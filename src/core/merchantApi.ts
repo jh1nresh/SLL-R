@@ -15,6 +15,7 @@ function merchantSummary(merchant: MerchantProfile) {
     name: merchant.name,
     category: merchant.category,
     location: merchant.location,
+    geo: merchant.geo ?? null,
     fulfillment: merchant.fulfillment,
     paymentRails: merchant.paymentRails,
     catalogItems: merchant.catalog.length,
