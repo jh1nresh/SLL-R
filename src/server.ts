@@ -6,6 +6,7 @@ import { allMerchantProfiles, hydrateDemoMerchants, merchantForId } from "./merc
 import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
 import { attachPaymentProof } from "./core/orders.js";
+import { getUnavailableItems, setItemAvailability } from "./core/availability.js";
 import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder, requirePaymentVerifier } from "./core/merchantApi.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
@@ -430,6 +431,19 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         if (request.method === "POST" && action === "receipt") {
           return json(response, 200, await issueMerchantReceipt(merchantId, request.headers, await body(request)));
         }
+        if (request.method === "POST" && action === "availability") {
+          const payload = await body(request);
+          requirePaymentVerifier(request.headers, payload);
+          getMerchant(merchantId);
+          const itemId = String(payload.itemId || "");
+          if (!itemId) throw Object.assign(new Error("Missing itemId."), { status: 400 });
+          const unavailableItems = await setItemAvailability(merchantId, itemId, payload.available === true);
+          return json(response, 200, { product: "SLL-R agent POS", merchantId, unavailableItems });
+        }
+        if (request.method === "GET" && action === "availability") {
+          getMerchant(merchantId);
+          return json(response, 200, { product: "SLL-R agent POS", merchantId, unavailableItems: await getUnavailableItems(merchantId) });
+        }
       }
       if (request.method === "GET" && url.pathname === "/pilot-kit") {
         const merchantId = url.searchParams.get("merchantId") || "";
@@ -589,11 +603,15 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, order ? 200 : 404, order ? { product: "SLL-R merchant terminal", order } : { error: `Unknown order: ${orderId}` });
         }
         if (request.method === "POST" && action === "accept") {
-          const order = await acceptOrder(orderId, await body(request) as never);
+          const payload = await body(request);
+          requirePaymentVerifier(request.headers, payload);
+          const order = await acceptOrder(orderId, payload as never);
           return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
         }
         if (request.method === "POST" && action === "reject") {
-          const order = await rejectOrder(orderId, await body(request) as never);
+          const payload = await body(request);
+          requirePaymentVerifier(request.headers, payload);
+          const order = await rejectOrder(orderId, payload as never);
           return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
         }
         if (request.method === "POST" && action === "fulfill") {
@@ -608,7 +626,9 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           });
         }
         if (request.method === "POST" && action === "ready") {
-          const order = await markOrderReady(orderId, await body(request) as never);
+          const payload = await body(request);
+          requirePaymentVerifier(request.headers, payload);
+          const order = await markOrderReady(orderId, payload as never);
           return json(response, 200, { product: "SLL-R merchant terminal", status: order.status, order });
         }
         if (request.method === "POST" && action === "claim") {
@@ -624,7 +644,12 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         }
       }
       if (request.method === "POST" && url.pathname === "/webhooks/payment") {
-        const order = await attachPaymentProof(await body(request) as never);
+        const payload = await body(request);
+        // Gate generic payment-proof attachment behind the merchant verifier so a
+        // caller can't forge a paid order + receipt (the trust layer). demo=true
+        // works only when no verifier secret is configured.
+        requirePaymentVerifier(request.headers, payload);
+        const order = await attachPaymentProof(payload as never);
         return json(response, 200, {
           product: "SLL-R payment proof adapter",
           status: order.status,

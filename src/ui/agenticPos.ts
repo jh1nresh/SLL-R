@@ -313,6 +313,10 @@ export function merchantTerminalPage(merchantId: string, origin: string) {
       <strong>Terminal API</strong>
       <pre>${escapeHtml(`${origin}/orders?merchantId=${merchant.id}`)}</pre>
     </div>
+    <div class="card">
+      <strong>Availability (86)</strong>
+      <div id="menu86" class="stack">${merchant.catalog.map((i) => `<div class="row" style="justify-content: space-between;"><span>${escapeHtml(i.name)}</span><button class="secondary" data-item="${escapeHtml(i.id)}" onclick="toggle86('${escapeHtml(i.id)}', this)">·</button></div>`).join("")}</div>
+    </div>
   </aside>
 </main>
 <script>
@@ -427,16 +431,60 @@ function renderOrder(order) {
   \`;
 }
 
+let prevCount = null;
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    osc.frequency.value = 880;
+    osc.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.18);
+  } catch (e) {}
+}
+
 async function loadOrders() {
   const response = await fetch("/orders?merchantId=" + encodeURIComponent(merchantId));
   const json = await response.json();
   const orders = json.orders || [];
+  if (prevCount !== null && orders.length > prevCount) beep();  // new order arrived
+  prevCount = orders.length;
   countEl.textContent = orders.length + (orders.length === 1 ? " order" : " orders");
   ordersEl.innerHTML = orders.length ? orders.map(renderOrder).join("") : '<div class="notice">No orders yet. Open the customer agent page to create one.</div>';
 }
 
+async function loadAvailability() {
+  try {
+    const r = await fetch("/merchants/" + encodeURIComponent(merchantId) + "/availability");
+    const j = await r.json();
+    const off = new Set(j.unavailableItems || []);
+    document.querySelectorAll("#menu86 button[data-item]").forEach(function (b) {
+      const is86 = off.has(b.getAttribute("data-item"));
+      b.textContent = is86 ? "86'd — restore" : "Available — 86";
+      b.classList.toggle("danger", is86);
+    });
+  } catch (e) {}
+}
+
+async function toggle86(itemId, btn) {
+  const staffSecret = window.localStorage.getItem("sllrStaffSecret");
+  const is86 = btn.classList.contains("danger");
+  const res = await fetch("/merchants/" + encodeURIComponent(merchantId) + "/availability", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(staffSecret ? { "x-sllr-merchant-payment-secret": staffSecret } : {}) },
+    body: JSON.stringify({ itemId: itemId, available: is86, demo: !staffSecret })
+  });
+  if (!res.ok) {
+    if (res.status === 401) { alert("Staff key required or invalid. Set it with the 🔑 button, then retry."); promptStaffKey(); }
+    else { alert("Failed to update availability"); }
+    return;
+  }
+  await loadAvailability();
+}
+
 refreshButton.addEventListener("click", loadOrders);
 loadOrders();
+loadAvailability();
 setInterval(loadOrders, 5000);
 </script>`);
 }
