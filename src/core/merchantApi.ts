@@ -39,7 +39,7 @@ function paymentRailFor(merchant: MerchantProfile, provider: unknown): PaymentRa
   return provider as PaymentRail;
 }
 
-function secretFrom(headers: Record<string, string | string[] | undefined>, body: Record<string, unknown>) {
+export function secretFrom(headers: Record<string, string | string[] | undefined>, body: Record<string, unknown>) {
   const header = headers["x-sllr-merchant-payment-secret"];
   if (typeof header === "string" && header.trim()) return header.trim();
   if (typeof body.verificationToken === "string" && body.verificationToken.trim()) {

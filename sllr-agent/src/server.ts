@@ -5,6 +5,7 @@ import { SendblueClient, parseInbound, verifyWebhookSecret } from "./sendblue.js
 import { OrderRelay } from "./orderRelay.js";
 import { BuyerStore } from "./buyerStore.js";
 import { SllrMcp } from "./mcp.js";
+import { statusMessage, isTerminal, type WatchedOrder } from "./orderNotify.js";
 
 // Sendblue iMessage server. One public POST route: /sendblue/inbound. Customers
 // text in → their per-number AgentCore replies → we send the reply back. When an
@@ -26,35 +27,31 @@ async function main() {
   // pay link + pickup code deterministically, never relying on the LLM to do it.
   const pendingOrder = new Map<string, { merchantId: string; orderId: string }>();
 
-  // After an online pay link is offered, poll the order until payment lands, then
-  // confirm it back in the thread. The backend (Vercel) can't message the customer
-  // — it doesn't know their phone — so the agent owns this notification.
-  const watching = new Set<string>();
-  function watchPayment(phone: string, sendblueNumber: string, orderId: string): void {
-    if (watching.has(orderId)) return;
-    watching.add(orderId);
-    let tries = 0;
-    const maxTries = 120; // ~10 min at 5s intervals
+  // Poll a created order and message the customer on each meaningful transition
+  // (payment cleared, accepted, ready, rejected, receipt). The backend (Vercel)
+  // can't message the customer — it doesn't know their phone — so the agent owns
+  // this. Started for EVERY order (counter orders get accepted/ready too).
+  const watched = new Map<string, { phone: string; sendblueNumber: string; lastStatus: string; lastPayment: string; tries: number }>();
+  function watchOrder(phone: string, sendblueNumber: string, orderId: string): void {
+    if (watched.has(orderId)) return;
+    watched.set(orderId, { phone, sendblueNumber, lastStatus: "", lastPayment: "", tries: 0 });
     const tick = async () => {
-      if (!watching.has(orderId)) return;
-      tries++;
+      const w = watched.get(orderId);
+      if (!w) return;
+      w.tries++;
       try {
-        const res = await mcp.callTool("check_order_status", { orderId }) as {
-          order?: { status?: string; payment?: { status?: string }; item?: { name?: string }; receipt?: { claimUrl?: string } };
-        };
+        const res = await mcp.callTool("check_order_status", { orderId }) as { order?: WatchedOrder };
         const o = res.order;
-        if (o && (o.status === "receipt_issued" || o.payment?.status === "verified")) {
-          watching.delete(orderId);
-          const code = orderId.replace(/^ord_/, "").slice(0, 6).toUpperCase();
-          const item = o.item?.name ? `your ${o.item.name}` : "your order";
-          let msg = `✅ Payment received — ${item} is confirmed! 🎟️ Pickup code ${code}.`;
-          if (o.receipt?.claimUrl) msg += `\n🧾 Receipt: ${o.receipt.claimUrl}`;
-          await sendblue.sendMessage(phone, msg, sendblueNumber).catch(() => {});
-          return;
+        if (o) {
+          const msg = statusMessage(o, w.lastStatus, w.lastPayment, orderId);
+          w.lastStatus = o.status ?? "";
+          w.lastPayment = o.payment?.status ?? "";
+          if (msg) await sendblue.sendMessage(w.phone, msg, w.sendblueNumber).catch(() => {});
+          if (isTerminal(o.status)) { watched.delete(orderId); return; }
         }
       } catch { /* transient — keep polling */ }
-      if (tries < maxTries) setTimeout(tick, 5000);
-      else watching.delete(orderId);
+      if (w.tries < 240) setTimeout(tick, 5000); // ~20 min
+      else watched.delete(orderId);
     };
     setTimeout(tick, 5000);
   }
@@ -123,14 +120,12 @@ async function main() {
         const opts = await mcp.callTool("get_payment_options", { merchantId: created.merchantId, orderId: created.orderId });
         const block = paymentBlock(opts);
         if (block) reply = reply.trim() ? `${reply.trim()}\n\n${block}` : block;
-        // If an online pay link was offered, watch for the payment and confirm it.
-        const optList = (opts as { paymentOptions?: Array<{ type?: string }> }).paymentOptions ?? [];
-        if (optList.some((o) => o.type === "checkout_url")) {
-          watchPayment(msg.fromNumber, msg.sendblueNumber, created.orderId);
-        }
       } catch (e) {
         log(`[payment] options lookup failed: ${(e as Error)?.message || e}`);
       }
+      // Watch every order so the customer hears about accepted / ready / payment /
+      // receipt — even counter orders (no online pay).
+      watchOrder(msg.fromNumber, msg.sendblueNumber, created.orderId);
     }
     if (reply.trim()) await sendblue.sendMessage(msg.fromNumber, reply, msg.sendblueNumber);
   }

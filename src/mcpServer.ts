@@ -7,10 +7,10 @@ import {
   listMerchantOrders,
   listMerchants,
   quoteMerchantOrder,
-  requirePaymentVerifier,
 } from "./core/merchantApi.js";
 import { acceptOrder, fulfillOrder, getOrder, listOrdersForBuyer, markOrderReady, rejectOrder } from "./core/orders.js";
 import { setItemAvailability } from "./core/availability.js";
+import { requireMerchantAuth } from "./core/merchantAuth.js";
 import { recommendForBuyer } from "./core/recommend.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { createDemoMerchant } from "./adapters/shopifyCatalog.js";
@@ -177,7 +177,7 @@ const tools: ToolDefinition[] = [
       },
     },
     handler: async (args) => {
-      requirePaymentVerifier({}, args);
+      await requireMerchantAuth({}, args, requireString(args, "merchantId"));
       const order = await acceptOrder(requireString(args, "orderId"), {
         merchantId: requireString(args, "merchantId"),
         actor: "agent-pos",
@@ -199,7 +199,7 @@ const tools: ToolDefinition[] = [
       },
     },
     handler: async (args) => {
-      requirePaymentVerifier({}, args);
+      await requireMerchantAuth({}, args, requireString(args, "merchantId"));
       const order = await markOrderReady(requireString(args, "orderId"), {
         merchantId: requireString(args, "merchantId"),
         actor: "agent-pos",
@@ -221,7 +221,7 @@ const tools: ToolDefinition[] = [
       },
     },
     handler: async (args) => {
-      requirePaymentVerifier({}, args);
+      await requireMerchantAuth({}, args, requireString(args, "merchantId"));
       const order = await rejectOrder(requireString(args, "orderId"), {
         merchantId: requireString(args, "merchantId"),
         actor: "agent-pos",
@@ -243,7 +243,7 @@ const tools: ToolDefinition[] = [
       },
     },
     handler: async (args) => {
-      requirePaymentVerifier({}, args);
+      await requireMerchantAuth({}, args, requireString(args, "merchantId"));
       const order = await fulfillOrder(requireString(args, "orderId"), {
         merchantId: requireString(args, "merchantId"),
         actor: "agent-pos",
@@ -265,7 +265,7 @@ const tools: ToolDefinition[] = [
       },
     },
     handler: async (args) => {
-      requirePaymentVerifier({}, args);
+      await requireMerchantAuth({}, args, requireString(args, "merchantId"));
       const merchantId = requireString(args, "merchantId");
       const unavailable = await setItemAvailability(merchantId, requireString(args, "itemId"), args.available === true);
       return { product: "SLL-R agent POS", merchantId, unavailableItems: unavailable };
