@@ -25,6 +25,39 @@ async function main() {
   // pay link + pickup code deterministically, never relying on the LLM to do it.
   const pendingOrder = new Map<string, { merchantId: string; orderId: string }>();
 
+  // After an online pay link is offered, poll the order until payment lands, then
+  // confirm it back in the thread. The backend (Vercel) can't message the customer
+  // — it doesn't know their phone — so the agent owns this notification.
+  const watching = new Set<string>();
+  function watchPayment(phone: string, sendblueNumber: string, orderId: string): void {
+    if (watching.has(orderId)) return;
+    watching.add(orderId);
+    let tries = 0;
+    const maxTries = 120; // ~10 min at 5s intervals
+    const tick = async () => {
+      if (!watching.has(orderId)) return;
+      tries++;
+      try {
+        const res = await mcp.callTool("check_order_status", { orderId }) as {
+          order?: { status?: string; payment?: { status?: string }; item?: { name?: string }; receipt?: { claimUrl?: string } };
+        };
+        const o = res.order;
+        if (o && (o.status === "receipt_issued" || o.payment?.status === "verified")) {
+          watching.delete(orderId);
+          const code = orderId.replace(/^ord_/, "").slice(0, 6).toUpperCase();
+          const item = o.item?.name ? `your ${o.item.name}` : "your order";
+          let msg = `✅ Payment received — ${item} is confirmed! 🎟️ Pickup code ${code}.`;
+          if (o.receipt?.claimUrl) msg += `\n🧾 Receipt: ${o.receipt.claimUrl}`;
+          await sendblue.sendMessage(phone, msg, sendblueNumber).catch(() => {});
+          return;
+        }
+      } catch { /* transient — keep polling */ }
+      if (tries < maxTries) setTimeout(tick, 5000);
+      else watching.delete(orderId);
+    };
+    setTimeout(tick, 5000);
+  }
+
   // Persistent phone → buyer mapping so a returning customer keeps the same
   // buyerId + order history across restarts (taste memory).
   const buyers = new BuyerStore(process.env.SLLR_BUYER_STORE?.trim() || ".sllr-buyers.json");
@@ -89,6 +122,11 @@ async function main() {
         const opts = await mcp.callTool("get_payment_options", { merchantId: created.merchantId, orderId: created.orderId });
         const block = paymentBlock(opts);
         if (block) reply = reply.trim() ? `${reply.trim()}\n\n${block}` : block;
+        // If an online pay link was offered, watch for the payment and confirm it.
+        const optList = (opts as { paymentOptions?: Array<{ type?: string }> }).paymentOptions ?? [];
+        if (optList.some((o) => o.type === "checkout_url")) {
+          watchPayment(msg.fromNumber, msg.sendblueNumber, created.orderId);
+        }
       } catch (e) {
         log(`[payment] options lookup failed: ${(e as Error)?.message || e}`);
       }

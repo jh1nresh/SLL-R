@@ -46,6 +46,45 @@ function svg(response: ServerResponse, status: number, payload: string) {
   response.end(payload);
 }
 
+// Friendly mobile page shown when Stripe redirects the customer's browser back
+// after (or canceling) a hosted-checkout payment. The order confirmation +
+// receipt are delivered in the messaging thread; this page just closes the loop.
+function orderLandingPage(order: { item?: { name?: string; subtotalUsd?: string } } | null, params: URLSearchParams) {
+  const canceled = params.has("canceled");
+  const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+  const itemName = order?.item?.name ? esc(order.item.name) : "your order";
+  const amount = order?.item?.subtotalUsd ? `$${esc(order.item.subtotalUsd)}` : "";
+  const ok = !canceled && !!order;
+  const emoji = canceled ? "↩️" : order ? "✅" : "🤔";
+  const heading = canceled ? "Payment canceled" : order ? "Payment received" : "Order not found";
+  const body = canceled
+    ? "No charge was made. Head back to Messages to finish your order."
+    : order
+      ? `Thanks! Your ${itemName}${amount ? ` (${amount})` : ""} is confirmed. Return to Messages — your pickup code and receipt are on the way.`
+      : "We couldn't find that order. Head back to Messages.";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${heading} · SLL-R</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center;
+    font:17px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:#0b0b0c; color:#f2f2f7; padding:24px; box-sizing:border-box; }
+  .card { max-width:380px; text-align:center; background:#1c1c1e; border-radius:20px;
+    padding:36px 28px; box-shadow:0 10px 40px rgba(0,0,0,.4); }
+  .emoji { font-size:56px; line-height:1; }
+  h1 { font-size:22px; margin:18px 0 8px; }
+  p { color:#a1a1a6; margin:0; }
+  .amt { margin-top:18px; font-size:15px; color:#30d158; font-weight:600; }
+</style></head>
+<body><div class="card">
+  <div class="emoji">${emoji}</div>
+  <h1>${heading}</h1>
+  <p>${body}</p>
+  ${ok && amount ? `<div class="amt">Paid ${amount}</div>` : ""}
+</div></body></html>`;
+}
+
 async function readBody(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
@@ -474,6 +513,13 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         const [, orderId, action] = orderRoute;
         if (request.method === "GET" && !action) {
           const order = await getOrder(orderId);
+          // Stripe redirects the customer's browser here (?paid=1 / ?canceled=1).
+          // Serve a friendly page for browsers; keep JSON for API/tool callers.
+          const wantsHtml = url.searchParams.has("paid") || url.searchParams.has("canceled")
+            || String(request.headers.accept || "").includes("text/html");
+          if (wantsHtml) {
+            return html(response, order ? 200 : 404, orderLandingPage(order, url.searchParams));
+          }
           return json(response, order ? 200 : 404, order ? { product: "SLL-R merchant terminal", order } : { error: `Unknown order: ${orderId}` });
         }
         if (request.method === "POST" && action === "accept") {
