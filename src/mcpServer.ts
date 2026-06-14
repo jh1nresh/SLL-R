@@ -9,6 +9,7 @@ import {
   quoteMerchantOrder,
 } from "./core/merchantApi.js";
 import { getOrder, listOrdersForBuyer } from "./core/orders.js";
+import { recommendForBuyer } from "./core/recommend.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { createDemoMerchant } from "./adapters/shopifyCatalog.js";
 
@@ -134,6 +135,30 @@ const tools: ToolDefinition[] = [
         throw Object.assign(new Error("No buyer session. Connect the MCP server with an Authorization: Bearer <buyer token> header (get one from POST /buyer/session)."), { status: 401 });
       }
       return { product: "SLL-R buyer orders", buyerId, orders: await listOrdersForBuyer(buyerId) };
+    },
+  },
+  {
+    name: "recommend_for_buyer",
+    description: "Recommend items for the current buyer using their past orders across all merchants (the SLL-R taste graph). Use when the customer asks for a recommendation, what's good, or a surprise. Returns cross-merchant picks with a reason. Requires a buyer session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        merchantId: { type: "string", description: "Optional: scope recommendations to a single merchant." },
+        limit: { type: "number", description: "Max recommendations to return (default 3)." },
+      },
+    },
+    handler: async (args, _origin, buyerId) => {
+      if (!buyerId) {
+        throw Object.assign(new Error("No buyer session. Connect the MCP server with an Authorization: Bearer <buyer token> header (get one from POST /buyer/session)."), { status: 401 });
+      }
+      return {
+        product: "SLL-R recommendations",
+        buyerId,
+        recommendations: await recommendForBuyer(buyerId, {
+          merchantId: typeof args.merchantId === "string" ? args.merchantId : undefined,
+          limit: typeof args.limit === "number" ? args.limit : undefined,
+        }),
+      };
     },
   },
   {

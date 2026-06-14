@@ -11,6 +11,7 @@ import type { SendblueClient } from "./sendblue.js";
 export type RelayOrder = {
   orderId: string;
   merchantId: string;
+  merchantName: string;
   itemName: string;
   amountUsd: string;
   pickupCode: string;
@@ -31,50 +32,67 @@ export class OrderRelay {
   // Orders awaiting a merchant decision, oldest first, keyed by merchant number.
   private pending = new Map<string, RelayOrder[]>();
 
+  // Per-merchant notify numbers (merchantId -> number) for multi-merchant routing,
+  // plus an optional fallback number used for any merchant without its own entry
+  // (single-merchant demo). Reverse set lets us recognise merchant inbounds.
+  private readonly merchantNumbers: Set<string>;
+
   constructor(
     private readonly sendblue: SendblueClient,
-    private readonly merchantNumber: string,
+    private readonly channels: Record<string, string>,
+    private readonly fallbackNumber: string,
     private readonly log: (msg: string) => void = () => {},
-  ) {}
+  ) {
+    this.merchantNumbers = new Set([...Object.values(channels), fallbackNumber].filter(Boolean));
+  }
+
+  // The notify number for a given merchant: its own channel, else the fallback.
+  private numberForMerchant(merchantId: string): string {
+    return this.channels[merchantId] || this.fallbackNumber || "";
+  }
 
   // Called from the create_order tool-result hook. Extracts the order and pushes
-  // it to the merchant. Safe to call for any tool result — it no-ops on non-orders.
+  // it to that merchant's number. Safe to call for any tool result — no-ops on
+  // non-orders. Routes by merchantId, so multiple merchants work concurrently.
   async onToolResult(customerNumber: string, name: string, result: unknown): Promise<void> {
     if (name !== "create_order") return;
     const order = (typeof result === "object" && result ? (result as Record<string, unknown>).order : undefined) as
-      | { id?: string; merchantId?: string; item?: { name?: string; subtotalUsd?: string | number } }
+      | { id?: string; merchantId?: string; merchantName?: string; item?: { name?: string; subtotalUsd?: string | number } }
       | undefined;
     if (!order?.id) return;
 
+    const merchantId = typeof order.merchantId === "string" ? order.merchantId : "unknown";
     const relay: RelayOrder = {
       orderId: order.id,
-      merchantId: typeof order.merchantId === "string" ? order.merchantId : "unknown",
+      merchantId,
+      merchantName: typeof order.merchantName === "string" ? order.merchantName : merchantId,
       itemName: order.item?.name ?? "order",
       amountUsd: String(order.item?.subtotalUsd ?? "?"),
       pickupCode: pickupCodeFor(order.id),
       customerNumber,
     };
 
-    if (!this.merchantNumber) {
-      this.log(`[relay] order ${relay.orderId} created but SLLR_MERCHANT_NUMBER unset — merchant push skipped`);
+    const merchantNumber = this.numberForMerchant(merchantId);
+    if (!merchantNumber) {
+      this.log(`[relay] order ${relay.orderId} created — no channel for merchant ${merchantId}, push skipped`);
       return;
     }
-    const queue = this.pending.get(this.merchantNumber) ?? [];
+    const queue = this.pending.get(merchantNumber) ?? [];
     queue.push(relay);
-    this.pending.set(this.merchantNumber, queue);
+    this.pending.set(merchantNumber, queue);
 
     const text =
-      `🆕 New SLL-R order\n` +
+      `🆕 New SLL-R order — ${relay.merchantName}\n` +
       `${relay.itemName} — $${relay.amountUsd}\n` +
       `Pickup code ${relay.pickupCode}\n` +
       `Reply 1 = accept · 2 = reject · 3 = ready`;
-    await this.sendblue.sendMessage(this.merchantNumber, text);
-    this.log(`[relay] pushed order ${relay.orderId} to merchant ${this.merchantNumber}`);
+    await this.sendblue.sendMessage(merchantNumber, text);
+    this.log(`[relay] pushed order ${relay.orderId} to ${merchantId} (${merchantNumber})`);
   }
 
-  // True if this inbound number is the merchant we push orders to.
+  // True if this inbound number belongs to any configured merchant.
   isMerchant(fromNumber: string): boolean {
-    return !!this.merchantNumber && fromNumber === this.merchantNumber;
+    return this.merchantNumbers.has(fromNumber);
   }
 
   // Handle a merchant's "1" / "2" / "3" (optionally "1 <code>" to target a
@@ -112,10 +130,10 @@ export class OrderRelay {
   private async notifyCustomer(order: RelayOrder, decision: Decision): Promise<void> {
     const msg =
       decision === "accept"
-        ? `✅ ${order.merchantId} accepted your order — ${order.itemName}. Pickup code ${order.pickupCode}.`
+        ? `✅ ${order.merchantName} accepted your order — ${order.itemName}. Pickup code ${order.pickupCode}.`
         : decision === "ready"
           ? `🔔 Your order is ready for pickup! ${order.itemName} — code ${order.pickupCode}.`
-          : `😕 Sorry, ${order.merchantId} can't fulfill your ${order.itemName} right now. No charge.`;
+          : `😕 Sorry, ${order.merchantName} can't fulfill your ${order.itemName} right now. No charge.`;
     await this.sendblue.sendMessage(order.customerNumber, msg);
   }
 }
