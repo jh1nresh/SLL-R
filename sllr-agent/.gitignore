@@ -2,3 +2,7 @@ node_modules/
 dist/
 .env
 .env.local
+
+# local channel->buyer mapping (bearer tokens)
+.sllr-buyers.json
+.sllr-buyers.json.tmp
