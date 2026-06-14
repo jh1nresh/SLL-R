@@ -19,6 +19,7 @@ const BUYER_TOOL_ALLOWLIST = new Set([
   // create_order and deterministically appends the pay link + pickup code, so the
   // agent can't skip it or duplicate it.
   "list_my_orders",
+  "recommend_for_buyer",
 ]);
 
 export type AgentSession = {

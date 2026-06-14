@@ -16,7 +16,8 @@ async function main() {
   const sb = loadSendblueConfig();          // Sendblue + merchant number
   const sendblue = new SendblueClient(sb);
   const log = (m: string) => process.stdout.write(`${m}\n`);
-  const relay = new OrderRelay(sendblue, sb.merchantNumber, log);
+  const relay = new OrderRelay(sendblue, sb.merchantChannels, sb.merchantNumber, log);
+  const merchantCount = new Set([...Object.values(sb.merchantChannels), sb.merchantNumber].filter(Boolean)).size;
 
   // Shared MCP client for server-side lookups (payment options after an order).
   const mcp = new SllrMcp(config.sllrBaseUrl);
@@ -138,7 +139,7 @@ async function main() {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
     if (req.method === "GET" && url.pathname === "/health") {
-      return json(res, 200, { ok: true, service: "sllr-agent-sendblue", merchantPush: !!sb.merchantNumber });
+      return json(res, 200, { ok: true, service: "sllr-agent-sendblue", merchants: merchantCount });
     }
     if (req.method !== "POST" || url.pathname !== "/sendblue/inbound") {
       return json(res, 404, { error: "not found" });
@@ -177,7 +178,7 @@ async function main() {
     log(`sllr-agent Sendblue server on :${sb.port}`);
     log(`  backend       ${config.sllrBaseUrl}`);
     log(`  model         ${config.geminiModel}`);
-    log(`  merchant push ${sb.merchantNumber || "(disabled — set SLLR_MERCHANT_NUMBER)"}`);
+    log(`  merchant push ${merchantCount > 0 ? `${merchantCount} merchant channel(s)` : "(disabled — set SLLR_MERCHANT_CHANNELS or SLLR_MERCHANT_NUMBER)"}`);
     log(`  webhook       POST /sendblue/inbound  (point your Sendblue webhook here)`);
   });
 }
