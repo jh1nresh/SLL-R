@@ -56,6 +56,10 @@ async function main() {
       await relay.handleMerchantReply(msg.fromNumber, msg.content);
       return;
     }
+    // Presence: mark their message read + show "…" while the agent thinks, so the
+    // conversation feels human. Best-effort — never block or fail the turn.
+    void sendblue.markRead(msg.fromNumber, msg.sendblueNumber).catch(() => {});
+    void sendblue.sendTyping(msg.fromNumber, msg.sendblueNumber).catch(() => {});
     const { agent } = await customerAgent(msg.fromNumber);
     let reply: string;
     try {

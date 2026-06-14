@@ -39,6 +39,33 @@ export class SendblueClient {
     }
     return payload.message_handle ?? "";
   }
+
+  // Mark the customer's last message as read (blue "Read" receipt). Best-effort.
+  async markRead(number: string, fromNumber?: string): Promise<void> {
+    await this.signal("https://api.sendblue.co/api/mark-read", number, fromNumber);
+  }
+
+  // Show a typing indicator ("…") while we compose the reply. Best-effort —
+  // Sendblue requires the contact to have texted first (they did) and a recent
+  // outbound, so this may no-op on a brand-new contact; failures are ignored.
+  async sendTyping(number: string, fromNumber?: string): Promise<void> {
+    await this.signal("https://api.sendblue.co/api/send-typing-indicator", number, fromNumber);
+  }
+
+  private async signal(url: string, number: string, fromNumber?: string): Promise<void> {
+    const from = (fromNumber || this.config.fromNumber || "").trim();
+    const body: Record<string, unknown> = { number };
+    if (from) body.from_number = from;
+    await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "sb-api-key-id": this.config.apiKeyId,
+        "sb-api-secret-key": this.config.apiSecret,
+      },
+      body: JSON.stringify(body),
+    });
+  }
 }
 
 export type InboundMessage = {
