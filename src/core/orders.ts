@@ -4,6 +4,7 @@ import type { CatalogItem, MerchantActionRequest, MerchantOrderFilter, MerchantP
 import { issueSllrReceipt } from "../adapters/sllrReceipts.js";
 import { centsFromUsd } from "./money.js";
 import { quoteOrder } from "./quote.js";
+import { isItemAvailable } from "./availability.js";
 import { sllrStore } from "./store.js";
 import { buyerOrdersIndex } from "./buyer.js";
 
@@ -137,6 +138,9 @@ export async function createOrder(input: OrderRequest) {
   const now = nowDate.toISOString();
   const catalogItem = merchant.catalog.find((item) => item.id === quote.item?.id);
   if (!catalogItem) throw Object.assign(new Error(`Catalog item not found: ${quote.item.id}`), { status: 409 });
+  if (!(await isItemAvailable(merchant.id, catalogItem.id))) {
+    throw Object.assign(new Error(`${catalogItem.name} is currently unavailable (86'd) at ${merchant.name}.`), { status: 409 });
+  }
   const paymentMode = input.paymentMode || (catalogItem.fulfillment.includes("shipping") ? "checkout" : "counter");
   const order: SellerOrder = {
     id: `ord_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
