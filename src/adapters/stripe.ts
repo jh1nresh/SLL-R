@@ -136,7 +136,11 @@ function verifyStripeWebhook(headers: Record<string, string | string[] | undefin
   // Replay protection: reject events whose signed timestamp is outside the
   // tolerance window (Stripe default 300s). Set STRIPE_WEBHOOK_TOLERANCE_SEC=0
   // to disable (e.g. replaying historical events from the Stripe dashboard).
-  const toleranceSec = Number(process.env.STRIPE_WEBHOOK_TOLERANCE_SEC ?? 300);
+  // Fail CLOSED on a malformed value: a typo ("5m", "300s") must not silently
+  // disable replay protection, so a non-numeric value falls back to 300.
+  const rawTolerance = process.env.STRIPE_WEBHOOK_TOLERANCE_SEC?.trim();
+  const parsedTolerance = rawTolerance === undefined || rawTolerance === "" ? 300 : Number(rawTolerance);
+  const toleranceSec = Number.isFinite(parsedTolerance) ? parsedTolerance : 300;
   if (toleranceSec > 0) {
     const nowSec = Math.floor(Date.now() / 1000);
     const skew = Math.abs(nowSec - Number(timestamp));
@@ -250,6 +254,7 @@ export async function stripeChargeOffSession(args: {
   orderId: string;
   merchantId: string;
   merchantName: string;
+  idempotencyKey?: string;
 }): Promise<OffSessionResult> {
   try {
     const pi = await stripeRequest<{ id: string; status: string }>(
@@ -265,7 +270,9 @@ export async function stripeChargeOffSession(args: {
         "metadata[sllr_order_id]": args.orderId,
         "metadata[sllr_merchant_id]": args.merchantId,
       },
-      { idempotencyKey: `sllr_charge_${args.orderId}` },
+      // Default: per-order key. Recurring overrides with a run-anchored key so
+      // retries that mint distinct orders still charge once.
+      { idempotencyKey: args.idempotencyKey ?? `sllr_charge_${args.orderId}` },
     );
     return { status: pi.status === "succeeded" ? "succeeded" : "requires_action", paymentIntentId: pi.id };
   } catch (error) {

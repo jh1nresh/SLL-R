@@ -333,32 +333,45 @@ export async function confirmRun(runId: string, buyerId: string, nowIso: string 
     return { status: "no_card", run: updated };
   }
 
-  const { order } = await createOrder({
-    merchantId: sub.merchantId,
-    userIntent: sub.template.userIntent,
-    ...(sub.template.maxSpendUsd ? { maxSpendUsd: sub.template.maxSpendUsd } : {}),
-    ...(sub.template.deadlineMinutes !== undefined ? { deadlineMinutes: sub.template.deadlineMinutes } : {}),
-    ...(sub.template.deliverByDays !== undefined ? { deliverByDays: sub.template.deliverByDays } : {}),
-    ...(sub.template.quantity !== undefined ? { quantity: sub.template.quantity } : {}),
-    paymentMode: "checkout",
-    buyerId,
-    agentId: "sllr-recurring",
-    customerLabel: "recurring order",
-  });
+  // Reuse this run's order across confirm attempts: a retry / lost-response /
+  // double-tap must NOT mint a second chargeable order. Create once, persist the
+  // order id on the run, then reuse it — so the charge below is on one stable
+  // order. The Stripe idempotency key is anchored to the RUN (below), so even a
+  // rare concurrent first-create race resolves to a single charge.
+  let activeRun = run;
+  let order = run.orderId ? await getOrder(run.orderId) : null;
+  if (!order) {
+    const created = await createOrder({
+      merchantId: sub.merchantId,
+      userIntent: sub.template.userIntent,
+      ...(sub.template.maxSpendUsd ? { maxSpendUsd: sub.template.maxSpendUsd } : {}),
+      ...(sub.template.deadlineMinutes !== undefined ? { deadlineMinutes: sub.template.deadlineMinutes } : {}),
+      ...(sub.template.deliverByDays !== undefined ? { deliverByDays: sub.template.deliverByDays } : {}),
+      ...(sub.template.quantity !== undefined ? { quantity: sub.template.quantity } : {}),
+      paymentMode: "checkout",
+      buyerId,
+      agentId: "sllr-recurring",
+      customerLabel: "recurring order",
+    });
+    order = created.order;
+    activeRun = await saveRun({ ...run, orderId: order.id, updatedAt: nowIso });
+  }
 
   // Per-run spend cap: never charge above what the buyer authorized.
   if (centsFromUsd(order.item.subtotalUsd) > centsFromUsd(sub.maxPerRunUsd)) {
-    const updated = await resolveRun(run, "failed", `over_cap:${order.item.subtotalUsd}>${sub.maxPerRunUsd}`, order.id, nowIso);
+    const updated = await resolveRun(activeRun, "failed", `over_cap:${order.item.subtotalUsd}>${sub.maxPerRunUsd}`, order.id, nowIso);
     return { status: "over_cap", run: updated, order };
   }
 
-  const pay: PayResult = await payWithSavedCard(order.id, buyerId);
+  // Run-anchored idempotency: one charge per run no matter how many confirm
+  // attempts (retry, timeout, concurrent double-tap) reach Stripe.
+  const pay: PayResult = await payWithSavedCard(order.id, buyerId, { idempotencyKey: `sllr_recurring_${run.id}` });
   if (pay.status === "paid" || pay.status === "already_paid") {
-    const updated = await resolveRun(run, "charged", pay.status, order.id, nowIso);
+    const updated = await resolveRun(activeRun, "charged", pay.status, order.id, nowIso);
     return { status: "charged", run: updated, order: pay.order ?? order };
   }
   // no_card / requires_action / declined → leave a failed run; caller falls back.
-  const updated = await resolveRun(run, "failed", pay.status, order.id, nowIso);
+  const updated = await resolveRun(activeRun, "failed", pay.status, order.id, nowIso);
   return { status: pay.status, run: updated, order };
 }
 

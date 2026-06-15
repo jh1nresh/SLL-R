@@ -1,5 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { URL } from "node:url";
+
+// Constant-time string compare for secrets (length mismatch → false, no leak).
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
 import { acceptOrder, claimOrder, createOrder, fulfillOrder, getOrder, listOrders, markOrderReady, rejectOrder } from "./core/orders.js";
 import { quoteOrder } from "./core/quote.js";
 import { allMerchantProfiles, hydrateDemoMerchants, merchantForId } from "./merchants/profiles.js";
@@ -440,7 +448,11 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         const secret = process.env.SLLR_CRON_SECRET?.trim() || process.env.CRON_SECRET?.trim();
         const auth = (request.headers.authorization as string | undefined)?.trim();
         const headerSecret = (request.headers["x-sllr-cron-secret"] as string | undefined)?.trim();
-        const ok = Boolean(secret) && (auth === `Bearer ${secret}` || headerSecret === secret);
+        // Constant-time compare (consistent with the Stripe webhook verifier).
+        const ok = Boolean(secret) && (
+          (auth !== undefined && safeEqual(auth, `Bearer ${secret}`))
+          || (headerSecret !== undefined && safeEqual(headerSecret, secret!))
+        );
         if (!ok) return json(response, 401, { error: "Invalid or missing cron secret." });
         const created = await sweepDueSubscriptions();
         return json(response, 200, { product: "SLL-R recurring sweep", created: created.length, runs: created });

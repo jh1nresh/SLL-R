@@ -25,7 +25,10 @@ export type PayResult = {
   order?: SellerOrder;
 };
 
-export async function payWithSavedCard(orderId: string, buyerId: string): Promise<PayResult> {
+// opts.idempotencyKey overrides the default per-order Stripe idempotency key.
+// Recurring passes a run-anchored key so retries of the same run never double
+// charge even though they would otherwise mint distinct orders.
+export async function payWithSavedCard(orderId: string, buyerId: string, opts: { idempotencyKey?: string } = {}): Promise<PayResult> {
   const order = await getOrder(orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
   // Ownership: a buyer can only charge their OWN order.
@@ -46,6 +49,7 @@ export async function payWithSavedCard(orderId: string, buyerId: string): Promis
     orderId: order.id,
     merchantId: order.merchantId,
     merchantName: order.merchantName,
+    ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
   });
 
   if (result.status === "succeeded") {

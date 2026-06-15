@@ -783,6 +783,30 @@ async function smokeStripePrepay(origin: string) {
     if (staleRes.status !== 401) {
       throw new Error(`Stripe webhook with stale timestamp should be 401 (replay), got ${staleRes.status}`);
     }
+
+    // A malformed STRIPE_WEBHOOK_TOLERANCE_SEC must FAIL CLOSED (fall back to the
+    // 300s default), not silently disable replay protection.
+    const prevTol = process.env.STRIPE_WEBHOOK_TOLERANCE_SEC;
+    process.env.STRIPE_WEBHOOK_TOLERANCE_SEC = "5m"; // typo → NaN
+    const typoRes = await fetch(`${origin}/webhooks/stripe`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "stripe-signature": `t=${staleTs},v1=${staleSig}` },
+      body: body2,
+    });
+    if (typoRes.status !== 401) {
+      throw new Error(`Malformed tolerance must fail closed (reject stale), got ${typoRes.status}`);
+    }
+    // Explicit 0 disables the window (dashboard resend of historical events).
+    process.env.STRIPE_WEBHOOK_TOLERANCE_SEC = "0";
+    const disabledRes = await fetch(`${origin}/webhooks/stripe`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "stripe-signature": `t=${staleTs},v1=${staleSig}` },
+      body: body2,
+    });
+    if (!disabledRes.ok) {
+      throw new Error(`tolerance=0 should accept a stale-but-signed event, got ${disabledRes.status}`);
+    }
+    if (prevTol === undefined) delete process.env.STRIPE_WEBHOOK_TOLERANCE_SEC; else process.env.STRIPE_WEBHOOK_TOLERANCE_SEC = prevTol;
   } finally {
     if (prevBase === undefined) delete process.env.STRIPE_API_BASE; else process.env.STRIPE_API_BASE = prevBase;
     if (prevKey === undefined) delete process.env.STRIPE_SECRET_KEY; else process.env.STRIPE_SECRET_KEY = prevKey;
@@ -938,10 +962,14 @@ async function smokeCardOnFile(origin: string) {
 // the sweep/confirm core with an injected future `now` so a just-created
 // subscription is due, against the same in-process store the server uses.
 async function smokeRecurring(origin: string) {
+  // Capture each off-session charge's idempotency key so we can assert recurring
+  // anchors it to the run (one charge per run across retries).
+  const chargeKeys: string[] = [];
   const stripeApi = createServer((request, response) => {
     if (request.headers.authorization !== "Bearer sk_test_smoke") {
       response.writeHead(401); return response.end(JSON.stringify({ error: { message: "bad key" } }));
     }
+    const idemKey = (request.headers["idempotency-key"] as string | undefined) || "";
     const chunks: Buffer[] = [];
     request.on("data", (c) => chunks.push(Buffer.from(c)));
     request.on("end", () => {
@@ -951,6 +979,7 @@ async function smokeRecurring(origin: string) {
       if (u.startsWith("/customers")) return send(200, { id: "cus_rec_123" });
       if (u.startsWith("/setup_intents")) return send(200, { id: "seti_rec_123", client_secret: "seti_rec_123_secret" });
       if (u.startsWith("/payment_intents")) {
+        chargeKeys.push(idemKey);
         const pm = params.get("payment_method") || "";
         if (pm === "pm_decline") return send(402, { error: { message: "declined", code: "card_declined", decline_code: "generic_decline" } });
         return send(200, { id: "pi_rec_123", status: "succeeded" });
@@ -1045,6 +1074,12 @@ async function smokeRecurring(origin: string) {
     }
     const aAgain = await confirmRun(aRun, a.buyerId, JUST_AFTER);
     if (aAgain.status !== "already_done") throw new Error(`re-confirm should be already_done: ${JSON.stringify(aAgain)}`);
+    // H1: the charge must be anchored to the run, and re-confirm must NOT hit
+    // Stripe a second time (exactly one off-session charge for this run).
+    const aCharges = chargeKeys.filter((k) => k === `sllr_recurring_${aRun}`);
+    if (aCharges.length !== 1) {
+      throw new Error(`recurring run must charge exactly once with a run-anchored key, saw: ${JSON.stringify(chargeKeys)}`);
+    }
 
     // B: order subtotal exceeds maxPerRunUsd cap → over_cap, not charged.
     const bRun = await runIdFor(b.buyerId, JUST_AFTER);
