@@ -1,6 +1,7 @@
 import { attachPaymentProof, createOrder, fulfillOrder, getOrder, listOrders } from "./orders.js";
 import { quoteOrder } from "./quote.js";
 import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
+import { recurringSuggestion } from "./recurring.js";
 import type { MerchantProfile, OrderRequest, PaymentRail, QuoteRequest } from "../types.js";
 
 function requireMerchant(merchantId: string) {
@@ -108,6 +109,8 @@ export async function createMerchantOrder(merchantId: string, payload: Record<st
     status: result.order.status,
     quote: result.quote,
     order: result.order,
+    // "SLL-R asks": a hint the buyer's channel can surface to offer recurring.
+    suggestRecurring: recurringSuggestion(result.order),
     next: "Attach payment or fulfillment proof to issue SLL-R receipt memory.",
   };
 }

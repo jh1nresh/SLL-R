@@ -13,6 +13,7 @@ import { setItemAvailability } from "./core/availability.js";
 import { requireMerchantAuth } from "./core/merchantAuth.js";
 import { recommendForBuyer } from "./core/recommend.js";
 import { payWithSavedCard } from "./adapters/cardOnFile.js";
+import { cancelSubscription, confirmRun, createSubscription, listPendingRuns, listSubscriptions } from "./core/recurring.js";
 import { nearbyMerchants } from "./core/nearby.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { createDemoMerchant } from "./adapters/shopifyCatalog.js";
@@ -154,6 +155,77 @@ const tools: ToolDefinition[] = [
         throw Object.assign(new Error("No buyer session. Connect with an Authorization: Bearer <buyer token> header (get one from POST /buyer/session)."), { status: 401 });
       }
       return { product: "SLL-R pay with saved card", ...(await payWithSavedCard(requireString(args, "orderId"), buyerId)) };
+    },
+  },
+  {
+    name: "create_recurring",
+    description: "Set up a recurring order: a saved 'usual' plus a weekly schedule. SLL-R asks the buyer before each one (confirm-each) and charges the saved card off-session on yes, capped by maxPerRunUsd. Requires a buyer session.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "userIntent", "daysOfWeek", "hour", "minute", "tz", "maxPerRunUsd"],
+      properties: {
+        merchantId: { type: "string", description: "Merchant to order from." },
+        userIntent: { type: "string", description: "The 'usual', e.g. 'iced oat latte'." },
+        daysOfWeek: { type: "array", items: { type: "number" }, description: "Days to run: 0=Sun .. 6=Sat." },
+        hour: { type: "number", description: "Local hour 0-23 to prompt." },
+        minute: { type: "number", description: "Local minute 0-59." },
+        tz: { type: "string", description: "IANA time zone, e.g. America/Los_Angeles." },
+        maxPerRunUsd: { type: "string", description: "Hard per-run spend cap, e.g. '8.00'." },
+        maxSpendUsd: { type: "string", description: "Optional per-order budget passed to the quote." },
+        deadlineMinutes: { type: "number", description: "Optional pickup deadline minutes." },
+        quantity: { type: "number", description: "Optional quantity." },
+      },
+    },
+    handler: async (args, _origin, buyerId) => {
+      if (!buyerId) throw Object.assign(new Error("No buyer session. Connect with an Authorization: Bearer <buyer token> header."), { status: 401 });
+      const result = await createSubscription(buyerId, {
+        merchantId: requireString(args, "merchantId"),
+        template: {
+          userIntent: requireString(args, "userIntent"),
+          ...(args.maxSpendUsd !== undefined ? { maxSpendUsd: String(args.maxSpendUsd) } : {}),
+          ...(args.deadlineMinutes !== undefined ? { deadlineMinutes: Number(args.deadlineMinutes) } : {}),
+          ...(args.quantity !== undefined ? { quantity: Number(args.quantity) } : {}),
+        },
+        schedule: { daysOfWeek: (args.daysOfWeek as number[]) ?? [], hour: Number(args.hour), minute: Number(args.minute), tz: requireString(args, "tz") },
+        maxPerRunUsd: requireString(args, "maxPerRunUsd"),
+      });
+      return { product: "SLL-R recurring subscription", ...result };
+    },
+  },
+  {
+    name: "list_recurring",
+    description: "List the calling buyer's active recurring subscriptions. Requires a buyer session.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (_args, _origin, buyerId) => {
+      if (!buyerId) throw Object.assign(new Error("No buyer session."), { status: 401 });
+      return { product: "SLL-R recurring subscriptions", subscriptions: await listSubscriptions(buyerId) };
+    },
+  },
+  {
+    name: "cancel_recurring",
+    description: "Cancel one of the calling buyer's recurring subscriptions by id. Requires a buyer session.",
+    inputSchema: { type: "object", required: ["subscriptionId"], properties: { subscriptionId: { type: "string" } } },
+    handler: async (args, _origin, buyerId) => {
+      if (!buyerId) throw Object.assign(new Error("No buyer session."), { status: 401 });
+      return { product: "SLL-R recurring subscription", subscription: await cancelSubscription(requireString(args, "subscriptionId"), buyerId) };
+    },
+  },
+  {
+    name: "list_pending_recurring",
+    description: "List recurring runs awaiting the buyer's confirmation (the prompts to ask 'order your usual now?'). Requires a buyer session.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (_args, _origin, buyerId) => {
+      if (!buyerId) throw Object.assign(new Error("No buyer session."), { status: 401 });
+      return { product: "SLL-R recurring runs", runs: await listPendingRuns(buyerId) };
+    },
+  },
+  {
+    name: "confirm_recurring",
+    description: "Confirm a pending recurring run (the buyer said yes): creates the order and charges the saved card off-session. Returns status charged / no_card / requires_action / declined / over_cap / expired. Requires a buyer session.",
+    inputSchema: { type: "object", required: ["runId"], properties: { runId: { type: "string" } } },
+    handler: async (args, _origin, buyerId) => {
+      if (!buyerId) throw Object.assign(new Error("No buyer session."), { status: 401 });
+      return { product: "SLL-R recurring confirm", ...(await confirmRun(requireString(args, "runId"), buyerId)) };
     },
   },
   {

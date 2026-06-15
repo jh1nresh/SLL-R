@@ -27,6 +27,7 @@ import { solanaSllrPluginSpec } from "./solanaPlugin.js";
 import { shopifyCartHandoff, shopifyConnectPlan, shopifyMerchants, shopifyOrdersFulfilledWebhook, shopifyOrdersPaidWebhook, shopifyProducts, shopifyRefundsCreateWebhook } from "./adapters/shopify.js";
 import { stripeWebhook } from "./adapters/stripe.js";
 import { createCardSetup, payWithSavedCard } from "./adapters/cardOnFile.js";
+import { cancelSubscription, confirmRun, createSubscription, declineRun, listPendingRuns, listSubscriptions, sweepDueSubscriptions } from "./core/recurring.js";
 import { linePayConfirm } from "./adapters/linePay.js";
 import { createDemoMerchant, listDemoMerchants } from "./adapters/shopifyCatalog.js";
 
@@ -384,6 +385,65 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         const payload = await body(request);
         const result = await payWithSavedCard(String(payload.orderId || ""), session.buyerId);
         return json(response, 200, { product: "SLL-R pay with saved card", ...result });
+      }
+      // --- Recurring orders (confirm-each) ---------------------------------
+      // Create a recurring subscription ("usual" + weekly schedule). Buyer-gated.
+      if (request.method === "POST" && url.pathname === "/buyer/recurring") {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token." });
+        const p = await body(request);
+        const result = await createSubscription(session.buyerId, {
+          merchantId: String(p.merchantId || ""),
+          template: (p.template ?? {}) as never,
+          schedule: (p.schedule ?? {}) as never,
+          maxPerRunUsd: String(p.maxPerRunUsd || ""),
+        });
+        return json(response, 201, { product: "SLL-R recurring subscription", ...result });
+      }
+      // List my subscriptions / cancel one. Buyer-gated.
+      if (request.method === "GET" && url.pathname === "/buyer/recurring") {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token." });
+        return json(response, 200, { product: "SLL-R recurring subscriptions", subscriptions: await listSubscriptions(session.buyerId) });
+      }
+      if (request.method === "DELETE" && url.pathname.startsWith("/buyer/recurring/")) {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token." });
+        const id = url.pathname.slice("/buyer/recurring/".length);
+        return json(response, 200, { product: "SLL-R recurring subscription", subscription: await cancelSubscription(id, session.buyerId) });
+      }
+      // Pending confirm prompts the buyer's channel should ask about. Buyer-gated.
+      if (request.method === "GET" && url.pathname === "/buyer/recurring/runs") {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token." });
+        return json(response, 200, { product: "SLL-R recurring runs", runs: await listPendingRuns(session.buyerId) });
+      }
+      // Buyer said yes → create order + charge saved card. Buyer-gated.
+      if (request.method === "POST" && url.pathname === "/buyer/recurring/confirm") {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token." });
+        const p = await body(request);
+        return json(response, 200, { product: "SLL-R recurring confirm", ...(await confirmRun(String(p.runId || ""), session.buyerId)) });
+      }
+      // Buyer said no → drop this run. Buyer-gated.
+      if (request.method === "POST" && url.pathname === "/buyer/recurring/decline") {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token." });
+        const p = await body(request);
+        return json(response, 200, { product: "SLL-R recurring decline", run: await declineRun(String(p.runId || ""), session.buyerId) });
+      }
+      // Cron sweep: open confirm prompts for due subscriptions. Secret-gated (the
+      // schedule lives here per ADR; Vercel Cron calls this). NOT buyer-gated.
+      // Vercel Cron sends GET with `Authorization: Bearer <CRON_SECRET>`; we also
+      // accept POST + `x-sllr-cron-secret` for manual / external schedulers.
+      if ((request.method === "GET" || request.method === "POST") && url.pathname === "/internal/recurring/sweep") {
+        const secret = process.env.SLLR_CRON_SECRET?.trim() || process.env.CRON_SECRET?.trim();
+        const auth = (request.headers.authorization as string | undefined)?.trim();
+        const headerSecret = (request.headers["x-sllr-cron-secret"] as string | undefined)?.trim();
+        const ok = Boolean(secret) && (auth === `Bearer ${secret}` || headerSecret === secret);
+        if (!ok) return json(response, 401, { error: "Invalid or missing cron secret." });
+        const created = await sweepDueSubscriptions();
+        return json(response, 200, { product: "SLL-R recurring sweep", created: created.length, runs: created });
       }
       const standaloneAgentRoute = url.pathname.match(/^\/agent\/([^/]+)(?:\/([^/]+))?$/);
       if (standaloneAgentRoute) {

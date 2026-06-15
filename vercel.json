@@ -12,5 +12,11 @@
     "api/index.js": {
       "maxDuration": 10
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/internal/recurring/sweep",
+      "schedule": "*/15 * * * *"
+    }
+  ]
 }

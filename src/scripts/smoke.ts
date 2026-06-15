@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { createHmac } from "node:crypto";
 import { createSllrServer } from "../server.js";
 import { resetStoreForTest, sllrStore, storeBackendName } from "../core/store.js";
+import { confirmRun, listPendingRuns, sweepDueSubscriptions } from "../core/recurring.js";
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -919,6 +920,147 @@ async function smokeCardOnFile(origin: string) {
   }
 }
 
+// Recurring orders (confirm-each): subscription → cron sweep opens a confirm
+// prompt → buyer confirms → order + off-session charge, capped per run. Drives
+// the sweep/confirm core with an injected future `now` so a just-created
+// subscription is due, against the same in-process store the server uses.
+async function smokeRecurring(origin: string) {
+  const stripeApi = createServer((request, response) => {
+    if (request.headers.authorization !== "Bearer sk_test_smoke") {
+      response.writeHead(401); return response.end(JSON.stringify({ error: { message: "bad key" } }));
+    }
+    const chunks: Buffer[] = [];
+    request.on("data", (c) => chunks.push(Buffer.from(c)));
+    request.on("end", () => {
+      const params = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+      const u = request.url || "";
+      const send = (status: number, obj: unknown) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(obj)); };
+      if (u.startsWith("/customers")) return send(200, { id: "cus_rec_123" });
+      if (u.startsWith("/setup_intents")) return send(200, { id: "seti_rec_123", client_secret: "seti_rec_123_secret" });
+      if (u.startsWith("/payment_intents")) {
+        const pm = params.get("payment_method") || "";
+        if (pm === "pm_decline") return send(402, { error: { message: "declined", code: "card_declined", decline_code: "generic_decline" } });
+        return send(200, { id: "pi_rec_123", status: "succeeded" });
+      }
+      send(404, { error: { message: `unexpected ${u}` } });
+    });
+  });
+  stripeApi.listen(0);
+  await once(stripeApi, "listening");
+  const addr = stripeApi.address();
+  if (!addr || typeof addr === "string") throw new Error("Failed to start fake Stripe (recurring).");
+
+  const prevBase = process.env.STRIPE_API_BASE;
+  const prevKey = process.env.STRIPE_SECRET_KEY;
+  const prevWh = process.env.STRIPE_WEBHOOK_SECRET;
+  process.env.STRIPE_API_BASE = `http://127.0.0.1:${addr.port}`;
+  process.env.STRIPE_SECRET_KEY = "sk_test_smoke";
+  delete process.env.STRIPE_WEBHOOK_SECRET;
+
+  const FUTURE = "2999-01-01T12:00:00.000Z";
+  const JUST_AFTER = "2999-01-01T12:01:00.000Z"; // within the 2h confirm window
+  const AFTER_EXPIRY = "2999-01-01T15:00:00.000Z"; // past expiresAt (FUTURE + 2h)
+
+  const newBuyer = async () => {
+    const s = await postJson(origin, "/buyer/session", { label: "recurring buyer" }) as { token?: string; buyerId?: string };
+    if (!s.token || !s.buyerId) throw new Error(`buyer session failed: ${JSON.stringify(s)}`);
+    return s as { token: string; buyerId: string };
+  };
+  const saveCard = async (buyerId: string, pm: string) => {
+    const saved = await postJson(origin, "/webhooks/stripe", {
+      type: "setup_intent.succeeded",
+      data: { object: { id: "seti_rec_123", customer: "cus_rec_123", payment_method: pm, metadata: { sllr_buyer_id: buyerId } } },
+      demo: true,
+    }) as { saved?: boolean };
+    if (!saved.saved) throw new Error(`card save failed: ${JSON.stringify(saved)}`);
+  };
+  // noun-coffee keeps recurring orders off raposa's pickup-capacity window, which
+  // a later on_time assertion depends on. Crowd Pleaser pourover is $11.20.
+  const createSub = async (token: string, maxPerRunUsd: string) => {
+    const res = await postJson(origin, "/buyer/recurring", {
+      merchantId: "noun-coffee",
+      template: { userIntent: "crowd pleaser pourover under $15 in 15 minutes", deadlineMinutes: 15, maxSpendUsd: "15.00" },
+      schedule: { daysOfWeek: [0, 1, 2, 3, 4, 5, 6], hour: 8, minute: 0, tz: "America/Los_Angeles" },
+      maxPerRunUsd,
+    }, { authorization: `Bearer ${token}` }) as { subscription?: { id?: string }; cardOnFile?: boolean };
+    if (!res.subscription?.id) throw new Error(`create subscription failed: ${JSON.stringify(res)}`);
+    return res;
+  };
+  const runIdFor = async (buyerId: string, nowIso: string) => {
+    const runs = await listPendingRuns(buyerId, nowIso);
+    return runs[0]?.id;
+  };
+
+  try {
+    // suggestRecurring hint rides on the order response ("SLL-R asks").
+    const hintBuyer = await newBuyer();
+    const order = await fetch(`${origin}/merchants/noun-coffee/orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${hintBuyer.token}` },
+      body: JSON.stringify({ userIntent: "crowd pleaser pourover under $15 in 15 minutes", deadlineMinutes: 15, maxSpendUsd: "15.00", paymentMode: "counter" }),
+    }).then((r) => r.json()) as { suggestRecurring?: { eligible?: boolean; prompt?: string } };
+    if (!order.suggestRecurring?.eligible || !order.suggestRecurring.prompt) {
+      throw new Error(`order missing recurring suggestion: ${JSON.stringify(order.suggestRecurring)}`);
+    }
+
+    // Sweep is secret-gated.
+    const noSecret = await fetch(`${origin}/internal/recurring/sweep`, { method: "POST" });
+    if (noSecret.status !== 401) throw new Error(`sweep without secret should be 401, got ${noSecret.status}`);
+
+    // Set up buyers + cards + subscriptions, then sweep once at a future instant.
+    const a = await newBuyer(); await saveCard(a.buyerId, "pm_good"); await createSub(a.token, "15.00");
+    const b = await newBuyer(); await saveCard(b.buyerId, "pm_good"); await createSub(b.token, "1.00"); // cap below subtotal
+    const c = await newBuyer(); await createSub(c.token, "15.00"); // no card
+    const d = await newBuyer(); await saveCard(d.buyerId, "pm_decline"); await createSub(d.token, "15.00");
+    const e = await newBuyer(); const eSub = await createSub(e.token, "15.00");
+    const f = await newBuyer(); await saveCard(f.buyerId, "pm_good"); await createSub(f.token, "15.00");
+
+    // Cancel E's subscription via REST → it must NOT be swept.
+    const del = await fetch(`${origin}/buyer/recurring/${eSub.subscription!.id}`, { method: "DELETE", headers: { authorization: `Bearer ${e.token}` } });
+    if (!del.ok) throw new Error(`cancel subscription failed: ${del.status}`);
+
+    const created = await sweepDueSubscriptions(FUTURE);
+    if (!created.length) throw new Error("sweep created no runs for due subscriptions.");
+    if (created.some((r) => r.buyerId === e.buyerId)) throw new Error("canceled subscription was swept.");
+
+    // A: confirm → charged + receipt issued; second confirm → already_done.
+    const aRun = await runIdFor(a.buyerId, JUST_AFTER);
+    if (!aRun) throw new Error("no pending run for buyer A.");
+    const aPaid = await confirmRun(aRun, a.buyerId, JUST_AFTER);
+    if (aPaid.status !== "charged" || aPaid.order?.payment?.provider !== "stripe" || !aPaid.order.receipt?.receiptHash) {
+      throw new Error(`recurring confirm did not charge + receipt: ${JSON.stringify(aPaid)}`);
+    }
+    const aAgain = await confirmRun(aRun, a.buyerId, JUST_AFTER);
+    if (aAgain.status !== "already_done") throw new Error(`re-confirm should be already_done: ${JSON.stringify(aAgain)}`);
+
+    // B: order subtotal exceeds maxPerRunUsd cap → over_cap, not charged.
+    const bRun = await runIdFor(b.buyerId, JUST_AFTER);
+    const bRes = await confirmRun(bRun!, b.buyerId, JUST_AFTER);
+    if (bRes.status !== "over_cap") throw new Error(`over-cap run should be over_cap: ${JSON.stringify(bRes)}`);
+    if (bRes.order?.payment?.status === "verified") throw new Error("over-cap order must not be charged.");
+
+    // C: no saved card → no_card.
+    const cRun = await runIdFor(c.buyerId, JUST_AFTER);
+    const cRes = await confirmRun(cRun!, c.buyerId, JUST_AFTER);
+    if (cRes.status !== "no_card") throw new Error(`cardless run should be no_card: ${JSON.stringify(cRes)}`);
+
+    // D: declined card → declined.
+    const dRun = await runIdFor(d.buyerId, JUST_AFTER);
+    const dRes = await confirmRun(dRun!, d.buyerId, JUST_AFTER);
+    if (dRes.status !== "declined") throw new Error(`declined card run should be declined: ${JSON.stringify(dRes)}`);
+
+    // F: confirm after the prompt's expiry window → expired (never charges late).
+    const fRun = await runIdFor(f.buyerId, JUST_AFTER);
+    const fRes = await confirmRun(fRun!, f.buyerId, AFTER_EXPIRY);
+    if (fRes.status !== "expired") throw new Error(`stale run should expire, not charge: ${JSON.stringify(fRes)}`);
+  } finally {
+    if (prevBase === undefined) delete process.env.STRIPE_API_BASE; else process.env.STRIPE_API_BASE = prevBase;
+    if (prevKey === undefined) delete process.env.STRIPE_SECRET_KEY; else process.env.STRIPE_SECRET_KEY = prevKey;
+    if (prevWh === undefined) delete process.env.STRIPE_WEBHOOK_SECRET; else process.env.STRIPE_WEBHOOK_SECRET = prevWh;
+    stripeApi.close();
+  }
+}
+
 // In-process fake LINE Pay Online API to exercise the request -> confirm flow.
 async function smokeLinePay(origin: string) {
   const channelSecret = "line_pay_channel_secret";
@@ -1193,6 +1335,7 @@ async function main() {
     await smokeBuyerAuth(origin);
     await smokeStripePrepay(origin);
     await smokeCardOnFile(origin);
+    await smokeRecurring(origin);
     await smokeLinePay(origin);
     await smokeDemoMerchants(origin);
 
