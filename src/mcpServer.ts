@@ -12,6 +12,7 @@ import { acceptOrder, fulfillOrder, getOrder, listOrdersForBuyer, markOrderReady
 import { setItemAvailability } from "./core/availability.js";
 import { requireMerchantAuth } from "./core/merchantAuth.js";
 import { recommendForBuyer } from "./core/recommend.js";
+import { payWithSavedCard } from "./adapters/cardOnFile.js";
 import { nearbyMerchants } from "./core/nearby.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { createDemoMerchant } from "./adapters/shopifyCatalog.js";
@@ -138,6 +139,21 @@ const tools: ToolDefinition[] = [
         throw Object.assign(new Error("No buyer session. Connect the MCP server with an Authorization: Bearer <buyer token> header (get one from POST /buyer/session)."), { status: 401 });
       }
       return { product: "SLL-R buyer orders", buyerId, orders: await listOrdersForBuyer(buyerId) };
+    },
+  },
+  {
+    name: "pay_with_saved_card",
+    description: "Charge the buyer's saved card for an order off-session (no link), after they confirm. Returns status: paid / already_paid / no_card / requires_action / declined. On no_card / requires_action / declined, fall back to get_payment_options (hosted Checkout link). Requires a buyer session.",
+    inputSchema: {
+      type: "object",
+      required: ["orderId"],
+      properties: { orderId: { type: "string", description: "SLL-R order id to charge." } },
+    },
+    handler: async (args, _origin, buyerId) => {
+      if (!buyerId) {
+        throw Object.assign(new Error("No buyer session. Connect with an Authorization: Bearer <buyer token> header (get one from POST /buyer/session)."), { status: 401 });
+      }
+      return { product: "SLL-R pay with saved card", ...(await payWithSavedCard(requireString(args, "orderId"), buyerId)) };
     },
   },
   {

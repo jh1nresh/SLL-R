@@ -777,6 +777,148 @@ async function smokeStripePrepay(origin: string) {
   }
 }
 
+// Card-on-file (off-session) path: SetupIntent to save a card, then "pay with
+// saved card" — succeeds, is idempotent, and falls back on no-card / SCA /
+// decline. Uses a fake Stripe API keyed on the payment_method id.
+async function smokeCardOnFile(origin: string) {
+  // Fake Stripe: customers + setup_intents + payment_intents. The off-session
+  // charge result is keyed on the payment_method id sent in the form body.
+  const stripeApi = createServer((request, response) => {
+    if (request.headers.authorization !== "Bearer sk_test_smoke") {
+      response.writeHead(401); return response.end(JSON.stringify({ error: { message: "bad key" } }));
+    }
+    const chunks: Buffer[] = [];
+    request.on("data", (c) => chunks.push(Buffer.from(c)));
+    request.on("end", () => {
+      const params = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+      const url = request.url || "";
+      const send = (status: number, obj: unknown) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(obj));
+      };
+      if (url.startsWith("/customers")) {
+        return send(200, { id: "cus_smoke_123", metadata: { sllr_buyer_id: params.get("metadata[sllr_buyer_id]") } });
+      }
+      if (url.startsWith("/setup_intents")) {
+        return send(200, { id: "seti_smoke_123", client_secret: "seti_smoke_123_secret" });
+      }
+      if (url.startsWith("/payment_intents")) {
+        const pm = params.get("payment_method") || "";
+        if (pm === "pm_decline") {
+          return send(402, { error: { message: "Your card was declined.", code: "card_declined", decline_code: "generic_decline" } });
+        }
+        if (pm === "pm_sca") {
+          return send(402, { error: { message: "Authentication required.", code: "authentication_required", payment_intent: { id: "pi_sca_123" } } });
+        }
+        return send(200, { id: "pi_smoke_123", status: "succeeded" });
+      }
+      send(404, { error: { message: `unexpected path ${url}` } });
+    });
+  });
+  stripeApi.listen(0);
+  await once(stripeApi, "listening");
+  const addr = stripeApi.address();
+  if (!addr || typeof addr === "string") throw new Error("Failed to start fake Stripe (card-on-file).");
+
+  const prevBase = process.env.STRIPE_API_BASE;
+  const prevKey = process.env.STRIPE_SECRET_KEY;
+  const prevWh = process.env.STRIPE_WEBHOOK_SECRET;
+  process.env.STRIPE_API_BASE = `http://127.0.0.1:${addr.port}`;
+  process.env.STRIPE_SECRET_KEY = "sk_test_smoke";
+  delete process.env.STRIPE_WEBHOOK_SECRET; // demo webhook path saves the card
+
+  const newBuyer = async () => {
+    const s = await postJson(origin, "/buyer/session", { label: "card buyer" }) as { token?: string; buyerId?: string };
+    if (!s.token || !s.buyerId) throw new Error(`buyer session failed: ${JSON.stringify(s)}`);
+    return s as { token: string; buyerId: string };
+  };
+  const orderFor = async (token: string) => {
+    const res = await fetch(`${origin}/merchants/raposa-coffee/orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ userIntent: "iced latte in 10 minutes", deadlineMinutes: 10, maxSpendUsd: "10.00", paymentMode: "counter" }),
+    });
+    const j = await res.json() as { order?: { id?: string; buyerId?: string } };
+    if (!res.ok || !j.order?.id) throw new Error(`order create failed: ${JSON.stringify(j)}`);
+    return j.order.id;
+  };
+  // Fire the demo setup_intent.succeeded webhook that saves a card for a buyer.
+  const saveCard = async (buyerId: string, paymentMethod: string) => {
+    const saved = await postJson(origin, "/webhooks/stripe", {
+      type: "setup_intent.succeeded",
+      data: { object: { id: "seti_smoke_123", customer: "cus_smoke_123", payment_method: paymentMethod, metadata: { sllr_buyer_id: buyerId } } },
+      demo: true,
+    }) as { saved?: boolean; buyerId?: string };
+    if (!saved.saved || saved.buyerId !== buyerId) throw new Error(`card save webhook failed: ${JSON.stringify(saved)}`);
+  };
+  const pay = async (token: string, orderId: string) =>
+    postJson(origin, "/buyer/pay", { orderId }, { authorization: `Bearer ${token}` }) as Promise<{ status?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } }>;
+
+  try {
+    // 1. card/setup requires a buyer token.
+    const noAuth = await fetch(`${origin}/buyer/card/setup`, { method: "POST" });
+    if (noAuth.status !== 401) throw new Error(`card/setup without token should be 401, got ${noAuth.status}`);
+
+    // 2. card/setup returns a SetupIntent client secret + customer id.
+    const buyerA = await newBuyer();
+    const setup = await postJson(origin, "/buyer/card/setup", {}, { authorization: `Bearer ${buyerA.token}` }) as { clientSecret?: string; customerId?: string };
+    if (setup.clientSecret !== "seti_smoke_123_secret" || setup.customerId !== "cus_smoke_123") {
+      throw new Error(`card/setup did not return a SetupIntent: ${JSON.stringify(setup)}`);
+    }
+
+    // 3. paying before a card is saved → no_card (caller falls back to Checkout).
+    const orderA = await orderFor(buyerA.token);
+    const beforeCard = await pay(buyerA.token, orderA);
+    if (beforeCard.status !== "no_card") throw new Error(`pay before card should be no_card: ${JSON.stringify(beforeCard)}`);
+
+    // 4. save a good card, then off-session charge → paid + receipt memory issued.
+    await saveCard(buyerA.buyerId, "pm_good");
+    const paid = await pay(buyerA.token, orderA);
+    if (paid.status !== "paid" || paid.order?.payment?.provider !== "stripe" || !paid.order.receipt?.receiptHash) {
+      throw new Error(`pay with saved card did not settle the order: ${JSON.stringify(paid)}`);
+    }
+
+    // 5. idempotent: paying the same order again → already_paid (no double charge).
+    const again = await pay(buyerA.token, orderA);
+    if (again.status !== "already_paid") throw new Error(`re-pay should be already_paid: ${JSON.stringify(again)}`);
+
+    // 6. ownership: another buyer cannot charge buyer A's order → 403.
+    const buyerB = await newBuyer();
+    const forbidden = await postJsonFailure(origin, "/buyer/pay", { orderId: orderA });
+    // postJsonFailure uses no auth header → 401; re-check with B's token for 403.
+    void forbidden;
+    const crossRes = await fetch(`${origin}/buyer/pay`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${buyerB.token}` },
+      body: JSON.stringify({ orderId: orderA }),
+    });
+    if (crossRes.status !== 403) throw new Error(`cross-buyer pay should be 403, got ${crossRes.status}`);
+
+    // 7. declined card → status declined, order stays unpaid.
+    const buyerC = await newBuyer();
+    await saveCard(buyerC.buyerId, "pm_decline");
+    const orderC = await orderFor(buyerC.token);
+    const declined = await pay(buyerC.token, orderC);
+    if (declined.status !== "declined") throw new Error(`declined card should return declined: ${JSON.stringify(declined)}`);
+    const stillUnpaid = await pay(buyerC.token, orderC); // not already_paid
+    if (stillUnpaid.status === "already_paid" || stillUnpaid.status === "paid") {
+      throw new Error(`declined order must not be marked paid: ${JSON.stringify(stillUnpaid)}`);
+    }
+
+    // 8. SCA-required card → requires_action (caller offers a hosted link).
+    const buyerD = await newBuyer();
+    await saveCard(buyerD.buyerId, "pm_sca");
+    const orderD = await orderFor(buyerD.token);
+    const sca = await pay(buyerD.token, orderD);
+    if (sca.status !== "requires_action") throw new Error(`SCA card should return requires_action: ${JSON.stringify(sca)}`);
+  } finally {
+    if (prevBase === undefined) delete process.env.STRIPE_API_BASE; else process.env.STRIPE_API_BASE = prevBase;
+    if (prevKey === undefined) delete process.env.STRIPE_SECRET_KEY; else process.env.STRIPE_SECRET_KEY = prevKey;
+    if (prevWh === undefined) delete process.env.STRIPE_WEBHOOK_SECRET; else process.env.STRIPE_WEBHOOK_SECRET = prevWh;
+    stripeApi.close();
+  }
+}
+
 // In-process fake LINE Pay Online API to exercise the request -> confirm flow.
 async function smokeLinePay(origin: string) {
   const channelSecret = "line_pay_channel_secret";
@@ -1050,6 +1192,7 @@ async function main() {
     await smokeReceiptGating(origin);
     await smokeBuyerAuth(origin);
     await smokeStripePrepay(origin);
+    await smokeCardOnFile(origin);
     await smokeLinePay(origin);
     await smokeDemoMerchants(origin);
 

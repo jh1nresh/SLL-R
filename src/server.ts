@@ -26,6 +26,7 @@ import { aiPluginManifest, sllrOpenApi } from "./openapi.js";
 import { solanaSllrPluginSpec } from "./solanaPlugin.js";
 import { shopifyCartHandoff, shopifyConnectPlan, shopifyMerchants, shopifyOrdersFulfilledWebhook, shopifyOrdersPaidWebhook, shopifyProducts, shopifyRefundsCreateWebhook } from "./adapters/shopify.js";
 import { stripeWebhook } from "./adapters/stripe.js";
+import { createCardSetup, payWithSavedCard } from "./adapters/cardOnFile.js";
 import { linePayConfirm } from "./adapters/linePay.js";
 import { createDemoMerchant, listDemoMerchants } from "./adapters/shopifyCatalog.js";
 
@@ -368,6 +369,22 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           orders: await listOrdersForBuyer(session.buyerId),
         });
       }
+      // Card on file: start saving a card (returns a SetupIntent client secret the
+      // app confirms with Stripe). Buyer-gated.
+      if (request.method === "POST" && url.pathname === "/buyer/card/setup") {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token." });
+        const setup = await createCardSetup(session.buyerId);
+        return json(response, 200, { product: "SLL-R card setup", ...setup });
+      }
+      // Charge the buyer's saved card for an order (linkless). Buyer-gated.
+      if (request.method === "POST" && url.pathname === "/buyer/pay") {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token." });
+        const payload = await body(request);
+        const result = await payWithSavedCard(String(payload.orderId || ""), session.buyerId);
+        return json(response, 200, { product: "SLL-R pay with saved card", ...result });
+      }
       const standaloneAgentRoute = url.pathname.match(/^\/agent\/([^/]+)(?:\/([^/]+))?$/);
       if (standaloneAgentRoute) {
         const [, merchantId, action] = standaloneAgentRoute;
@@ -540,7 +557,8 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       if (request.method === "POST" && url.pathname === "/webhooks/stripe") {
         const parsed = await readBody(request);
         const result = await stripeWebhook(request.headers, parsed.raw, parsed.json);
-        return json(response, 200, "ignored" in result
+        // result is one of: ignored event | card-on-file saved | settled order.
+        return json(response, 200, ("ignored" in result || "saved" in result)
           ? result
           : { product: "SLL-R Stripe payment proof adapter", status: result.status, proofLevel: result.proofLevel, order: result });
       }

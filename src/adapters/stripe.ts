@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { attachPaymentProof, getOrder } from "../core/orders.js";
 import { merchantForId } from "../merchants/profiles.js";
 import { centsFromUsd, formatUsd } from "../core/money.js";
+import { setBuyerBilling } from "../core/buyerBilling.js";
 import type { SellerOrder } from "../types.js";
 
 // Stripe prepay-in-flow (v0): the buyer pays inside the agent flow via a Stripe
@@ -33,7 +34,11 @@ function formEncode(fields: Record<string, string>) {
     .join("&");
 }
 
-async function stripeRequest<T>(path: string, body: Record<string, string>): Promise<T> {
+async function stripeRequest<T>(
+  path: string,
+  body: Record<string, string>,
+  opts: { idempotencyKey?: string } = {},
+): Promise<T> {
   const key = stripeSecretKey();
   if (!key) throw Object.assign(new Error("STRIPE_SECRET_KEY is not configured."), { status: 503 });
   let response: Response;
@@ -43,6 +48,8 @@ async function stripeRequest<T>(path: string, body: Record<string, string>): Pro
       headers: {
         authorization: `Bearer ${key}`,
         "content-type": "application/x-www-form-urlencoded",
+        // Idempotency: a retried charge with the same key never double-charges.
+        ...(opts.idempotencyKey ? { "idempotency-key": opts.idempotencyKey } : {}),
       },
       body: formEncode(body),
       signal: AbortSignal.timeout(8_000),
@@ -50,9 +57,20 @@ async function stripeRequest<T>(path: string, body: Record<string, string>): Pro
   } catch (error) {
     throw Object.assign(new Error(`Stripe is unreachable: ${error instanceof Error ? error.message : "fetch failed"}`), { status: 503 });
   }
-  const payload = await response.json().catch(() => ({})) as { id?: string; url?: string; error?: { message?: string } };
+  const payload = await response.json().catch(() => ({})) as {
+    id?: string;
+    url?: string;
+    error?: { message?: string; code?: string; decline_code?: string; payment_intent?: { id?: string } };
+  };
   if (!response.ok || payload.error) {
-    throw Object.assign(new Error(`Stripe error: ${payload.error?.message || response.status}`), { status: 502 });
+    // Surface the Stripe error code so off-session callers can tell SCA-required
+    // / declined apart from a real failure.
+    throw Object.assign(new Error(`Stripe error: ${payload.error?.message || response.status}`), {
+      status: 502,
+      stripeCode: payload.error?.code,
+      stripeDeclineCode: payload.error?.decline_code,
+      stripePaymentIntentId: payload.error?.payment_intent?.id,
+    });
   }
   return payload as T;
 }
@@ -132,6 +150,22 @@ function sessionFrom(payload: Record<string, unknown>) {
 export async function stripeWebhook(headers: Record<string, string | string[] | undefined>, rawBody: string, payload: Record<string, unknown>) {
   const verifier = verifyStripeWebhook(headers, rawBody, payload);
   const type = String(payload.type || "");
+
+  // Card-on-file: a SetupIntent succeeded → the buyer just saved a card. Store the
+  // PaymentMethod on their billing record so future orders charge off-session.
+  if (type === "setup_intent.succeeded") {
+    const si = sessionFrom(payload);
+    const meta = (si.metadata as Record<string, unknown> | undefined) || {};
+    const buyerId = String(meta.sllr_buyer_id || "");
+    const paymentMethodId = String(si.payment_method || "");
+    const customerId = String(si.customer || "");
+    if (!buyerId || !paymentMethodId) {
+      return { product: "SLL-R Stripe webhook", ignored: type, reason: "missing buyer/payment_method" };
+    }
+    await setBuyerBilling(buyerId, { paymentMethodId, ...(customerId ? { stripeCustomerId: customerId } : {}) });
+    return { product: "SLL-R card on file", saved: true, buyerId, verifier: verifier.mode };
+  }
+
   if (type && type !== "checkout.session.completed" && type !== "payment_intent.succeeded") {
     return { product: "SLL-R Stripe webhook", ignored: type };
   }
@@ -168,4 +202,69 @@ export async function stripeWebhook(headers: Record<string, string | string[] | 
     amountUsd,
     paymentId,
   });
+}
+
+// --- Card on file (off-session) ---------------------------------------------
+
+// A Stripe Customer holds the buyer's saved card. metadata links it back to us.
+export async function stripeCreateCustomer(buyerId: string): Promise<string> {
+  const customer = await stripeRequest<{ id: string }>("/customers", {
+    "metadata[sllr_buyer_id]": buyerId,
+  });
+  return customer.id;
+}
+
+// SetupIntent: the app/one-time page uses the returned client_secret to save a
+// card to the Customer (PCI handled by Stripe). usage=off_session so we can later
+// charge without the buyer present.
+export async function stripeCreateSetupIntent(customerId: string, buyerId: string): Promise<{ id: string; clientSecret: string }> {
+  const si = await stripeRequest<{ id: string; client_secret: string }>("/setup_intents", {
+    customer: customerId,
+    usage: "off_session",
+    "payment_method_types[0]": "card",
+    "metadata[sllr_buyer_id]": buyerId,
+  });
+  return { id: si.id, clientSecret: si.client_secret };
+}
+
+export type OffSessionResult = { status: "succeeded" | "requires_action" | "declined"; paymentIntentId?: string };
+
+// Charge the saved card with no buyer present. Idempotency key = order id, so a
+// retry never double-charges. SCA-required / declines come back as a status (not
+// a throw) so the caller can fall back to a hosted Checkout link.
+export async function stripeChargeOffSession(args: {
+  customerId: string;
+  paymentMethodId: string;
+  amountUsd: string;
+  orderId: string;
+  merchantId: string;
+  merchantName: string;
+}): Promise<OffSessionResult> {
+  try {
+    const pi = await stripeRequest<{ id: string; status: string }>(
+      "/payment_intents",
+      {
+        amount: String(centsFromUsd(args.amountUsd)),
+        currency: "usd",
+        customer: args.customerId,
+        payment_method: args.paymentMethodId,
+        off_session: "true",
+        confirm: "true",
+        description: `${args.merchantName}: order ${args.orderId}`,
+        "metadata[sllr_order_id]": args.orderId,
+        "metadata[sllr_merchant_id]": args.merchantId,
+      },
+      { idempotencyKey: `sllr_charge_${args.orderId}` },
+    );
+    return { status: pi.status === "succeeded" ? "succeeded" : "requires_action", paymentIntentId: pi.id };
+  } catch (error) {
+    const e = error as { stripeCode?: string; stripePaymentIntentId?: string };
+    if (e.stripeCode === "authentication_required") {
+      return { status: "requires_action", paymentIntentId: e.stripePaymentIntentId };
+    }
+    if (e.stripeCode === "card_declined" || e.stripeCode === "expired_card" || e.stripeCode === "insufficient_funds") {
+      return { status: "declined" };
+    }
+    throw error;
+  }
 }
