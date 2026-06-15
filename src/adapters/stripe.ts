@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { attachPaymentProof, getOrder } from "../core/orders.js";
 import { merchantForId } from "../merchants/profiles.js";
 import { centsFromUsd, formatUsd } from "../core/money.js";
-import { setBuyerBilling } from "../core/buyerBilling.js";
+import { getBuyerBilling, setBuyerBilling } from "../core/buyerBilling.js";
 import type { SellerOrder } from "../types.js";
 
 // Stripe prepay-in-flow (v0): the buyer pays inside the agent flow via a Stripe
@@ -75,6 +75,27 @@ async function stripeRequest<T>(
   return payload as T;
 }
 
+// GET a Stripe resource (used to read a completed checkout's saved PaymentMethod).
+async function stripeGet<T>(path: string): Promise<T> {
+  const key = stripeSecretKey();
+  if (!key) throw Object.assign(new Error("STRIPE_SECRET_KEY is not configured."), { status: 503 });
+  let response: Response;
+  try {
+    response = await fetch(`${stripeApiBase()}${path}`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+  } catch (error) {
+    throw Object.assign(new Error(`Stripe is unreachable: ${error instanceof Error ? error.message : "fetch failed"}`), { status: 503 });
+  }
+  const payload = await response.json().catch(() => ({})) as { error?: { message?: string } } & Record<string, unknown>;
+  if (!response.ok || payload.error) {
+    throw Object.assign(new Error(`Stripe error: ${payload.error?.message || response.status}`), { status: 502 });
+  }
+  return payload as T;
+}
+
 // Async so it matches the other prepare-payment adapters and can await the
 // Stripe API. Returns a setup_required option when Stripe is not configured.
 export async function stripePreparePayment(order: SellerOrder, origin: string) {
@@ -89,6 +110,20 @@ export async function stripePreparePayment(order: SellerOrder, origin: string) {
   }
 
   const amountCents = centsFromUsd(order.item.subtotalUsd);
+
+  // Card on file via the first checkout: for a buyer-bound order, attach the
+  // checkout to the buyer's Stripe Customer and save the card off-session, so
+  // every later order can charge linklessly (pay once here → remembered).
+  let customerId: string | undefined;
+  if (order.buyerId) {
+    const billing = await getBuyerBilling(order.buyerId);
+    customerId = billing.stripeCustomerId;
+    if (!customerId) {
+      customerId = await stripeCreateCustomer(order.buyerId);
+      await setBuyerBilling(order.buyerId, { stripeCustomerId: customerId });
+    }
+  }
+
   const session = await stripeRequest<{ id: string; url: string }>("/checkout/sessions", {
     mode: "payment",
     "line_items[0][quantity]": "1",
@@ -98,6 +133,11 @@ export async function stripePreparePayment(order: SellerOrder, origin: string) {
     "metadata[sllr_order_id]": order.id,
     "metadata[sllr_merchant_id]": order.merchantId,
     "payment_intent_data[metadata][sllr_order_id]": order.id,
+    // Buyer-bound → save the card to the Customer for future off-session charges.
+    ...(customerId ? {
+      customer: customerId,
+      "payment_intent_data[setup_future_usage]": "off_session",
+    } : {}),
     success_url: `${origin}/orders/${order.id}?paid=1`,
     cancel_url: `${origin}/orders/${order.id}?canceled=1`,
   });
@@ -210,13 +250,32 @@ export async function stripeWebhook(headers: Record<string, string | string[] | 
   const amountUsd = amountTotal > 0 ? formatUsd(amountTotal) : order.item.subtotalUsd;
   const paymentId = `${String(object.id || object.payment_intent || "stripe_session")}:${verifier.mode}`;
 
-  return attachPaymentProof({
+  const proof = await attachPaymentProof({
     orderId: order.id,
     merchantId: order.merchantId,
     provider: "stripe",
     amountUsd,
     paymentId,
   });
+
+  // First-checkout card-save: if this buyer-bound checkout saved a card
+  // (setup_future_usage), capture the PaymentMethod so later orders charge
+  // off-session. Best-effort — the payment proof above is already attached.
+  if (type === "checkout.session.completed" && order.buyerId && object.customer && object.payment_intent) {
+    try {
+      const pi = await stripeGet<{ payment_method?: string }>(`/payment_intents/${encodeURIComponent(String(object.payment_intent))}`);
+      if (pi.payment_method) {
+        await setBuyerBilling(order.buyerId, {
+          stripeCustomerId: String(object.customer),
+          paymentMethodId: String(pi.payment_method),
+        });
+      }
+    } catch {
+      // Card-save is best-effort; the buyer can still bind a card later.
+    }
+  }
+
+  return proof;
 }
 
 // --- Card on file (off-session) ---------------------------------------------

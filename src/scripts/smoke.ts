@@ -957,6 +957,88 @@ async function smokeCardOnFile(origin: string) {
   }
 }
 
+// Card on file via the FIRST checkout: a buyer-bound hosted Checkout saves the
+// card (setup_future_usage); the checkout.session.completed webhook captures the
+// PaymentMethod; a later order then charges linklessly with no SetupIntent step.
+async function smokeCheckoutSavesCard(origin: string) {
+  const stripeApi = createServer((request, response) => {
+    if (request.headers.authorization !== "Bearer sk_test_smoke") {
+      response.writeHead(401); return response.end(JSON.stringify({ error: { message: "bad key" } }));
+    }
+    const chunks: Buffer[] = [];
+    request.on("data", (c) => chunks.push(Buffer.from(c)));
+    request.on("end", () => {
+      const u = request.url || "";
+      const send = (status: number, obj: unknown) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(obj)); };
+      if (u.startsWith("/customers")) return send(200, { id: "cus_chk_123" });
+      if (u.startsWith("/checkout/sessions")) return send(200, { id: "cs_chk_123", url: "https://checkout.stripe.test/c/cs_chk_123" });
+      // GET /payment_intents/{id} → the saved card the webhook captures.
+      if (request.method === "GET" && u.startsWith("/payment_intents/")) return send(200, { id: "pi_chk_123", payment_method: "pm_chk_123", status: "succeeded" });
+      // POST /payment_intents → the later off-session charge.
+      if (u.startsWith("/payment_intents")) return send(200, { id: "pi_chk_456", status: "succeeded" });
+      send(404, { error: { message: `unexpected ${u}` } });
+    });
+  });
+  stripeApi.listen(0);
+  await once(stripeApi, "listening");
+  const addr = stripeApi.address();
+  if (!addr || typeof addr === "string") throw new Error("Failed to start fake Stripe (checkout-saves-card).");
+
+  const prevBase = process.env.STRIPE_API_BASE;
+  const prevKey = process.env.STRIPE_SECRET_KEY;
+  const prevWh = process.env.STRIPE_WEBHOOK_SECRET;
+  process.env.STRIPE_API_BASE = `http://127.0.0.1:${addr.port}`;
+  process.env.STRIPE_SECRET_KEY = "sk_test_smoke";
+  delete process.env.STRIPE_WEBHOOK_SECRET; // demo webhook path
+
+  const orderFor = async (token: string) => {
+    const res = await fetch(`${origin}/merchants/solyd/orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ userIntent: "Ship me a black MagSafe iPhone 16 case under $100", maxSpendUsd: "100.00", deliverByDays: 7, paymentMode: "checkout" }),
+    });
+    const j = await res.json() as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+    if (!res.ok || !j.order?.id) throw new Error(`order create failed: ${JSON.stringify(j)}`);
+    return j.order;
+  };
+
+  try {
+    const s = await postJson(origin, "/buyer/session", { label: "checkout-save buyer" }) as { token?: string; buyerId?: string };
+    if (!s.token || !s.buyerId) throw new Error(`buyer session failed: ${JSON.stringify(s)}`);
+
+    // First order: buyer-bound checkout. payment-options creates a Stripe session
+    // attached to the buyer's Customer with setup_future_usage.
+    const order1 = await orderFor(s.token);
+    const opts = await postJson(origin, "/merchants/solyd/payment-options", { orderId: order1.id }) as { paymentOptions?: Array<{ rail?: string; type?: string; url?: string }> };
+    const stripeOpt = opts.paymentOptions?.find((o) => o.rail === "stripe");
+    if (stripeOpt?.type !== "checkout_url" || !stripeOpt.url?.includes("checkout.stripe.test")) {
+      throw new Error(`buyer-bound checkout did not return a checkout URL: ${JSON.stringify(opts.paymentOptions)}`);
+    }
+
+    // The checkout completes → receipt issued AND the card is captured/saved.
+    const cents = Math.round(Number(order1.item?.subtotalUsd) * 100);
+    const paid = await postJson(origin, "/webhooks/stripe", {
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_chk_123", payment_status: "paid", amount_total: cents, customer: "cus_chk_123", payment_intent: "pi_chk_123", metadata: { sllr_order_id: order1.id, sllr_merchant_id: "solyd" } } },
+      demo: true,
+    }) as { proofLevel?: string };
+    if (paid.proofLevel !== "receipt_memory_issued") throw new Error(`checkout webhook did not issue receipt: ${JSON.stringify(paid)}`);
+
+    // Proof the card stuck: a SECOND order charges off-session with NO SetupIntent
+    // and NO link — only possible if the first checkout saved the card.
+    const order2 = await orderFor(s.token);
+    const pay = await postJson(origin, "/buyer/pay", { orderId: order2.id }, { authorization: `Bearer ${s.token}` }) as { status?: string };
+    if (pay.status !== "paid") {
+      throw new Error(`second order should charge the card saved by the first checkout, got: ${JSON.stringify(pay)}`);
+    }
+  } finally {
+    if (prevBase === undefined) delete process.env.STRIPE_API_BASE; else process.env.STRIPE_API_BASE = prevBase;
+    if (prevKey === undefined) delete process.env.STRIPE_SECRET_KEY; else process.env.STRIPE_SECRET_KEY = prevKey;
+    if (prevWh === undefined) delete process.env.STRIPE_WEBHOOK_SECRET; else process.env.STRIPE_WEBHOOK_SECRET = prevWh;
+    stripeApi.close();
+  }
+}
+
 // Recurring orders (confirm-each): subscription → cron sweep opens a confirm
 // prompt → buyer confirms → order + off-session charge, capped per run. Drives
 // the sweep/confirm core with an injected future `now` so a just-created
@@ -1383,6 +1465,7 @@ async function main() {
     await smokeBuyerAuth(origin);
     await smokeStripePrepay(origin);
     await smokeCardOnFile(origin);
+    await smokeCheckoutSavesCard(origin);
     await smokeRecurring(origin);
     await smokeLinePay(origin);
     await smokeDemoMerchants(origin);
