@@ -749,7 +749,8 @@ async function smokeStripePrepay(origin: string) {
       type: "checkout.session.completed",
       data: { object: { id: "cs_test_smoke456", payment_status: "paid", amount_total: Math.round(Number(order2.order?.item?.subtotalUsd) * 100), metadata: { sllr_order_id: order2Id, sllr_merchant_id: "solyd" } } },
     });
-    const ts = "1700000000";
+    // Current timestamp so the signature passes the replay-tolerance window.
+    const ts = Math.floor(Date.now() / 1000).toString();
     const sig = createHmac("sha256", whSecret).update(`${ts}.${body2}`, "utf8").digest("hex");
     const signedRes = await fetch(`${origin}/webhooks/stripe`, {
       method: "POST",
@@ -769,6 +770,18 @@ async function smokeStripePrepay(origin: string) {
     });
     if (badRes.status !== 401) {
       throw new Error(`Stripe webhook with bad signature should be 401, got ${badRes.status}`);
+    }
+
+    // A signature with a stale timestamp must be rejected as a possible replay.
+    const staleTs = (Math.floor(Date.now() / 1000) - 3600).toString();
+    const staleSig = createHmac("sha256", whSecret).update(`${staleTs}.${body2}`, "utf8").digest("hex");
+    const staleRes = await fetch(`${origin}/webhooks/stripe`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "stripe-signature": `t=${staleTs},v1=${staleSig}` },
+      body: body2,
+    });
+    if (staleRes.status !== 401) {
+      throw new Error(`Stripe webhook with stale timestamp should be 401 (replay), got ${staleRes.status}`);
     }
   } finally {
     if (prevBase === undefined) delete process.env.STRIPE_API_BASE; else process.env.STRIPE_API_BASE = prevBase;

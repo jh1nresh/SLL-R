@@ -133,6 +133,17 @@ function verifyStripeWebhook(headers: Record<string, string | string[] | undefin
   const timestamp = parts.t;
   const provided = parts.v1;
   if (!timestamp || !provided) throw Object.assign(new Error("Malformed Stripe-Signature header."), { status: 401 });
+  // Replay protection: reject events whose signed timestamp is outside the
+  // tolerance window (Stripe default 300s). Set STRIPE_WEBHOOK_TOLERANCE_SEC=0
+  // to disable (e.g. replaying historical events from the Stripe dashboard).
+  const toleranceSec = Number(process.env.STRIPE_WEBHOOK_TOLERANCE_SEC ?? 300);
+  if (toleranceSec > 0) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const skew = Math.abs(nowSec - Number(timestamp));
+    if (!Number.isFinite(skew) || skew > toleranceSec) {
+      throw Object.assign(new Error("Stripe webhook timestamp is outside the tolerance window (possible replay)."), { status: 401 });
+    }
+  }
   const expected = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`, "utf8").digest("hex");
   const providedBuffer = Buffer.from(provided, "hex");
   const expectedBuffer = Buffer.from(expected, "hex");
