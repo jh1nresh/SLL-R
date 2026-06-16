@@ -5,6 +5,7 @@ import { recurringSuggestion } from "./recurring.js";
 import { persistQuote } from "./quotes.js";
 import { grantConsent, validateConsentForOrder, expectedConfirmation } from "./consent.js";
 import { centsFromUsd } from "./money.js";
+import { recordLoopSafe, loopIdForQuote, loopIdForOrder } from "./actionLoop.js";
 import type { MerchantProfile, OrderRequest, PaymentRail, QuoteRequest } from "../types.js";
 
 function requireMerchant(merchantId: string) {
@@ -140,6 +141,12 @@ export async function quoteMerchantOrder(merchantId: string, payload: Record<str
   const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
   const intent = typeof payload.userIntent === "string" ? payload.userIntent : "";
   const stored = await persistQuote(merchantId, quote, buyerId, intent);
+  if (stored) {
+    await recordLoopSafe(loopIdForQuote(stored.id), { buyerId, merchantId, intent }, {
+      eventType: "quote", actor: "sllr", stateAfter: "quote_created", claimLevel: "quote_only",
+      receiptRef: stored.id, ids: { quoteId: stored.id },
+    });
+  }
   return {
     product: "SLL-R merchant quote",
     quote,
@@ -156,24 +163,51 @@ export async function grantMerchantConsent(payload: Record<string, unknown>) {
   const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
   const confirmationText = typeof payload.confirmationText === "string" ? payload.confirmationText : undefined;
   const consent = await grantConsent({ quoteId, buyerId, confirmationText });
+  await recordLoopSafe(loopIdForQuote(quoteId), { buyerId, merchantId: consent.merchantId }, {
+    eventType: "consent", actor: "user", stateAfter: "consent_granted", claimLevel: "consent_requested",
+    receiptRef: consent.id, ids: { consentId: consent.id },
+  });
   return { product: "SLL-R consent receipt", consent, next: "create the order with this quoteId + consentId." };
 }
 
 export async function createMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
   requireMerchant(merchantId);
-  // Opt-in policy gate: no quote-bound consent → no order.
+  const seedBuyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
+  const seedIntent = typeof payload.userIntent === "string" ? payload.userIntent : "";
+  const payloadQuoteId = String(payload.quoteId || "");
+  const seed = { buyerId: seedBuyerId, merchantId, intent: seedIntent };
+  // Opt-in policy gate: no quote-bound consent → no order. Blocks are first-class
+  // loop events (the spec's policy_block_receipt).
   if (consentRequired()) {
-    const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
-    const quoteId = String(payload.quoteId || "");
     const consentId = String(payload.consentId || "");
-    const { consent } = await validateConsentForOrder(quoteId, consentId, buyerId);
+    let consent;
+    try {
+      ({ consent } = await validateConsentForOrder(payloadQuoteId, consentId, seedBuyerId));
+    } catch (error) {
+      const e = error as Error & { requiredNextStep?: string };
+      await recordLoopSafe(payloadQuoteId ? loopIdForQuote(payloadQuoteId) : `loop_blk_${Date.now()}`, seed, {
+        eventType: "policy_block", actor: "client_agent",
+        blockReason: `${e.message} (next: ${e.requiredNextStep ?? "request_consent"})`,
+        ids: payloadQuoteId ? { quoteId: payloadQuoteId } : {},
+      });
+      throw error;
+    }
     // Order amount must equal the consented quote amount (catch price drift).
     const fresh = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
     if (!fresh.feasible || !fresh.item || centsFromUsd(fresh.item.subtotalUsd) !== centsFromUsd(consent.amountUsd)) {
+      await recordLoopSafe(loopIdForQuote(payloadQuoteId), seed, {
+        eventType: "policy_block", actor: "client_agent",
+        blockReason: `price_drift: order != consented $${consent.amountUsd} (next: quote_order)`,
+        ids: { quoteId: payloadQuoteId },
+      });
       throw Object.assign(new Error(`Price changed since consent ($${consent.amountUsd}) — request a fresh quote + consent.`), { status: 409, requiredNextStep: "quote_order" });
     }
   }
   const result = await createOrder(bodyWithMerchant(merchantId, payload) as OrderRequest);
+  await recordLoopSafe(payloadQuoteId ? loopIdForQuote(payloadQuoteId) : loopIdForOrder(result.order.id), seed, {
+    eventType: "order", actor: "sllr", stateAfter: "order_created", claimLevel: "order_created",
+    receiptRef: result.order.id, ids: { orderId: result.order.id, ...(payloadQuoteId ? { quoteId: payloadQuoteId } : {}) },
+  });
   return {
     product: "SLL-R merchant order",
     status: result.order.status,

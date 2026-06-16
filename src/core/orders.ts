@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { merchantForId } from "../merchants/profiles.js";
+import { recordLoopSafe, loopIdForOrderResolved } from "./actionLoop.js";
 import type { CatalogItem, MerchantActionRequest, MerchantOrderFilter, MerchantProfile, OrderRequest, PaymentWebhook, SellerOrder } from "../types.js";
 import { issueSllrReceipt } from "../adapters/sllrReceipts.js";
 import { centsFromUsd } from "./money.js";
@@ -349,5 +350,11 @@ export async function attachPaymentProof(input: PaymentWebhook) {
   updated.proofLevel = "receipt_memory_issued";
   updated.updatedAt = new Date().toISOString();
   await saveOrder(updated);
+  // Action-loop: payment proof + receipt are first-class loop events (best-effort).
+  const loopId = await loopIdForOrderResolved(updated.id);
+  await recordLoopSafe(loopId, { buyerId: updated.buyerId, merchantId: updated.merchantId }, {
+    eventType: "payment", actor: "payment_provider", stateAfter: "receipt_issued", claimLevel: "paid",
+    receiptRef: input.paymentId, ids: { orderId: updated.id, paymentReceiptId: input.paymentId, receiptId: updated.receipt?.receiptHash ?? null },
+  });
   return updated;
 }

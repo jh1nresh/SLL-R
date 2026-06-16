@@ -6,6 +6,7 @@ import { resetStoreForTest, sllrStore, storeBackendName } from "../core/store.js
 import { confirmRun, listPendingRuns, sweepDueSubscriptions } from "../core/recurring.js";
 import { getQuote } from "../core/quotes.js";
 import { grantConsent } from "../core/consent.js";
+import { getLoop, loopIdForQuote, loopIdForOrder } from "../core/actionLoop.js";
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -647,6 +648,65 @@ async function smokeStoreBackend() {
   });
   if (storeBackendName() !== "memory") {
     throw new Error("Store should fall back to memory backend after KV env is cleared.");
+  }
+}
+
+// Action-loop logging (spec: loop-engineering, Phase 1). Verifies quote/order/
+// payment flows + policy blocks become first-class loop events, threaded by
+// quoteId / order link. Additive + best-effort — never alters the real action.
+async function smokeActionLoop(origin: string) {
+  // Part A — order + payment loop (consent gate off, default).
+  const o = await postJson(origin, "/merchants/solyd/orders", {
+    userIntent: "Ship me a black MagSafe iPhone 16 case under $100",
+    maxSpendUsd: "100.00", deliverByDays: 7, paymentMode: "checkout",
+  }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+  const orderId = o.order?.id;
+  if (!orderId) throw new Error(`action-loop: order not created: ${JSON.stringify(o)}`);
+  const orderLoop = await getLoop(loopIdForOrder(orderId));
+  if (!orderLoop || !orderLoop.events.some((e) => e.eventType === "order") || orderLoop.currentState !== "order_created") {
+    throw new Error(`action-loop: order event not logged: ${JSON.stringify(orderLoop)}`);
+  }
+
+  // Pay via the demo Stripe webhook → payment + receipt event on the SAME loop.
+  const cents = Math.round(Number(o.order?.item?.subtotalUsd) * 100);
+  const prevWh = process.env.STRIPE_WEBHOOK_SECRET;
+  delete process.env.STRIPE_WEBHOOK_SECRET;
+  try {
+    await postJson(origin, "/webhooks/stripe", {
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_loop", payment_status: "paid", amount_total: cents, metadata: { sllr_order_id: orderId, sllr_merchant_id: "solyd" } } },
+      demo: true,
+    });
+  } finally {
+    if (prevWh === undefined) delete process.env.STRIPE_WEBHOOK_SECRET; else process.env.STRIPE_WEBHOOK_SECRET = prevWh;
+  }
+  const paidLoop = await getLoop(loopIdForOrder(orderId));
+  if (!paidLoop?.events.some((e) => e.eventType === "payment") || paidLoop.currentState !== "receipt_issued") {
+    throw new Error(`action-loop: payment event not logged: ${JSON.stringify(paidLoop)}`);
+  }
+
+  // Part B — quote loop + policy_block on a no-consent order (gate on).
+  const prevFlag = process.env.SLLR_REQUIRE_CONSENT;
+  process.env.SLLR_REQUIRE_CONSENT = "true";
+  try {
+    const cold = { userIntent: "cold brew in 10 minutes", deadlineMinutes: 10, paymentMode: "counter" };
+    const q = await postJson(origin, "/merchants/raposa-coffee/quote", cold) as { quoteId?: string };
+    const quoteLoop = await getLoop(loopIdForQuote(q.quoteId!));
+    if (!quoteLoop?.events.some((e) => e.eventType === "quote")) {
+      throw new Error(`action-loop: quote event not logged: ${JSON.stringify(quoteLoop)}`);
+    }
+    // Order without consent → blocked → policy_block event on the quote's loop.
+    const blocked = await fetch(`${origin}/merchants/raposa-coffee/orders`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...cold, quoteId: q.quoteId }),
+    });
+    if (blocked.status !== 409) throw new Error(`action-loop: expected 409, got ${blocked.status}`);
+    const blockLoop = await getLoop(loopIdForQuote(q.quoteId!));
+    if (!blockLoop?.events.some((e) => e.eventType === "policy_block") || blockLoop.evalStatus !== "blocked" || !blockLoop.policyBlocks.length) {
+      throw new Error(`action-loop: policy_block not logged: ${JSON.stringify(blockLoop)}`);
+    }
+  } finally {
+    if (prevFlag === undefined) delete process.env.SLLR_REQUIRE_CONSENT; else process.env.SLLR_REQUIRE_CONSENT = prevFlag;
   }
 }
 
@@ -1530,6 +1590,7 @@ async function main() {
     await smokeReceiptGating(origin);
     await smokeBuyerAuth(origin);
     await smokeConsentGate(origin);
+    await smokeActionLoop(origin);
     await smokeStripePrepay(origin);
     await smokeCardOnFile(origin);
     await smokeCheckoutSavesCard(origin);
