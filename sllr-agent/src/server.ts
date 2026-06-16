@@ -9,6 +9,7 @@ import { statusMessage, isTerminal, type WatchedOrder } from "./orderNotify.js";
 import { clampEnvelope, type SllrStateProof } from "./claimClamp.js";
 import { renderEnvelopeToSendblueMessages } from "./iMessageRenderer.js";
 import { parseEnvelope } from "./responseContract.js";
+import { TurnQueue } from "./turnQueue.js";
 
 // Sendblue iMessage server. One public POST route: /sendblue/inbound. Customers
 // text in → their per-number AgentCore replies → we send the reply back. When an
@@ -30,6 +31,7 @@ async function main() {
   // pay link + pickup code deterministically, never relying on the LLM to do it.
   const pendingOrder = new Map<string, { merchantId: string; orderId: string }>();
   const turnProof = new Map<string, SllrStateProof>();
+  const customerTurns = new TurnQueue();
 
   // Poll a created order and message the customer on each meaningful transition
   // (payment cleared, accepted, ready, rejected, receipt). The backend (Vercel)
@@ -173,9 +175,12 @@ async function main() {
       if (msg.messageHandle) markSeen(msg.messageHandle);
 
       // Ack immediately so Sendblue doesn't retry; process in the background
-      // (Gemini turns take seconds). Fire-and-forget per JhiNResH's async pattern.
+      // (Gemini turns take seconds). Queue per customer because each phone keeps
+      // one Gemini chat session, and concurrent turns can corrupt/drop replies.
       json(res, 200, { accepted: true });
-      handleInbound(msg).catch((e) => log(`[inbound] ${e?.message || e}`));
+      customerTurns.enqueue(msg.fromNumber, () => handleInbound(msg).catch((e) => {
+        log(`[inbound] ${e?.message || e}`);
+      }));
     }).catch((e) => json(res, 500, { error: e?.message || "read error" }));
   });
 

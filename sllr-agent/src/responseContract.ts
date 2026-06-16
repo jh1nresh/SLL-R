@@ -92,6 +92,8 @@ export function parseEnvelope(modelOutput: string, context: EnvelopeFallbackCont
     const parsed = JSON.parse(candidate) as unknown;
     return validateEnvelope(parsed);
   } catch {
+    const salvagedText = salvagePlainText(candidate);
+    if (salvagedText) return plainTextEnvelope(salvagedText, context);
     return plainTextEnvelope(raw, context);
   }
 }
@@ -130,6 +132,23 @@ function extractJson(text: string): string | null {
   const end = text.lastIndexOf("}");
   if (start >= 0 && end > start) return text.slice(start, end + 1);
   return null;
+}
+
+function salvagePlainText(json: string): string {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    const blocks = record(parsed, "envelope").blocks;
+    if (!Array.isArray(blocks)) return "";
+    const texts = blocks
+      .map((block) => {
+        const b = block && typeof block === "object" && !Array.isArray(block) ? block as Record<string, unknown> : {};
+        return b.type === "PlainText" && typeof b.text === "string" ? b.text.trim() : "";
+      })
+      .filter(Boolean);
+    return texts.join("\n\n");
+  } catch {
+    return "";
+  }
 }
 
 function validateEnvelope(value: unknown): SllrResponseEnvelope {

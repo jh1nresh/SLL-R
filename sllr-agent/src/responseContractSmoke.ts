@@ -55,6 +55,19 @@ assert.equal(freeTextOverclaim.claimLevel, "chat_only");
 assert.doesNotMatch(freeTextRendered, /Payment received/);
 assert.match(freeTextRendered, /one more confirmed detail/);
 
+const invalidClaim = parseEnvelope(JSON.stringify({
+  version: "sllr.response.v0",
+  conversationId: "imessage",
+  channel: "imessage",
+  claimLevel: "assistant_direct_suggestion",
+  blocks: [{ type: "PlainText", text: "How about a Cold brew ($5.75) from Raposa Coffee?" }],
+  actions: [],
+  receipts: [],
+  guardrails: { requiresExplicitConsent: true, highestAllowedClaim: "assistant_direct_suggestion" },
+}), { conversationId: "+15550001111", channel: "imessage" });
+assert.equal(invalidClaim.claimLevel, "chat_only");
+assert.equal(renderEnvelopeToSendblueMessages(invalidClaim)[0]?.content, "How about a Cold brew ($5.75) from Raposa Coffee?");
+
 const receipt = clampEnvelope(overclaim, { orderId: "ord_1", paymentVerified: true, receiptUrl: "https://sll-r.vercel.app/receipts/rcpt_1", receiptId: "rcpt_1" });
 assert.equal(receipt.claimLevel, "receipt_issued");
 assert.match(renderEnvelopeToSendblueMessages(receipt)[0]?.content ?? "", /Receipt:/);
