@@ -7,7 +7,9 @@
   "scripts": {
     "cli": "node --import tsx src/cli.ts",
     "server": "node --import tsx src/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "contract-smoke": "node --import tsx src/responseContractSmoke.ts",
+    "check": "npm run typecheck && npm run contract-smoke"
   },
   "engines": {
     "node": ">=20"

@@ -6,6 +6,9 @@ import { OrderRelay } from "./orderRelay.js";
 import { BuyerStore } from "./buyerStore.js";
 import { SllrMcp } from "./mcp.js";
 import { statusMessage, isTerminal, type WatchedOrder } from "./orderNotify.js";
+import { clampEnvelope, type SllrStateProof } from "./claimClamp.js";
+import { renderEnvelopeToSendblueMessages } from "./iMessageRenderer.js";
+import { parseEnvelope } from "./responseContract.js";
 
 // Sendblue iMessage server. One public POST route: /sendblue/inbound. Customers
 // text in → their per-number AgentCore replies → we send the reply back. When an
@@ -26,6 +29,7 @@ async function main() {
   // Orders created during the current turn, keyed by phone — used to append the
   // pay link + pickup code deterministically, never relying on the LLM to do it.
   const pendingOrder = new Map<string, { merchantId: string; orderId: string }>();
+  const turnProof = new Map<string, SllrStateProof>();
 
   // Poll a created order and message the customer on each meaningful transition
   // (payment cleared, accepted, ready, rejected, receipt). The backend (Vercel)
@@ -70,6 +74,7 @@ async function main() {
         buyer: buyers.get(number),
         onToolResult: (name, _args, result) => {
           void relay.onToolResult(number, name, result).catch((e) => log(`[relay] push failed: ${e?.message || e}`));
+          recordTurnProof(turnProof, number, name, result);
           if (name === "create_order") {
             const order = (result as { order?: { id?: string; merchantId?: string } } | undefined)?.order;
             if (order?.id) pendingOrder.set(number, { merchantId: String(order.merchantId ?? ""), orderId: String(order.id) });
@@ -104,12 +109,17 @@ async function main() {
     void sendblue.markRead(msg.fromNumber, msg.sendblueNumber).catch(() => {});
     void sendblue.sendTyping(msg.fromNumber, msg.sendblueNumber).catch(() => {});
     pendingOrder.delete(msg.fromNumber);
-    const { agent } = await customerAgent(msg.fromNumber);
+    turnProof.set(msg.fromNumber, {});
+    const { agent, buyerId } = await customerAgent(msg.fromNumber);
     let reply: string;
     try {
-      reply = await agent.send(msg.content);
+      const rawReply = await agent.send(msg.content);
+      const envelope = parseEnvelope(rawReply, { conversationId: msg.fromNumber, buyerId, channel: "imessage" });
+      reply = renderEnvelopeToSendblueMessages(clampEnvelope(envelope, turnProof.get(msg.fromNumber)))[0]?.content ?? "";
     } catch (error) {
       reply = `⚠️ Sorry, something went wrong: ${error instanceof Error ? error.message : "agent error"}`;
+    } finally {
+      turnProof.delete(msg.fromNumber);
     }
     // Deterministic payment surface: if an order was created this turn, append the
     // pickup code + pay link ourselves so it never depends on the LLM remembering.
@@ -206,6 +216,55 @@ function paymentBlock(optsResult: unknown): string {
   if (pay) lines.push(`💳 Pay now (Apple Pay / card): ${pay.url}`);
   else lines.push("💵 Pay at the counter when you pick up.");
   return lines.join("\n");
+}
+
+function recordTurnProof(store: Map<string, SllrStateProof>, number: string, name: string, result: unknown): void {
+  const current = store.get(number);
+  if (!current) return;
+  const value = objectRecord(result);
+  if (name === "quote_order") {
+    const quoteId = stringField(value, "quoteId") || stringField(objectRecord(value.persistedQuote), "id");
+    if (quoteId) current.quoteId = quoteId;
+    return;
+  }
+  if (name === "create_order") {
+    const order = objectRecord(value.order);
+    const orderId = stringField(order, "id");
+    if (orderId) current.orderId = orderId;
+    const payment = objectRecord(order.payment);
+    if (stringField(payment, "status") === "verified") current.paymentVerified = true;
+    recordReceiptProof(current, objectRecord(order.receipt));
+    return;
+  }
+  if (name === "check_order_status") {
+    const order = objectRecord(value.order);
+    const orderId = stringField(order, "id");
+    if (orderId) current.orderId = orderId;
+    const status = stringField(order, "status");
+    if (status === "accepted" || status === "ready" || status === "fulfilled") current.merchantStatus = status;
+    if (status === "payment_backed" || status === "receipt_issued") current.paymentVerified = true;
+    const payment = objectRecord(order.payment);
+    if (stringField(payment, "status") === "verified") current.paymentVerified = true;
+    recordReceiptProof(current, objectRecord(order.receipt));
+  }
+}
+
+function recordReceiptProof(proof: SllrStateProof, receipt: Record<string, unknown>): void {
+  const receiptId = stringField(receipt, "receiptMemoryId");
+  const receiptUrl = stringField(receipt, "claimUrl");
+  const receiptHash = stringField(receipt, "receiptHash");
+  if (receiptId) proof.receiptId = receiptId;
+  if (receiptUrl) proof.receiptUrl = receiptUrl;
+  if (receiptHash) proof.receiptHash = receiptHash;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function stringField(value: Record<string, unknown>, key: string): string {
+  const field = value[key];
+  return typeof field === "string" ? field : "";
 }
 
 main().catch((error) => {
