@@ -1515,6 +1515,28 @@ async function main() {
       throw new Error(`Raposa pilot kit was not generated: ${JSON.stringify(raposaKit)}`);
     }
 
+    // Merchant capability packet: the agent-reality contract on get_merchant.
+    const raposaProfile = await getJson(origin, "/merchants/raposa-coffee") as {
+      capabilities?: { stripe_checkout?: boolean; counter_pay?: boolean; refunds?: boolean; fulfillment_status?: string };
+      unsupported?: string[];
+    };
+    if (
+      raposaProfile.capabilities?.stripe_checkout !== true
+      || raposaProfile.capabilities?.counter_pay !== true
+      || raposaProfile.capabilities?.refunds !== false
+      || raposaProfile.capabilities?.fulfillment_status !== "merchant_terminal"
+      || !raposaProfile.unsupported?.includes("inventory guarantee")
+    ) {
+      throw new Error(`Merchant capability packet missing/incorrect: ${JSON.stringify(raposaProfile.capabilities)}`);
+    }
+    // A non-Stripe merchant must report card checkout as unsupported.
+    const nounProfile = await getJson(origin, "/merchants/noun-coffee") as {
+      capabilities?: { stripe_checkout?: boolean }; unsupported?: string[];
+    };
+    if (nounProfile.capabilities?.stripe_checkout !== false || !nounProfile.unsupported?.includes("card checkout")) {
+      throw new Error(`Non-Stripe merchant capability packet wrong: ${JSON.stringify(nounProfile)}`);
+    }
+
     const raposaMenu = await getJson(origin, "/merchants/raposa-coffee/menu") as {
       catalog?: Array<{ id?: string; prepMinutes?: number }>;
       menuSections?: Array<{ id?: string; items?: Array<{ id?: string }> }>;

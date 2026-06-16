@@ -68,11 +68,42 @@ export function listMerchants() {
   };
 }
 
+// Capability packet (spec: bounded-llm-action-settlement-rail). Derived from the
+// merchant's real rails/fulfillment so an agent client stays inside reality — it
+// can see what SLL-R can actually do for this merchant, and what it cannot.
+export function merchantCapabilityPacket(merchant: MerchantProfile) {
+  const rails = merchant.paymentRails;
+  return {
+    capabilities: {
+      catalog_search: true,
+      live_quote: true,
+      create_order: true,
+      stripe_checkout: rails.includes("stripe"),
+      line_pay: rails.includes("line_pay"),
+      counter_pay: rails.includes("counter"),
+      solana_pay: rails.includes("solana_pay"),
+      base_usdc: rails.includes("base_usdc"),
+      pickup: merchant.fulfillment.includes("pickup"),
+      shipping: merchant.fulfillment.includes("shipping"),
+      fulfillment_status: "merchant_terminal" as const,
+      refunds: false,
+    },
+    // Things the rail explicitly does NOT guarantee — the agent must not claim them.
+    unsupported: [
+      "live delivery ETA",
+      "inventory guarantee",
+      "reservation booking",
+      ...(rails.includes("stripe") ? [] : ["card checkout"]),
+    ],
+  };
+}
+
 export function getMerchant(merchantId: string) {
   const merchant = requireMerchant(merchantId);
   return {
     product: "SLL-R merchant profile",
     merchant,
+    ...merchantCapabilityPacket(merchant),
     links: {
       menu: `/merchants/${merchant.id}/menu`,
       quote: `/merchants/${merchant.id}/quote`,
