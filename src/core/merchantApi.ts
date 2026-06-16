@@ -2,6 +2,9 @@ import { attachPaymentProof, createOrder, fulfillOrder, getOrder, listOrders } f
 import { quoteOrder } from "./quote.js";
 import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
 import { recurringSuggestion } from "./recurring.js";
+import { persistQuote } from "./quotes.js";
+import { grantConsent, validateConsentForOrder, expectedConfirmation } from "./consent.js";
+import { centsFromUsd } from "./money.js";
 import type { MerchantProfile, OrderRequest, PaymentRail, QuoteRequest } from "../types.js";
 
 function requireMerchant(merchantId: string) {
@@ -124,16 +127,52 @@ export function getMerchantMenu(merchantId: string) {
   };
 }
 
-export function quoteMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
+// Consent gate is OPT-IN so existing callers (REST, MCP, recurring, etc.) keep
+// working; flip SLLR_REQUIRE_CONSENT=true to enforce quote→consent→order.
+function consentRequired(): boolean {
+  return process.env.SLLR_REQUIRE_CONSENT === "true";
+}
+
+export async function quoteMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
   requireMerchant(merchantId);
+  const quote = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
+  // Persist feasible quotes so consent + the order can bind to a quoteId.
+  const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
+  const intent = typeof payload.userIntent === "string" ? payload.userIntent : "";
+  const stored = await persistQuote(merchantId, quote, buyerId, intent);
   return {
     product: "SLL-R merchant quote",
-    quote: quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest),
+    quote,
+    ...(stored
+      ? { quoteId: stored.id, amountUsd: stored.amountUsd, expiresAt: stored.expiresAt, confirmationText: expectedConfirmation(stored) }
+      : {}),
   };
+}
+
+// Grant consent against a stored quote. buyerId comes from the resolved session
+// (never client input).
+export async function grantMerchantConsent(payload: Record<string, unknown>) {
+  const quoteId = String(payload.quoteId || "");
+  const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
+  const confirmationText = typeof payload.confirmationText === "string" ? payload.confirmationText : undefined;
+  const consent = await grantConsent({ quoteId, buyerId, confirmationText });
+  return { product: "SLL-R consent receipt", consent, next: "create the order with this quoteId + consentId." };
 }
 
 export async function createMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
   requireMerchant(merchantId);
+  // Opt-in policy gate: no quote-bound consent → no order.
+  if (consentRequired()) {
+    const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
+    const quoteId = String(payload.quoteId || "");
+    const consentId = String(payload.consentId || "");
+    const { consent } = await validateConsentForOrder(quoteId, consentId, buyerId);
+    // Order amount must equal the consented quote amount (catch price drift).
+    const fresh = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
+    if (!fresh.feasible || !fresh.item || centsFromUsd(fresh.item.subtotalUsd) !== centsFromUsd(consent.amountUsd)) {
+      throw Object.assign(new Error(`Price changed since consent ($${consent.amountUsd}) — request a fresh quote + consent.`), { status: 409, requiredNextStep: "quote_order" });
+    }
+  }
   const result = await createOrder(bodyWithMerchant(merchantId, payload) as OrderRequest);
   return {
     product: "SLL-R merchant order",

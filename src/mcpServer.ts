@@ -7,6 +7,7 @@ import {
   listMerchantOrders,
   listMerchants,
   quoteMerchantOrder,
+  grantMerchantConsent,
 } from "./core/merchantApi.js";
 import { acceptOrder, fulfillOrder, getOrder, listOrdersForBuyer, markOrderReady, rejectOrder } from "./core/orders.js";
 import { setItemAvailability } from "./core/availability.js";
@@ -97,17 +98,32 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "quote_order",
-    description: "Quote buyer intent against the merchant catalog, budget, quantity, and pickup or shipping deadline. Always quote before creating an order.",
+    description: "Quote buyer intent against the merchant catalog, budget, quantity, and pickup or shipping deadline. Always quote before creating an order. Returns a quoteId + confirmationText to drive request_consent.",
     inputSchema: {
       type: "object",
       required: ["merchantId", "userIntent"],
       properties: quoteProperties,
     },
-    handler: (args) => quoteMerchantOrder(requireString(args, "merchantId"), args),
+    handler: (args, _origin, buyerId) =>
+      quoteMerchantOrder(requireString(args, "merchantId"), buyerId ? { ...args, buyerId } : args),
+  },
+  {
+    name: "request_consent",
+    description: "Record the buyer's quote-bound consent before creating an order. Pass the quoteId from quote_order; optionally pass the exact confirmationText the buyer sent. Returns a consentId for create_order. (Only enforced when the rail runs with SLLR_REQUIRE_CONSENT.)",
+    inputSchema: {
+      type: "object",
+      required: ["quoteId"],
+      properties: {
+        quoteId: { type: "string", description: "The quoteId returned by quote_order." },
+        confirmationText: { type: "string", description: "Optional: the buyer's exact confirmation, e.g. 'CONFIRM $6.50 Iced latte at Raposa Coffee'." },
+      },
+    },
+    handler: (args, _origin, buyerId) =>
+      grantMerchantConsent(buyerId ? { ...args, buyerId } : args),
   },
   {
     name: "create_order",
-    description: "Create an SLL-R order after the user accepts the quote. Do not create orders the user has not confirmed.",
+    description: "Create an SLL-R order after the user accepts the quote. Do not create orders the user has not confirmed. When the rail enforces consent (SLLR_REQUIRE_CONSENT), pass quoteId + consentId.",
     inputSchema: {
       type: "object",
       required: ["merchantId", "userIntent"],
@@ -120,6 +136,8 @@ const tools: ToolDefinition[] = [
           enum: ["counter", "checkout", "crypto"],
           description: "counter = pay at pickup, checkout = hosted checkout handoff, crypto = on-chain rail.",
         },
+        quoteId: { type: "string", description: "Quote to bind the order to (from quote_order). Required when SLLR_REQUIRE_CONSENT is on." },
+        consentId: { type: "string", description: "Consent receipt (from request_consent). Required when SLLR_REQUIRE_CONSENT is on." },
       },
     },
     handler: (args, _origin, buyerId) => {

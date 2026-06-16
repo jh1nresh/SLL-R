@@ -17,7 +17,7 @@ import { attachPaymentProof } from "./core/orders.js";
 import { getUnavailableItems, setItemAvailability } from "./core/availability.js";
 import { nearbyMerchants } from "./core/nearby.js";
 import { issueMerchantToken, requireMerchantAuth } from "./core/merchantAuth.js";
-import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder, requirePaymentVerifier } from "./core/merchantApi.js";
+import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, grantMerchantConsent, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder, requirePaymentVerifier } from "./core/merchantApi.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { merchantTerminalPage, standaloneAgentPage } from "./ui/agenticPos.js";
@@ -394,6 +394,11 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         const result = await payWithSavedCard(String(payload.orderId || ""), session.buyerId);
         return json(response, 200, { product: "SLL-R pay with saved card", ...result });
       }
+      // Grant quote-bound consent (spec: bounded-action rail). Buyer-aware: binds
+      // the consent to the resolved buyer so create_order can verify ownership.
+      if (request.method === "POST" && url.pathname === "/consent") {
+        return json(response, 200, await grantMerchantConsent(await bindBuyer(request, await body(request))));
+      }
       // --- Recurring orders (confirm-each) ---------------------------------
       // Create a recurring subscription ("usual" + weekly schedule). Buyer-gated.
       if (request.method === "POST" && url.pathname === "/buyer/recurring") {
@@ -523,7 +528,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, 200, getMerchantMenu(merchantId));
         }
         if (request.method === "POST" && action === "quote") {
-          return json(response, 200, quoteMerchantOrder(merchantId, await body(request)));
+          return json(response, 200, await quoteMerchantOrder(merchantId, await bindBuyer(request, await body(request))));
         }
         if (request.method === "POST" && action === "orders") {
           return json(response, 201, await createMerchantOrder(merchantId, await bindBuyer(request, await body(request))));

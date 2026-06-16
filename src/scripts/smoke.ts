@@ -4,6 +4,8 @@ import { createHmac } from "node:crypto";
 import { createSllrServer } from "../server.js";
 import { resetStoreForTest, sllrStore, storeBackendName } from "../core/store.js";
 import { confirmRun, listPendingRuns, sweepDueSubscriptions } from "../core/recurring.js";
+import { getQuote } from "../core/quotes.js";
+import { grantConsent } from "../core/consent.js";
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -645,6 +647,70 @@ async function smokeStoreBackend() {
   });
   if (storeBackendName() !== "memory") {
     throw new Error("Store should fall back to memory backend after KV env is cleared.");
+  }
+}
+
+// Quote→consent→order gate (opt-in SLLR_REQUIRE_CONSENT). Verifies "no quote /
+// no consent → no order", quote-bound consent, price-drift block, and expiry.
+async function smokeConsentGate(origin: string) {
+  const prev = process.env.SLLR_REQUIRE_CONSENT;
+  process.env.SLLR_REQUIRE_CONSENT = "true";
+  const order = (body: Record<string, unknown>) =>
+    fetch(`${origin}/merchants/raposa-coffee/orders`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+  try {
+    const cold = { userIntent: "cold brew in 10 minutes", deadlineMinutes: 10, paymentMode: "counter" };
+
+    // 1. create_order with neither quote nor consent → blocked.
+    const bare = await order(cold);
+    if (bare.status !== 409) throw new Error(`order without consent should be 409, got ${bare.status}`);
+
+    // 2. quote → returns a quoteId + confirmation text.
+    const q = await postJson(origin, "/merchants/raposa-coffee/quote", cold) as { quoteId?: string; amountUsd?: string; confirmationText?: string };
+    if (!q.quoteId?.startsWith("quote_") || !q.confirmationText?.startsWith("CONFIRM $")) {
+      throw new Error(`quote did not return a bindable quoteId: ${JSON.stringify(q)}`);
+    }
+
+    // 3. create_order with a quote but no consent → still blocked.
+    const noConsent = await order({ ...cold, quoteId: q.quoteId });
+    if (noConsent.status !== 409) throw new Error(`order with quote but no consent should be 409, got ${noConsent.status}`);
+
+    // 4. consent with a wrong confirmation phrase → 422.
+    const badText = await fetch(`${origin}/consent`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ quoteId: q.quoteId, confirmationText: "yes" }),
+    });
+    if (badText.status !== 422) throw new Error(`bad confirmation text should be 422, got ${badText.status}`);
+
+    // 5. consent ok → consentId.
+    const c = await postJson(origin, "/consent", { quoteId: q.quoteId }) as { consent?: { id?: string } };
+    if (!c.consent?.id?.startsWith("cons_")) throw new Error(`consent not granted: ${JSON.stringify(c)}`);
+
+    // 6. create_order with quote + consent → order created.
+    const okRes = await order({ ...cold, quoteId: q.quoteId, consentId: c.consent.id });
+    const ok = await okRes.json() as { order?: { id?: string } };
+    if (!okRes.ok || !ok.order?.id) throw new Error(`consented order should be created: ${okRes.status} ${JSON.stringify(ok)}`);
+
+    // 7. price drift: reuse the cold-brew consent but order a different (pricier)
+    //    item → fresh quote amount ≠ consent amount → blocked.
+    const drift = await order({ userIntent: "iced latte in 10 minutes", deadlineMinutes: 10, paymentMode: "counter", quoteId: q.quoteId, consentId: c.consent.id });
+    if (drift.status !== 409) throw new Error(`price-drift order should be 409, got ${drift.status}`);
+
+    // 8. expired quote → consent refused (deterministic via injected now).
+    const q2 = await postJson(origin, "/merchants/raposa-coffee/quote", cold) as { quoteId?: string };
+    const stored = await getQuote(q2.quoteId!);
+    if (!stored) throw new Error("quote was not persisted for expiry test.");
+    const afterExpiry = new Date(new Date(stored.expiresAt).getTime() + 1000).toISOString();
+    let refused = false;
+    try {
+      await grantConsent({ quoteId: stored.id, buyerId: stored.buyerId }, afterExpiry);
+    } catch {
+      refused = true;
+    }
+    if (!refused) throw new Error("consent on an expired quote should be refused.");
+  } finally {
+    if (prev === undefined) delete process.env.SLLR_REQUIRE_CONSENT; else process.env.SLLR_REQUIRE_CONSENT = prev;
   }
 }
 
@@ -1463,6 +1529,7 @@ async function main() {
     await smokeMcp(origin);
     await smokeReceiptGating(origin);
     await smokeBuyerAuth(origin);
+    await smokeConsentGate(origin);
     await smokeStripePrepay(origin);
     await smokeCardOnFile(origin);
     await smokeCheckoutSavesCard(origin);
