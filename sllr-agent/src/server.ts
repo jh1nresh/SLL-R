@@ -4,6 +4,8 @@ import { createAgentSession, type AgentSession } from "./core.js";
 import { SendblueClient, parseInbound, verifyWebhookSecret } from "./sendblue.js";
 import { OrderRelay } from "./orderRelay.js";
 import { BuyerStore } from "./buyerStore.js";
+import { AgentCardStore } from "./agentCardStore.js";
+import { onboardingStep, parseMerchantContext, agentConstraintPreamble, type AgentCard } from "./agentCard.js";
 import { SllrMcp } from "./mcp.js";
 import { statusMessage, isTerminal, type WatchedOrder } from "./orderNotify.js";
 import { clampEnvelope, type SllrStateProof } from "./claimClamp.js";
@@ -65,6 +67,15 @@ async function main() {
   // Persistent phone → buyer mapping so a returning customer keeps the same
   // buyerId + order history across restarts (taste memory).
   const buyers = new BuyerStore(process.env.SLLR_BUYER_STORE?.trim() || ".sllr-buyers.json");
+  const cards = new AgentCardStore(process.env.SLLR_AGENT_CARD_STORE?.trim() || ".sllr-agent-cards.json");
+  const agentDefaultMerchant = process.env.SLLR_AGENT_DEFAULT_MERCHANT?.trim() || "";
+  const merchantName = async (id: string): Promise<string> => {
+    try {
+      const r = await mcp.callTool("get_merchant", { merchantId: id }) as { merchant?: { name?: string } };
+      if (r?.merchant?.name) return r.merchant.name;
+    } catch { /* best-effort */ }
+    return id.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  };
 
   // One agent session per customer phone number (in-memory chat history; orders
   // + buyer identity persist via SLL-R + the buyer store).
@@ -110,12 +121,28 @@ async function main() {
     // conversation feels human. Best-effort — never block or fail the turn.
     void sendblue.markRead(msg.fromNumber, msg.sendblueNumber).catch(() => {});
     void sendblue.sendTyping(msg.fromNumber, msg.sendblueNumber).catch(() => {});
+    // Agent Card gate: scope to a merchant (QR context > last shop > default). If
+    // there's no active card yet, run the 3-step onboarding and stop this turn.
+    const cardMerchant = parseMerchantContext(msg.content) || cards.lastMerchantFor(msg.fromNumber) || agentDefaultMerchant;
+    let activeCard: AgentCard | undefined;
+    if (cardMerchant) {
+      const existing = cards.get(msg.fromNumber, cardMerchant);
+      if (!existing || existing.status !== "active") {
+        const step = onboardingStep(existing ?? null, msg.content, msg.fromNumber, cardMerchant, await merchantName(cardMerchant), new Date().toISOString());
+        cards.set(step.card);
+        await sendblue.sendMessage(msg.fromNumber, step.reply, msg.sendblueNumber);
+        return;
+      }
+      activeCard = existing;
+    }
     pendingOrder.delete(msg.fromNumber);
     turnProof.set(msg.fromNumber, {});
     const { agent, buyerId } = await customerAgent(msg.fromNumber);
     let reply: string;
     try {
-      const rawReply = await agent.send(msg.content);
+      // Active card → its constraints ride along on the turn.
+      const agentInput = activeCard ? agentConstraintPreamble(activeCard, await merchantName(activeCard.merchantId)) + msg.content : msg.content;
+      const rawReply = await agent.send(agentInput);
       const envelope = parseEnvelope(rawReply, { conversationId: msg.fromNumber, buyerId, channel: "imessage" });
       reply = renderEnvelopeToSendblueMessages(clampEnvelope(envelope, turnProof.get(msg.fromNumber)))[0]?.content ?? "";
     } catch (error) {

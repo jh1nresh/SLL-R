@@ -6,3 +6,6 @@ dist/
 # local channel->buyer mapping (bearer tokens)
 .sllr-buyers.json
 .sllr-buyers.json.tmp
+# local per-merchant Agent Card store
+.sllr-agent-cards.json
+.sllr-agent-cards.json.tmp
