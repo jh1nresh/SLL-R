@@ -257,6 +257,24 @@ const nounCoffeeUberEatsPickupCatalog: CatalogItem[] = [
 ];
 
 export const merchantProfiles: Record<string, MerchantProfile> = {
+  // Hermes hackathon demo: the "Game Day Order Lane". Busy before kickoff — the
+  // recommender must pick what's fast + in budget + on-taste and reject the rest.
+  "game-day-boba": {
+    id: "game-day-boba",
+    name: "Game Day Boba Bar",
+    category: "boba",
+    location: "Los Angeles",
+    geo: { lat: 34.0407, lng: -118.2468 },
+    fulfillment: ["pickup"],
+    paymentRails: ["counter", "stripe"],
+    humanApproval: { requiredAboveUsd: "25.00" },
+    catalog: [
+      { id: "brown-sugar-boba", name: "Brown Sugar Boba", amountUsd: "6.50", fulfillment: ["pickup"], productionClass: "cold", prepMinutes: 5, inventory: 50, tags: ["cold", "sweet", "boba", "milk", "caffeine"] },
+      { id: "fruit-tea", name: "Fruit Tea", amountUsd: "5.75", fulfillment: ["pickup"], productionClass: "cold", prepMinutes: 2, inventory: 60, tags: ["cold", "fast", "fruit", "caffeine_free", "light"] },
+      { id: "fried-chicken", name: "Fried Chicken", amountUsd: "9.00", fulfillment: ["pickup"], productionClass: "general", prepMinutes: 18, inventory: 30, tags: ["hot", "food", "savory"] },
+      { id: "taro-milk", name: "Taro Milk", amountUsd: "6.25", fulfillment: ["pickup"], productionClass: "cold", prepMinutes: 5, inventory: 40, tags: ["cold", "sweet", "taro", "milk"] },
+    ],
+  },
   "raposa-coffee": {
     id: "raposa-coffee",
     name: "Raposa Coffee",

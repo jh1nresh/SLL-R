@@ -9,6 +9,7 @@ import {
   quoteMerchantOrder,
   grantMerchantConsent,
 } from "./core/merchantApi.js";
+import { recommendFromMenu } from "./core/menuRecommend.js";
 import { acceptOrder, fulfillOrder, getOrder, listOrdersForBuyer, markOrderReady, rejectOrder } from "./core/orders.js";
 import { setItemAvailability } from "./core/availability.js";
 import { requireMerchantAuth } from "./core/merchantAuth.js";
@@ -106,6 +107,29 @@ const tools: ToolDefinition[] = [
     },
     handler: (args, _origin, buyerId) =>
       quoteMerchantOrder(requireString(args, "merchantId"), buyerId ? { ...args, buyerId } : args),
+  },
+  {
+    name: "recommend_order",
+    description: "Recommend what to order under live constraints — time, budget, and taste tags — over the merchant's live menu/availability. Returns picks (fastest first, with ETA + price) AND the rejected alternatives with reasons (sold out / too slow / over budget / wrong tag). Use for 'what can I get in N minutes' asks. No hallucinated items or ETAs.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId"],
+      properties: {
+        merchantId: quoteProperties.merchantId,
+        deadlineMinutes: { type: "number", description: "Max wait the customer has, e.g. 10." },
+        maxSpendUsd: { type: "string", description: "Budget cap as a decimal string, e.g. '10.00'." },
+        includeTags: { type: "array", items: { type: "string" }, description: "Required attributes, e.g. ['cold']." },
+        excludeTags: { type: "array", items: { type: "string" }, description: "Attributes to avoid, e.g. ['sweet']." },
+        limit: { type: "number", description: "Max picks to return (default 3)." },
+      },
+    },
+    handler: (args) => recommendFromMenu(requireString(args, "merchantId"), {
+      ...(args.deadlineMinutes !== undefined ? { deadlineMinutes: Number(args.deadlineMinutes) } : {}),
+      ...(args.maxSpendUsd !== undefined ? { maxSpendUsd: String(args.maxSpendUsd) } : {}),
+      ...(Array.isArray(args.includeTags) ? { includeTags: (args.includeTags as unknown[]).map(String) } : {}),
+      ...(Array.isArray(args.excludeTags) ? { excludeTags: (args.excludeTags as unknown[]).map(String) } : {}),
+      ...(args.limit !== undefined ? { limit: Number(args.limit) } : {}),
+    }),
   },
   {
     name: "request_consent",

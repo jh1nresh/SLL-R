@@ -7,6 +7,7 @@ import { confirmRun, listPendingRuns, sweepDueSubscriptions } from "../core/recu
 import { getQuote } from "../core/quotes.js";
 import { grantConsent } from "../core/consent.js";
 import { getLoop, loopIdForQuote, loopIdForOrder } from "../core/actionLoop.js";
+import { setItemAvailability } from "../core/availability.js";
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -649,6 +650,30 @@ async function smokeStoreBackend() {
   if (storeBackendName() !== "memory") {
     throw new Error("Store should fall back to memory backend after KV env is cleared.");
   }
+}
+
+// Game Day Boba demo (spec: local-commerce-os-for-agents). The signature move:
+// "what can I get in 10 min, cold, not too sweet, under $10" → Fruit Tea picked;
+// fried chicken (too slow), brown sugar (sweet), taro (86'd) rejected with reasons.
+async function smokeGameDayBoba(origin: string) {
+  await setItemAvailability("game-day-boba", "taro-milk", false); // 86 taro for the demo
+  const rec = await postJson(origin, "/merchants/game-day-boba/recommend", {
+    deadlineMinutes: 10, maxSpendUsd: "10.00", includeTags: ["cold"], excludeTags: ["sweet"],
+  }) as {
+    picks?: Array<{ itemId?: string; reason?: string }>;
+    rejected?: Array<{ itemId?: string; reason?: string }>;
+  };
+  if (rec.picks?.[0]?.itemId !== "fruit-tea") {
+    throw new Error(`game-day-boba should pick fruit-tea first: ${JSON.stringify(rec.picks)}`);
+  }
+  const rejectOf = (id: string) => rec.rejected?.find((r) => r.itemId === id);
+  const chicken = rejectOf("fried-chicken");
+  const sweet = rejectOf("brown-sugar-boba");
+  const taro = rejectOf("taro-milk");
+  if (!chicken?.reason?.includes("min")) throw new Error(`fried chicken should be rejected as too slow: ${JSON.stringify(chicken)}`);
+  if (!sweet?.reason?.includes("sweet")) throw new Error(`brown sugar boba should be rejected as sweet: ${JSON.stringify(sweet)}`);
+  if (taro?.reason !== "sold out") throw new Error(`86'd taro should be rejected as sold out: ${JSON.stringify(taro)}`);
+  await setItemAvailability("game-day-boba", "taro-milk", true); // restore
 }
 
 // Action-loop logging (spec: loop-engineering, Phase 1). Verifies quote/order/
@@ -1591,6 +1616,7 @@ async function main() {
     await smokeBuyerAuth(origin);
     await smokeConsentGate(origin);
     await smokeActionLoop(origin);
+    await smokeGameDayBoba(origin);
     await smokeStripePrepay(origin);
     await smokeCardOnFile(origin);
     await smokeCheckoutSavesCard(origin);

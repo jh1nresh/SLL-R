@@ -19,6 +19,7 @@ import { nearbyMerchants } from "./core/nearby.js";
 import { issueMerchantToken, requireMerchantAuth } from "./core/merchantAuth.js";
 import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, grantMerchantConsent, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder, requirePaymentVerifier } from "./core/merchantApi.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
+import { recommendFromMenu } from "./core/menuRecommend.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { merchantTerminalPage, standaloneAgentPage } from "./ui/agenticPos.js";
 import { standaloneAgentMessage } from "./core/standaloneAgent.js";
@@ -529,6 +530,9 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         }
         if (request.method === "POST" && action === "quote") {
           return json(response, 200, await quoteMerchantOrder(merchantId, await bindBuyer(request, await body(request))));
+        }
+        if (request.method === "POST" && action === "recommend") {
+          return json(response, 200, await recommendFromMenu(merchantId, await body(request)));
         }
         if (request.method === "POST" && action === "orders") {
           return json(response, 201, await createMerchantOrder(merchantId, await bindBuyer(request, await body(request))));
