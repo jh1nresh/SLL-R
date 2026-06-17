@@ -61,6 +61,37 @@ Expose `:8787` publicly (e.g. `ngrok http 8787` or deploy to Railway/Render) and
 point your **Sendblue webhook** (dashboard → Settings → Webhooks) at
 `https://<host>/sendblue/inbound`.
 
+## Deploy (Railway)
+
+Use Railway when the iMessage agent needs to be always-on for other people. Do
+not point Sendblue at a temporary local tunnel for production demos.
+
+```bash
+cd /Users/jhinresh/projects/sll-r
+railway init -n sllr-agent
+railway add --service sllr-agent
+
+# Set these on the Railway service:
+# GEMINI_API_KEY
+# GEMINI_MODEL=gemini-2.5-flash
+# SLLR_BASE_URL=https://sll-r.vercel.app
+# SENDBLUE_API_KEY_ID
+# SENDBLUE_API_SECRET
+# SENDBLUE_FROM_NUMBER
+# SENDBLUE_WEBHOOK_SECRET
+# SLLR_MERCHANT_CHANNELS
+
+railway up sllr-agent --path-as-root --service sllr-agent --ci
+railway domain --service sllr-agent
+curl https://<railway-domain>/health
+```
+
+After the health check passes, update the Sendblue receive webhook to:
+
+```text
+https://<railway-domain>/sendblue/inbound
+```
+
 Flow:
 
 ```
