@@ -10,6 +10,7 @@ import {
   grantMerchantConsent,
 } from "./core/merchantApi.js";
 import { recommendFromMenu } from "./core/menuRecommend.js";
+import { createVerifiedReview } from "./core/verifiedReview.js";
 import { acceptOrder, fulfillOrder, getOrder, listOrdersForBuyer, markOrderReady, rejectOrder } from "./core/orders.js";
 import { setItemAvailability } from "./core/availability.js";
 import { requireMerchantAuth } from "./core/merchantAuth.js";
@@ -130,6 +131,38 @@ const tools: ToolDefinition[] = [
       ...(Array.isArray(args.excludeTags) ? { excludeTags: (args.excludeTags as unknown[]).map(String) } : {}),
       ...(args.limit !== undefined ? { limit: Number(args.limit) } : {}),
     }),
+  },
+  {
+    name: "create_verified_review",
+    description: "Create a verified review for a completed order — only allowed once the order carries proof (payment / merchant-ready / pickup-claim). Records the agent's decision + promised-vs-actual ETA + the buyer's feedback; feeds taste memory + merchant ETA reliability. Requires a buyer session.",
+    inputSchema: {
+      type: "object",
+      required: ["orderId"],
+      properties: {
+        orderId: { type: "string", description: "The completed order to review." },
+        feedback: {
+          type: "object",
+          description: "Buyer feedback.",
+          properties: {
+            tooSpicy: { type: "boolean" }, tooSweet: { type: "boolean" }, tooSalty: { type: "boolean" },
+            wouldRepeat: { type: "boolean" }, rating: { type: "number" }, note: { type: "string" },
+          },
+        },
+        agentDecision: {
+          type: "object",
+          description: "Why the agent recommended this (for the next agent).",
+          properties: {
+            userIntent: { type: "string" }, whyRecommended: { type: "string" },
+            alternativesRejected: { type: "array", items: { type: "string" } },
+          },
+        },
+      },
+    },
+    handler: async (args, _origin, buyerId) => {
+      if (!buyerId) throw Object.assign(new Error("No buyer session. Connect with an Authorization: Bearer <buyer token> header."), { status: 401 });
+      const review = await createVerifiedReview(requireString(args, "orderId"), { feedback: args.feedback as never, agentDecision: args.agentDecision as never }, buyerId);
+      return { product: "SLL-R verified review", review };
+    },
   },
   {
     name: "request_consent",

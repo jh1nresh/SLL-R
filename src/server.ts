@@ -20,6 +20,7 @@ import { issueMerchantToken, requireMerchantAuth } from "./core/merchantAuth.js"
 import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, grantMerchantConsent, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder, requirePaymentVerifier } from "./core/merchantApi.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { recommendFromMenu } from "./core/menuRecommend.js";
+import { createVerifiedReview, listMerchantReviews, getMerchantReliability } from "./core/verifiedReview.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { merchantTerminalPage, standaloneAgentPage } from "./ui/agenticPos.js";
 import { standaloneAgentMessage } from "./core/standaloneAgent.js";
@@ -534,6 +535,13 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         if (request.method === "POST" && action === "recommend") {
           return json(response, 200, await recommendFromMenu(merchantId, await body(request)));
         }
+        if (request.method === "GET" && action === "reviews") {
+          return json(response, 200, {
+            product: "SLL-R verified reviews",
+            reliability: await getMerchantReliability(merchantId),
+            reviews: await listMerchantReviews(merchantId),
+          });
+        }
         if (request.method === "POST" && action === "orders") {
           return json(response, 201, await createMerchantOrder(merchantId, await bindBuyer(request, await body(request))));
         }
@@ -728,6 +736,17 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
             return html(response, order ? 200 : 404, orderLandingPage(order, url.searchParams));
           }
           return json(response, order ? 200 : 404, order ? { product: "SLL-R merchant terminal", order } : { error: `Unknown order: ${orderId}` });
+        }
+        if (request.method === "POST" && action === "review") {
+          // Verified review: buyer submits feedback; only proof-backed orders qualify.
+          const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+          const payload = await body(request);
+          const review = await createVerifiedReview(
+            orderId,
+            { feedback: payload.feedback as never, agentDecision: payload.agentDecision as never },
+            session?.buyerId ?? null,
+          );
+          return json(response, 201, { product: "SLL-R verified review", review });
         }
         if (request.method === "POST" && action === "accept") {
           const payload = await body(request);

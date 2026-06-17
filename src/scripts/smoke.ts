@@ -652,6 +652,52 @@ async function smokeStoreBackend() {
   }
 }
 
+// Verified review / outcome layer (spec: local-commerce-os-for-agents §5). A
+// review only exists with proof; it records verifiedBy + eta + feedback and feeds
+// merchant ETA reliability.
+async function smokeVerifiedReview(origin: string) {
+  const s = await postJson(origin, "/buyer/session", { label: "review buyer" }) as { token?: string; buyerId?: string };
+  const token = s.token!;
+  const auth = { authorization: `Bearer ${token}` };
+  const created = await fetch(`${origin}/merchants/solyd/orders`, {
+    method: "POST", headers: { "content-type": "application/json", ...auth },
+    body: JSON.stringify({ userIntent: "Ship me a black MagSafe iPhone 16 case under $100", maxSpendUsd: "100.00", deliverByDays: 7, paymentMode: "checkout" }),
+  }).then((r) => r.json()) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+  const orderId = created.order?.id!;
+
+  // No proof yet → review blocked.
+  const early = await fetch(`${origin}/orders/${orderId}/review`, {
+    method: "POST", headers: { "content-type": "application/json", ...auth }, body: JSON.stringify({ feedback: { rating: 5 } }),
+  });
+  if (early.status !== 409) throw new Error(`review before proof should be 409, got ${early.status}`);
+
+  // Pay (demo webhook) → payment proof → eligible.
+  const prevWh = process.env.STRIPE_WEBHOOK_SECRET;
+  delete process.env.STRIPE_WEBHOOK_SECRET;
+  try {
+    await postJson(origin, "/webhooks/stripe", {
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_rev", payment_status: "paid", amount_total: Math.round(Number(created.order?.item?.subtotalUsd) * 100), metadata: { sllr_order_id: orderId, sllr_merchant_id: "solyd" } } },
+      demo: true,
+    });
+  } finally {
+    if (prevWh === undefined) delete process.env.STRIPE_WEBHOOK_SECRET; else process.env.STRIPE_WEBHOOK_SECRET = prevWh;
+  }
+
+  const reviewed = await postJson(origin, `/orders/${orderId}/review`, {
+    feedback: { rating: 5, wouldRepeat: true, note: "fast" },
+    agentDecision: { userIntent: "case under $100", whyRecommended: "in budget + fast", alternativesRejected: ["pricier case"] },
+  }, auth) as { review?: { verifiedBy?: string[]; agentUsable?: boolean; feedback?: { rating?: number }; agentDecision?: { whyRecommended?: string } } };
+  if (!reviewed.review?.verifiedBy?.includes("stripe_payment") || !reviewed.review.verifiedBy.includes("user_feedback")) {
+    throw new Error(`verified review missing proofs: ${JSON.stringify(reviewed.review)}`);
+  }
+  if (reviewed.review.agentUsable !== true || reviewed.review.feedback?.rating !== 5 || reviewed.review.agentDecision?.whyRecommended !== "in budget + fast") {
+    throw new Error(`verified review fields wrong: ${JSON.stringify(reviewed.review)}`);
+  }
+  const list = await getJson(origin, "/merchants/solyd/reviews") as { reviews?: Array<{ orderId?: string }> };
+  if (!list.reviews?.some((r) => r.orderId === orderId)) throw new Error(`merchant reviews missing the new review: ${JSON.stringify(list)}`);
+}
+
 // Game Day Boba demo (spec: local-commerce-os-for-agents). The signature move:
 // "what can I get in 10 min, cold, not too sweet, under $10" → Fruit Tea picked;
 // fried chicken (too slow), brown sugar (sweet), taro (86'd) rejected with reasons.
@@ -1617,6 +1663,7 @@ async function main() {
     await smokeConsentGate(origin);
     await smokeActionLoop(origin);
     await smokeGameDayBoba(origin);
+    await smokeVerifiedReview(origin);
     await smokeStripePrepay(origin);
     await smokeCardOnFile(origin);
     await smokeCheckoutSavesCard(origin);
