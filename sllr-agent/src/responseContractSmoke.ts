@@ -72,4 +72,21 @@ const receipt = clampEnvelope(overclaim, { orderId: "ord_1", paymentVerified: tr
 assert.equal(receipt.claimLevel, "receipt_issued");
 assert.match(renderEnvelopeToSendblueMessages(receipt)[0]?.content ?? "", /Receipt:/);
 
+// Pilot-closure Gap 4: the exact unsupported levels an earlier audit observed
+// ("quote", "quote_result") must clamp to chat_only — never leak as commerce
+// claims that weaken the overclaim guard.
+for (const bad of ["quote", "quote_result"]) {
+  const env = parseEnvelope(JSON.stringify({
+    version: "sllr.response.v0",
+    conversationId: "imessage",
+    channel: "imessage",
+    claimLevel: bad,
+    blocks: [{ type: "PlainText", text: "Cold brew is $5.75." }],
+    actions: [],
+    receipts: [],
+    guardrails: { requiresExplicitConsent: true, highestAllowedClaim: bad },
+  }), { conversationId: "+15550001111", channel: "imessage" });
+  assert.equal(env.claimLevel, "chat_only", `unsupported claimLevel "${bad}" must clamp to chat_only`);
+}
+
 console.log("SLL-R response contract smoke passed");
