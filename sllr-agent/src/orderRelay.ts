@@ -2,11 +2,15 @@
 // push it to the merchant's iMessage; the merchant replies 1/2/3 and we relay
 // the decision back to the customer.
 //
-// v0 scope: this is a CHANNEL RELAY. The merchant's decision is messaged to the
-// customer but does NOT yet mutate SLL-R order state — there is no merchant
-// order-status MCP tool. applyDecision() is the seam where that tool call lands.
+// The merchant's 1/2/3 reply mutates the CANONICAL SellerOrder.status via SLL-R's
+// merchant tools, then notifies the customer. If the status mutation fails the
+// customer is NOT told it succeeded — the order is re-queued and the error
+// surfaced (same no-overclaim discipline as the claim guard).
 
 import type { SendblueClient } from "./sendblue.js";
+
+// Minimal MCP surface the relay needs (the SllrMcp client satisfies this).
+export type McpCaller = { callTool(name: string, args: Record<string, unknown>, bearer?: string): Promise<unknown> };
 
 export type RelayOrder = {
   orderId: string;
@@ -21,6 +25,13 @@ export type RelayOrder = {
 type Decision = "accept" | "reject" | "ready";
 
 const DECISION_BY_DIGIT: Record<string, Decision> = { "1": "accept", "2": "reject", "3": "ready" };
+
+// decision → the SLL-R merchant MCP tool that mutates canonical SellerOrder.status.
+const TOOL_BY_DECISION: Record<Decision, string> = {
+  accept: "merchant_accept_order",
+  ready: "merchant_mark_ready",
+  reject: "merchant_reject_order",
+};
 
 // Pickup code matches SLL-R's derivation (paymentOptions.ts): first 6 chars of
 // the order id after the ord_ prefix, uppercased.
@@ -42,6 +53,11 @@ export class OrderRelay {
     private readonly channels: Record<string, string>,
     private readonly fallbackNumber: string,
     private readonly log: (msg: string) => void = () => {},
+    // Inject to mutate canonical order state on a merchant decision. Omitted →
+    // relay-only (back-compat). verifyToken authorizes the merchant tools; absent
+    // → demo:true (only accepted when SLL-R has no verifier secret configured).
+    private readonly mcp?: McpCaller,
+    private readonly verifyToken?: string,
   ) {
     this.merchantNumbers = new Set([...Object.values(channels), fallbackNumber].filter(Boolean));
   }
@@ -115,16 +131,30 @@ export class OrderRelay {
     const [order] = queue.splice(idx, 1);
     this.pending.set(fromNumber, queue);
 
-    await this.applyDecision(order, decision);
+    // Mutate canonical state FIRST. If it fails, re-queue and tell the merchant —
+    // never tell the customer about a state that didn't actually change.
+    try {
+      await this.applyDecision(order, decision);
+    } catch (error) {
+      queue.unshift(order);
+      this.pending.set(fromNumber, queue);
+      const reason = error instanceof Error ? error.message : "unknown error";
+      await this.sendblue.sendMessage(fromNumber, `⚠️ Couldn't update order ${order.pickupCode} (${reason}). It's still pending — try again.`);
+      this.log(`[relay] applyDecision failed for ${order.orderId}: ${reason}`);
+      return;
+    }
+
     await this.notifyCustomer(order, decision);
     await this.sendblue.sendMessage(fromNumber, `Got it — order ${order.pickupCode} marked ${decision}.`);
-    this.log(`[relay] merchant ${decision} order ${order.orderId}`);
+    this.log(`[relay] merchant ${decision} order ${order.orderId} → canonical status mutated`);
   }
 
-  // SEAM: where a future merchant order-status MCP tool call goes (accept/reject/
-  // ready → SLL-R order state). v0 is relay-only, so this is intentionally a no-op.
-  private async applyDecision(_order: RelayOrder, _decision: Decision): Promise<void> {
-    // TODO(step 3+): call SLL-R merchant status tool to mutate order state.
+  // Mutate canonical SellerOrder.status via SLL-R's merchant tool. Relay-only
+  // (no mcp injected) → no-op. Throws if the tool call fails (caller handles).
+  private async applyDecision(order: RelayOrder, decision: Decision): Promise<void> {
+    if (!this.mcp) return;
+    const auth = this.verifyToken ? { verificationToken: this.verifyToken } : { demo: true };
+    await this.mcp.callTool(TOOL_BY_DECISION[decision], { merchantId: order.merchantId, orderId: order.orderId, ...auth });
   }
 
   private async notifyCustomer(order: RelayOrder, decision: Decision): Promise<void> {

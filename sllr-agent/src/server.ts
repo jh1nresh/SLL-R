@@ -23,12 +23,16 @@ async function main() {
   const sb = loadSendblueConfig();          // Sendblue + merchant number
   const sendblue = new SendblueClient(sb);
   const log = (m: string) => process.stdout.write(`${m}\n`);
-  const relay = new OrderRelay(sendblue, sb.merchantChannels, sb.merchantNumber, log);
-  const merchantCount = new Set([...Object.values(sb.merchantChannels), sb.merchantNumber].filter(Boolean)).size;
 
-  // Shared MCP client for server-side lookups (payment options after an order).
+  // Shared MCP client for server-side lookups (payment options after an order)
+  // and for the relay to mutate canonical order state on a merchant decision.
   const mcp = new SllrMcp(config.sllrBaseUrl);
   await mcp.initialize();
+  // Merchant verifier secret authorizes the merchant status tools; absent →
+  // demo:true (only accepted when SLL-R has no verifier secret configured).
+  const merchantVerifyToken = process.env.SLLR_MERCHANT_VERIFY_TOKEN?.trim() || undefined;
+  const relay = new OrderRelay(sendblue, sb.merchantChannels, sb.merchantNumber, log, mcp, merchantVerifyToken);
+  const merchantCount = new Set([...Object.values(sb.merchantChannels), sb.merchantNumber].filter(Boolean)).size;
   // Orders created during the current turn, keyed by phone — used to append the
   // pay link + pickup code deterministically, never relying on the LLM to do it.
   const pendingOrder = new Map<string, { merchantId: string; orderId: string }>();
