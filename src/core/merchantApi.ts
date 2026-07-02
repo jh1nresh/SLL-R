@@ -163,7 +163,22 @@ export async function quoteMerchantOrder(merchantId: string, payload: Record<str
     product: "SLL-R merchant quote",
     quote,
     ...(stored
-      ? { quoteId: stored.id, amountUsd: stored.amountUsd, etaMinutes: stored.etaMinutes, expiresAt: stored.expiresAt, confirmationText: expectedConfirmation(stored) }
+      ? {
+        quoteId: stored.id,
+        amountUsd: stored.amountUsd,
+        etaMinutes: stored.etaMinutes,
+        expiresAt: stored.expiresAt,
+        confirmationText: expectedConfirmation(stored),
+        // Echo the order-relevant request params so a client can turn a pure
+        // "confirm" into create_order deterministically (no LLM re-guessing).
+        request: {
+          userIntent: intent,
+          ...(typeof payload.deadlineMinutes === "number" ? { deadlineMinutes: payload.deadlineMinutes } : {}),
+          ...(typeof payload.maxSpendUsd === "string" ? { maxSpendUsd: payload.maxSpendUsd } : {}),
+          ...(typeof payload.deliverByDays === "number" ? { deliverByDays: payload.deliverByDays } : {}),
+          ...(typeof payload.quantity === "number" ? { quantity: payload.quantity } : {}),
+        },
+      }
       : {}),
   };
 }

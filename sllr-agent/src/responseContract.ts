@@ -35,7 +35,10 @@ export type SllrBlock =
   | { type: "ClarifyingQuestion"; question: string; choices?: string[] };
 
 export type SllrAction =
-  | { id: "confirm_quote"; label: string; quoteId: string; confirmationText: string }
+  // merchantId/userIntent/expiresAt: optional order params so a host can turn a
+  // pure "confirm" into create_order deterministically (confirm fast-path)
+  // without re-asking the LLM. Older envelopes without them stay valid.
+  | { id: "confirm_quote"; label: string; quoteId: string; confirmationText: string; merchantId?: string; userIntent?: string; expiresAt?: string }
   | { id: "edit_order"; label: string; quoteId?: string }
   | { id: "pay_now"; label: string; orderId: string; url: string }
   | { id: "check_status"; label: string; orderId: string }
@@ -202,7 +205,15 @@ function validateAction(value: unknown): SllrAction {
   const v = record(value, "action");
   const id = expectString(v.id, "action.id");
   switch (id) {
-    case "confirm_quote": return { id, label: expectString(v.label, "action.label"), quoteId: expectString(v.quoteId, "action.quoteId"), confirmationText: expectString(v.confirmationText, "action.confirmationText") };
+    case "confirm_quote": return {
+      id,
+      label: expectString(v.label, "action.label"),
+      quoteId: expectString(v.quoteId, "action.quoteId"),
+      confirmationText: expectString(v.confirmationText, "action.confirmationText"),
+      merchantId: optionalString(v.merchantId, "action.merchantId"),
+      userIntent: optionalString(v.userIntent, "action.userIntent"),
+      expiresAt: optionalString(v.expiresAt, "action.expiresAt"),
+    };
     case "edit_order": return { id, label: expectString(v.label, "action.label"), quoteId: optionalString(v.quoteId, "action.quoteId") };
     case "pay_now": return { id, label: expectString(v.label, "action.label"), orderId: expectString(v.orderId, "action.orderId"), url: expectString(v.url, "action.url") };
     case "check_status": return { id, label: expectString(v.label, "action.label"), orderId: expectString(v.orderId, "action.orderId") };

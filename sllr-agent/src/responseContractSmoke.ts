@@ -89,4 +89,24 @@ for (const bad of ["quote", "quote_result"]) {
   assert.equal(env.claimLevel, "chat_only", `unsupported claimLevel "${bad}" must clamp to chat_only`);
 }
 
+// confirm_quote may carry the full order params (confirm fast-path); older
+// envelopes without them stay valid (covered by the fixtures above).
+const richConfirm = parseEnvelope(JSON.stringify({
+  version: "sllr.response.v0",
+  conversationId: "imessage",
+  channel: "imessage",
+  claimLevel: "quote_created",
+  blocks: [{ type: "PlainText", text: "Fruit Tea $5.75 — confirm?" }],
+  actions: [{ id: "confirm_quote", label: "Confirm", quoteId: "quote_9", confirmationText: "CONFIRM $5.75", merchantId: "game-day-boba", userIntent: "fruit tea", expiresAt: "2999-01-01T00:00:00.000Z" }],
+  receipts: [{ kind: "quote", id: "quote_9", status: "verified" }],
+  guardrails: { requiresExplicitConsent: true, highestAllowedClaim: "quote_created", sourceQuoteId: "quote_9" },
+}), { conversationId: "+15550001111", channel: "imessage" });
+const richAction = richConfirm.actions[0];
+assert.equal(richAction.id, "confirm_quote");
+if (richAction.id === "confirm_quote") {
+  assert.equal(richAction.merchantId, "game-day-boba");
+  assert.equal(richAction.userIntent, "fruit tea");
+  assert.equal(richAction.expiresAt, "2999-01-01T00:00:00.000Z");
+}
+
 console.log("SLL-R response contract smoke passed");

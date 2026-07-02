@@ -13,7 +13,8 @@
     "turn-queue-smoke": "node --import tsx src/turnQueueSmoke.ts",
     "agent-card-smoke": "node --import tsx src/agentCardSmoke.ts",
     "order-relay-smoke": "node --import tsx src/orderRelaySmoke.ts",
-    "check": "npm run typecheck && npm run contract-smoke && npm run turn-queue-smoke && npm run agent-card-smoke && npm run order-relay-smoke"
+    "confirm-fastpath-smoke": "node --import tsx src/confirmFastPathSmoke.ts",
+    "check": "npm run typecheck && npm run contract-smoke && npm run turn-queue-smoke && npm run agent-card-smoke && npm run order-relay-smoke && npm run confirm-fastpath-smoke"
   },
   "engines": {
     "node": ">=20"

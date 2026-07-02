@@ -13,6 +13,7 @@ import { clampEnvelope, type SllrStateProof } from "./claimClamp.js";
 import { renderEnvelopeToSendblueMessages } from "./iMessageRenderer.js";
 import { parseEnvelope } from "./responseContract.js";
 import { TurnQueue } from "./turnQueue.js";
+import { pendingConfirmFromQuoteResult, isPureConfirmation, isConfirmExpired, createOrderArgs, isEtaReconfirm, type PendingConfirm } from "./confirmFastPath.js";
 
 // Sendblue iMessage server. One public POST route: /sendblue/inbound. Customers
 // text in → their per-number AgentCore replies → we send the reply back. When an
@@ -44,6 +45,12 @@ async function main() {
   const pendingOrder = new Map<string, { merchantId: string; orderId: string }>();
   const turnProof = new Map<string, SllrStateProof>();
   const customerTurns = new TurnQueue();
+  // Confirm fast-path state: the last quote shown per phone (from the quote_order
+  // TOOL RESULT — server-side truth), plus a note to catch the LLM up after a
+  // deterministic order so its chat history doesn't drift from reality.
+  const confirmFastPathOn = process.env.SLLR_CONFIRM_FASTPATH !== "0";
+  const pendingConfirm = new Map<string, PendingConfirm>();
+  const fastPathNote = new Map<string, string>();
 
   // Poll a created order and message the customer on each meaningful transition
   // (payment cleared, accepted, ready, rejected, receipt). The backend (Vercel)
@@ -135,7 +142,13 @@ async function main() {
         onToolResult: (name, _args, result) => {
           void relay.onToolResult(number, name, result).catch((e) => log(`[relay] push failed: ${e?.message || e}`));
           recordTurnProof(turnProof, number, name, result);
+          if (name === "quote_order") {
+            // Arm the confirm fast-path from the tool result (server-side truth).
+            const p = pendingConfirmFromQuoteResult(result);
+            if (p) pendingConfirm.set(number, p);
+          }
           if (name === "create_order") {
+            pendingConfirm.delete(number); // ordered via LLM — quote consumed
             const order = (result as { order?: { id?: string; merchantId?: string } } | undefined)?.order;
             if (order?.id) pendingOrder.set(number, { merchantId: String(order.merchantId ?? ""), orderId: String(order.id) });
           }
@@ -182,13 +195,63 @@ async function main() {
       }
       activeCard = existing;
     }
+    // Confirm fast-path: the whole message is a pure confirmation of the quote we
+    // just showed → drive consent → create_order deterministically (no LLM). The
+    // order params come from the rail's quote echo, the consent from the buyer's
+    // real text. Any failure other than the ETA re-confirm falls through to the
+    // LLM turn, so UX degrades gracefully.
+    const pc = confirmFastPathOn ? pendingConfirm.get(msg.fromNumber) : undefined;
+    const buyerToken = buyers.get(msg.fromNumber)?.token;
+    if (pc && buyerToken && !isConfirmExpired(pc) && isPureConfirmation(msg.content, pc.confirmationText)) {
+      try {
+        const consentRes = await mcp.callTool("request_consent", { quoteId: pc.quoteId }, buyerToken) as { consent?: { id?: string } };
+        const consentId = consentRes?.consent?.id;
+        if (!consentId) throw new Error("consent not granted");
+        const created = await mcp.callTool("create_order", createOrderArgs(pc, consentId), buyerToken) as { order?: { id?: string; merchantId?: string } };
+        const orderId = created?.order?.id;
+        if (!orderId) throw new Error("order not created");
+        pendingConfirm.delete(msg.fromNumber);
+        // Same post-order plumbing as the LLM path: merchant card, payment
+        // surface, status watching — none of it depends on the LLM.
+        void relay.onToolResult(msg.fromNumber, "create_order", created).catch((e) => log(`[relay] push failed: ${e?.message || e}`));
+        let reply = `✅ Order confirmed — ${pc.itemName} ($${pc.amountUsd}).`;
+        try {
+          const opts = await mcp.callTool("get_payment_options", { merchantId: pc.merchantId, orderId });
+          const block = paymentBlock(opts);
+          if (block) reply += `\n\n${block}`;
+        } catch (e) {
+          log(`[fastpath] payment options failed: ${(e as Error)?.message || e}`);
+        }
+        watchOrder(msg.fromNumber, msg.sendblueNumber, orderId);
+        fastPathNote.set(msg.fromNumber, `Note: the buyer confirmed quote ${pc.quoteId} and order ${orderId} (${pc.itemName}, $${pc.amountUsd}) was already created and sent to the merchant. Do not create it again.`);
+        log(`[fastpath] confirmed ${pc.quoteId} → ${orderId} (no LLM turn)`);
+        await sendblue.sendMessage(msg.fromNumber, reply, msg.sendblueNumber);
+        return;
+      } catch (error) {
+        if (isEtaReconfirm(error)) {
+          // Rail's ETA gate: keep the pending confirm armed with acceptDelay so
+          // the buyer's next "1" explicitly accepts the longer wait.
+          pendingConfirm.set(msg.fromNumber, { ...pc, acceptDelay: true });
+          const msgText = error instanceof Error ? error.message : "The wait is longer than quoted.";
+          await sendblue.sendMessage(msg.fromNumber, `⏱️ ${msgText}\nReply 1 to accept the longer wait, or tell me what to get instead.`, msg.sendblueNumber);
+          return;
+        }
+        log(`[fastpath] failed, falling back to LLM: ${error instanceof Error ? error.message : error}`);
+        pendingConfirm.delete(msg.fromNumber); // stale — let the LLM re-quote
+      }
+    }
     pendingOrder.delete(msg.fromNumber);
     turnProof.set(msg.fromNumber, {});
     const { agent, buyerId } = await customerAgent(msg.fromNumber);
     let reply: string;
     try {
-      // Active card → its constraints ride along on the turn.
-      const agentInput = activeCard ? agentConstraintPreamble(activeCard, await merchantName(activeCard.merchantId)) + msg.content : msg.content;
+      // Active card → its constraints ride along on the turn. A fast-path note
+      // catches the LLM up on any order created without it.
+      const note = fastPathNote.get(msg.fromNumber);
+      fastPathNote.delete(msg.fromNumber);
+      const agentInput = (note ? `[[${note}]]\n` : "")
+        + (activeCard ? agentConstraintPreamble(activeCard, await merchantName(activeCard.merchantId)) : "")
+        + msg.content;
       const rawReply = await agent.send(agentInput);
       const envelope = parseEnvelope(rawReply, { conversationId: msg.fromNumber, buyerId, channel: "imessage" });
       reply = renderEnvelopeToSendblueMessages(clampEnvelope(envelope, turnProof.get(msg.fromNumber)))[0]?.content ?? "";
