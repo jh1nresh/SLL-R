@@ -83,6 +83,26 @@ must fail closed (no order is silently accepted). If `merchantAuth: false`
      gets the matching update.
 6. Customer picks up; after fulfillment the agent asks for verified feedback.
 
+## Recording the 60-sec outreach demo
+
+The Batch-1 drafts offer "a rough 60-sec demo" — record it against the REAL
+deployed flow (never mock it):
+
+- **Two numbers, two screens.** Customer line ≠ merchant line (the relay treats
+  the merchant number as staff — a same-number customer would be misrouted).
+  The merchant line is whatever `SLLR_MERCHANT_CHANNELS` points at (e.g. the
+  Google Voice number); film/screen-record both threads side by side.
+- **Onboarding on camera:** first contact runs the 3-question Agent Card setup.
+  Either pre-onboard the customer number before recording, or show
+  **"5 Skip setup — defaults"** as a deliberate beat (one tap, then straight to
+  ordering — it demos well).
+- **Beats (~60s):** scan QR → "I have 8 minutes, what can I get?" → recommendation
+  with rejected-alternatives reasons → reply **1** (instant confirm — no LLM lag)
+  → pickup code → merchant thread gets the card → staff replies **1** then **3**
+  → customer sees accepted + ready. End on the ready notification.
+- Before recording: `curl /health` must show `mode: "live"`, and run one full
+  manual pass (below) so the take is real.
+
 ## Verify before a real merchant
 
 ```bash
