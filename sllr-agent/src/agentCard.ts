@@ -39,7 +39,7 @@ function freshCard(channelUserId: string, merchantId: string, nowIso: string): A
   };
 }
 
-const Q1 = "Before I recommend/order, a quick setup for this shop.\n\n1/3 Max per order?\n1  $10\n2  $15\n3  $25\n4  Ask every time";
+const Q1 = "Before I recommend/order, a quick setup for this shop.\n\n1/3 Max per order?\n1  $10\n2  $15\n3  $25\n4  Ask every time\n5  Skip setup — defaults ($15 max, ask before paying)";
 const Q2 = "2/3 Payment approval?\n1  Ask before every payment\n2  Auto-approve under your max today\n3  Order draft only — I'll pay at counter";
 const Q3 = "3/3 Anything to avoid?\n1  Too spicy\n2  Caffeine\n3  Dairy\n4  None";
 
@@ -67,6 +67,16 @@ export function onboardingStep(existing: AgentCard | null, text: string, channel
     return { card, reply: `Please reply with a number.\n\n${reAsk}`, done: false };
   }
   if (card.step === 1) {
+    // "5 Skip" — the rush-window user has 8 minutes, not 3 questions. Safe
+    // defaults: $15 cap, ask before every payment, no avoids.
+    if (c === 5) {
+      card.maxAmountUsd = "15.00";
+      card.requiresConfirmation = "always";
+      card.avoid = [];
+      card.step = 3;
+      card.status = "active";
+      return { card, reply: summarizeCard(card, merchantName), done: true };
+    }
     card.maxAmountUsd = c === 1 ? "10.00" : c === 2 ? "15.00" : c === 3 ? "25.00" : null;
     card.step = 2;
     return { card, reply: Q2, done: false };

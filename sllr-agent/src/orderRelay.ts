@@ -8,6 +8,7 @@
 // surfaced (same no-overclaim discipline as the claim guard).
 
 import type { SendblueClient } from "./sendblue.js";
+import type { RelayStore } from "./relayStore.js";
 
 // Minimal MCP surface the relay needs (the SllrMcp client satisfies this).
 export type McpCaller = { callTool(name: string, args: Record<string, unknown>, bearer?: string): Promise<unknown> };
@@ -58,8 +59,34 @@ export class OrderRelay {
     // → demo:true (only accepted when SLL-R has no verifier secret configured).
     private readonly mcp?: McpCaller,
     private readonly verifyToken?: string,
+    // Optional durable store: pending decisions survive a mid-rush restart.
+    private readonly store?: RelayStore,
   ) {
     this.merchantNumbers = new Set([...Object.values(channels), fallbackNumber].filter(Boolean));
+    if (store) {
+      for (const [number, queue] of Object.entries(store.loadPending())) {
+        if (queue.length) this.pending.set(number, queue);
+      }
+    }
+  }
+
+  private persistPending(): void {
+    this.store?.savePending(this.pending);
+  }
+
+  // One retry for messages that MUST land (order cards, status updates) — a
+  // silently dropped "ready" text strands a customer. Final failure is logged.
+  private async sendReliable(to: string, text: string): Promise<void> {
+    try {
+      await this.sendblue.sendMessage(to, text);
+    } catch {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        await this.sendblue.sendMessage(to, text);
+      } catch (error) {
+        this.log(`[relay] SEND FAILED after retry to ${to.slice(0, 5)}…: ${error instanceof Error ? error.message : error}`);
+      }
+    }
   }
 
   // The notify number for a given merchant: its own channel, else the fallback.
@@ -96,13 +123,14 @@ export class OrderRelay {
     const queue = this.pending.get(merchantNumber) ?? [];
     queue.push(relay);
     this.pending.set(merchantNumber, queue);
+    this.persistPending();
 
     const text =
       `🆕 New SLL-R order — ${relay.merchantName}\n` +
       `${relay.itemName} — $${relay.amountUsd}\n` +
       `Pickup code ${relay.pickupCode}\n` +
       `Reply 1 = accept · 2 = reject · 3 = ready`;
-    await this.sendblue.sendMessage(merchantNumber, text);
+    await this.sendReliable(merchantNumber, text);
     this.log(`[relay] pushed order ${relay.orderId} to ${merchantId} (${merchantNumber})`);
   }
 
@@ -123,6 +151,13 @@ export class OrderRelay {
     }
 
     const code = tokens[1]?.toUpperCase();
+    // Rush safety: with more than one pending order, a bare digit is ambiguous —
+    // require the pickup code rather than guessing the oldest (mis-accept risk).
+    if (!code && queue.length > 1) {
+      const codes = queue.map((o) => `${o.pickupCode} (${o.itemName})`).join(", ");
+      await this.sendblue.sendMessage(fromNumber, `You have ${queue.length} pending orders — add the pickup code, e.g. "${tokens[0]} ${queue[0].pickupCode}".\nPending: ${codes}`);
+      return;
+    }
     const idx = code ? queue.findIndex((o) => o.pickupCode === code) : 0;
     if (idx < 0 || queue.length === 0) {
       await this.sendblue.sendMessage(fromNumber, code ? `No pending order with code ${code}.` : "No pending orders.");
@@ -130,6 +165,7 @@ export class OrderRelay {
     }
     const [order] = queue.splice(idx, 1);
     this.pending.set(fromNumber, queue);
+    this.persistPending();
 
     // Mutate canonical state FIRST. If it fails, re-queue and tell the merchant —
     // never tell the customer about a state that didn't actually change.
@@ -138,6 +174,7 @@ export class OrderRelay {
     } catch (error) {
       queue.unshift(order);
       this.pending.set(fromNumber, queue);
+      this.persistPending();
       const reason = error instanceof Error ? error.message : "unknown error";
       await this.sendblue.sendMessage(fromNumber, `⚠️ Couldn't update order ${order.pickupCode} (${reason}). It's still pending — try again.`);
       this.log(`[relay] applyDecision failed for ${order.orderId}: ${reason}`);
@@ -145,7 +182,7 @@ export class OrderRelay {
     }
 
     await this.notifyCustomer(order, decision);
-    await this.sendblue.sendMessage(fromNumber, `Got it — order ${order.pickupCode} marked ${decision}.`);
+    await this.sendReliable(fromNumber, `Got it — order ${order.pickupCode} marked ${decision}.`);
     this.log(`[relay] merchant ${decision} order ${order.orderId} → canonical status mutated`);
   }
 
@@ -164,6 +201,6 @@ export class OrderRelay {
         : decision === "ready"
           ? `🔔 Your order is ready for pickup! ${order.itemName} — code ${order.pickupCode}.`
           : `😕 Sorry, ${order.merchantName} can't fulfill your ${order.itemName} right now. No charge.`;
-    await this.sendblue.sendMessage(order.customerNumber, msg);
+    await this.sendReliable(order.customerNumber, msg);
   }
 }

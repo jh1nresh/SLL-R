@@ -2,7 +2,8 @@ import { attachPaymentProof, createOrder, fulfillOrder, getOrder, listOrders } f
 import { quoteOrder } from "./quote.js";
 import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
 import { recurringSuggestion } from "./recurring.js";
-import { persistQuote } from "./quotes.js";
+import { persistQuote, getQuote } from "./quotes.js";
+import { estimatedPickupWaitMinutes } from "./orders.js";
 import { grantConsent, validateConsentForOrder, expectedConfirmation } from "./consent.js";
 import { centsFromUsd } from "./money.js";
 import { recordLoopSafe, loopIdForQuote, loopIdForOrder } from "./actionLoop.js";
@@ -134,13 +135,24 @@ function consentRequired(): boolean {
   return process.env.SLLR_REQUIRE_CONSENT === "true";
 }
 
+// The queue-aware wait for the quoted item — same formula the order promise
+// uses, so the quote can never undersell the real wait (pilot trust bug).
+async function queueAwareEta(merchant: MerchantProfile, itemId: string | undefined): Promise<number | null> {
+  const item = itemId ? merchant.catalog.find((i) => i.id === itemId) : undefined;
+  return item ? estimatedPickupWaitMinutes(merchant.id, item) : null;
+}
+
 export async function quoteMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
-  requireMerchant(merchantId);
+  const merchant = requireMerchant(merchantId);
   const quote = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
+  // Honest ETA: replace the prep-only estimate with the queue-aware wait so the
+  // quote and the created order's promise always come from one formula.
+  const etaMinutes = quote.feasible && quote.item ? await queueAwareEta(merchant, quote.item.id) : null;
+  if (etaMinutes !== null) quote.estimate.readyInMinutes = etaMinutes;
   // Persist feasible quotes so consent + the order can bind to a quoteId.
   const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
   const intent = typeof payload.userIntent === "string" ? payload.userIntent : "";
-  const stored = await persistQuote(merchantId, quote, buyerId, intent);
+  const stored = await persistQuote(merchantId, quote, buyerId, intent, etaMinutes);
   if (stored) {
     await recordLoopSafe(loopIdForQuote(stored.id), { buyerId, merchantId, intent }, {
       eventType: "quote", actor: "sllr", stateAfter: "quote_created", claimLevel: "quote_only",
@@ -151,7 +163,7 @@ export async function quoteMerchantOrder(merchantId: string, payload: Record<str
     product: "SLL-R merchant quote",
     quote,
     ...(stored
-      ? { quoteId: stored.id, amountUsd: stored.amountUsd, expiresAt: stored.expiresAt, confirmationText: expectedConfirmation(stored) }
+      ? { quoteId: stored.id, amountUsd: stored.amountUsd, etaMinutes: stored.etaMinutes, expiresAt: stored.expiresAt, confirmationText: expectedConfirmation(stored) }
       : {}),
   };
 }
@@ -201,6 +213,32 @@ export async function createMerchantOrder(merchantId: string, payload: Record<st
         ids: { quoteId: payloadQuoteId },
       });
       throw Object.assign(new Error(`Price changed since consent ($${consent.amountUsd}) — request a fresh quote + consent.`), { status: 409, requiredNextStep: "quote_order" });
+    }
+  }
+  // ETA reconfirm gate (opt-in SLLR_ETA_RECONFIRM): if the queue-aware wait now
+  // materially exceeds what the buyer confirmed against (their deadline, or the
+  // quoted ETA + one capacity window), do NOT silently create a delayed order —
+  // ask for reconfirmation (acceptDelay: true).
+  if (process.env.SLLR_ETA_RECONFIRM === "true" && payload.acceptDelay !== true) {
+    const merchant = requireMerchant(merchantId);
+    const probe = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
+    const waitNow = probe.feasible && probe.item ? await queueAwareEta(merchant, probe.item.id) : null;
+    if (waitNow !== null) {
+      const deadline = typeof payload.deadlineMinutes === "number" ? payload.deadlineMinutes : null;
+      const quotedEta = payloadQuoteId ? (await getQuote(payloadQuoteId))?.etaMinutes ?? null : null;
+      const brokenDeadline = deadline !== null && waitNow > deadline;
+      const brokenQuote = quotedEta !== null && waitNow > quotedEta + 15;
+      if (brokenDeadline || brokenQuote) {
+        await recordLoopSafe(payloadQuoteId ? loopIdForQuote(payloadQuoteId) : `loop_blk_${Date.now()}`, seed, {
+          eventType: "policy_block", actor: "sllr",
+          blockReason: `eta_reconfirm: wait now ~${waitNow} min exceeds ${brokenDeadline ? `deadline ${deadline} min` : `quoted ${quotedEta} min`} (next: reconfirm_with_acceptDelay)`,
+          ids: payloadQuoteId ? { quoteId: payloadQuoteId } : {},
+        });
+        throw Object.assign(
+          new Error(`Wait is now ~${waitNow} min — longer than ${brokenDeadline ? `your ${deadline} min deadline` : `the quoted ~${quotedEta} min`}. Re-confirm with acceptDelay: true to order anyway, or pick a faster item.`),
+          { status: 409, requiredNextStep: "reconfirm_with_acceptDelay", estimatedWaitMinutes: waitNow },
+        );
+      }
     }
   }
   const result = await createOrder(bodyWithMerchant(merchantId, payload) as OrderRequest);

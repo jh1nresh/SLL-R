@@ -67,4 +67,49 @@ const MERCHANT = "+15559990000";
   void ok;
 }
 
+// 5. Rush safety: two pending orders + a bare "1" → asks for the pickup code,
+//    NO mutation and NO customer notification.
+{
+  const { sent, calls, sendblue, mcp } = makeFakes();
+  const relay = new OrderRelay(sendblue, {}, MERCHANT, () => {}, mcp, "t");
+  const order2 = { order: { id: "ord_zzz999yyy888", merchantId: "game-day-boba", merchantName: "Game Day Boba", item: { name: "Taro Milk", subtotalUsd: "6.25" } } };
+  await relay.onToolResult(CUSTOMER, "create_order", order);
+  await relay.onToolResult("+15550003333", "create_order", order2);
+  await relay.handleMerchantReply(MERCHANT, "1");
+  assert.equal(calls.length, 0, "ambiguous bare digit must not mutate");
+  assert.ok(sent.some((m) => m.to === MERCHANT && /add the pickup code/i.test(m.text)), "asks for the code");
+  // With the code it works.
+  await relay.handleMerchantReply(MERCHANT, "1 ABC123");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.orderId, "ord_abc123def456");
+}
+
+// 6. Persistence: pending decisions survive a restart (new relay, same store).
+{
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { rmSync } = await import("node:fs");
+  const { RelayStore } = await import("./relayStore.js");
+  const path = join(tmpdir(), `sllr-relay-smoke-${process.pid}-${Date.now()}.json`);
+  try {
+    const a = makeFakes();
+    const relayA = new OrderRelay(a.sendblue, {}, MERCHANT, () => {}, a.mcp, "t", new RelayStore(path));
+    await relayA.onToolResult(CUSTOMER, "create_order", order);
+    // "Restart": a fresh relay hydrated from the same store can act on the order.
+    const b = makeFakes();
+    const relayB = new OrderRelay(b.sendblue, {}, MERCHANT, () => {}, b.mcp, "t", new RelayStore(path));
+    await relayB.handleMerchantReply(MERCHANT, "1");
+    assert.equal(b.calls.length, 1, "pending order must survive restart");
+    assert.equal(b.calls[0].args.orderId, "ord_abc123def456");
+    // Watched refs round-trip too.
+    const store = new RelayStore(path);
+    store.addWatched("ord_1", { phone: CUSTOMER, sendblueNumber: "+15550009999" });
+    assert.deepEqual(new RelayStore(path).loadWatched(), { ord_1: { phone: CUSTOMER, sendblueNumber: "+15550009999" } });
+    store.removeWatched("ord_1");
+    assert.deepEqual(new RelayStore(path).loadWatched(), {});
+  } finally {
+    try { rmSync(path, { force: true }); rmSync(`${path}.tmp`, { force: true }); } catch { /* gone */ }
+  }
+}
+
 console.log("orderRelay smoke passed");

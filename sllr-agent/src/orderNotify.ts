@@ -45,8 +45,12 @@ export function statusMessage(
       return `🔔 Your ${item} is ready for pickup! 🎟️ Code ${code}`;
     case "rejected":
       return `😕 Sorry, ${merchant} can't fulfill your ${item} right now. No charge.`;
+    // Counter path: fulfillment proof only — never claims payment was verified.
+    case "claimed":
+    case "fulfilled":
+      return `✅ Picked up — enjoy your ${item}!\nHow was it? Reply a 1-5 rating (add a note if you like) and I'll remember it for next time.`;
     case "receipt_issued":
-      return `✅ All set — ${item} complete.${o.receipt?.claimUrl ? `\n🧾 Receipt: ${o.receipt.claimUrl}` : ""}`;
+      return `✅ All set — ${item} complete.${o.receipt?.claimUrl ? `\n🧾 Receipt: ${o.receipt.claimUrl}` : ""}\nHow was it? Reply a 1-5 rating and I'll remember it for next time.`;
     default:
       return null;
   }

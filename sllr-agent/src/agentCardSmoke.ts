@@ -44,4 +44,14 @@ const card: AgentCard = r.card;
 const preamble = agentConstraintPreamble(card, mname);
 assert.ok(preamble.includes("max $15.00/order") && preamble.includes("avoid: caffeine"));
 
+// "5 Skip" at Q1 → card active immediately with safe defaults (rush-window path).
+let s = onboardingStep(null, "start merchant:game-day-boba", "+15550002222", merchant, mname, now);
+assert.equal(s.card.step, 1);
+s = onboardingStep(s.card, "5", "+15550002222", merchant, mname, now);
+assert.equal(s.done, true);
+assert.equal(s.card.status, "active");
+assert.equal(s.card.maxAmountUsd, "15.00");
+assert.equal(s.card.requiresConfirmation, "always");
+assert.deepEqual(s.card.avoid, []);
+
 console.log("agentCard smoke passed");

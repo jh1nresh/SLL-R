@@ -4,6 +4,7 @@ import { createAgentSession, type AgentSession } from "./core.js";
 import { SendblueClient, parseInbound, verifyWebhookSecret } from "./sendblue.js";
 import { OrderRelay } from "./orderRelay.js";
 import { BuyerStore } from "./buyerStore.js";
+import { RelayStore } from "./relayStore.js";
 import { AgentCardStore } from "./agentCardStore.js";
 import { onboardingStep, parseMerchantContext, agentConstraintPreamble, type AgentCard } from "./agentCard.js";
 import { SllrMcp } from "./mcp.js";
@@ -30,8 +31,13 @@ async function main() {
   await mcp.initialize();
   // Merchant verifier secret authorizes the merchant status tools; absent →
   // demo:true (only accepted when SLL-R has no verifier secret configured).
+  // Log readiness only as set/missing — never the value.
   const merchantVerifyToken = process.env.SLLR_MERCHANT_VERIFY_TOKEN?.trim() || undefined;
-  const relay = new OrderRelay(sendblue, sb.merchantChannels, sb.merchantNumber, log, mcp, merchantVerifyToken);
+  log(`[auth] merchant verifier token: ${merchantVerifyToken ? "set (live mutations)" : "MISSING → demo-only"}`);
+  // Durable relay state: pending merchant decisions + status watchers survive a
+  // mid-rush restart instead of stranding orders.
+  const relayStore = new RelayStore(process.env.SLLR_RELAY_STORE?.trim() || ".sllr-relay.json");
+  const relay = new OrderRelay(sendblue, sb.merchantChannels, sb.merchantNumber, log, mcp, merchantVerifyToken, relayStore);
   const merchantCount = new Set([...Object.values(sb.merchantChannels), sb.merchantNumber].filter(Boolean)).size;
   // Orders created during the current turn, keyed by phone — used to append the
   // pay link + pickup code deterministically, never relying on the LLM to do it.
@@ -44,9 +50,28 @@ async function main() {
   // can't message the customer — it doesn't know their phone — so the agent owns
   // this. Started for EVERY order (counter orders get accepted/ready too).
   const watched = new Map<string, { phone: string; sendblueNumber: string; lastStatus: string; lastPayment: string; tries: number }>();
+  // Status updates MUST land — one retry, and the final failure is logged (a
+  // silently dropped "ready" text strands a customer at the counter).
+  async function sendStatusReliable(phone: string, msg: string, sendblueNumber: string): Promise<void> {
+    try {
+      await sendblue.sendMessage(phone, msg, sendblueNumber);
+    } catch {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        await sendblue.sendMessage(phone, msg, sendblueNumber);
+      } catch (error) {
+        log(`[watch] SEND FAILED after retry to ${phone.slice(0, 5)}…: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
   function watchOrder(phone: string, sendblueNumber: string, orderId: string): void {
     if (watched.has(orderId)) return;
     watched.set(orderId, { phone, sendblueNumber, lastStatus: "", lastPayment: "", tries: 0 });
+    relayStore.addWatched(orderId, { phone, sendblueNumber });
+    const stopWatching = () => {
+      watched.delete(orderId);
+      relayStore.removeWatched(orderId);
+    };
     const tick = async () => {
       const w = watched.get(orderId);
       if (!w) return;
@@ -58,14 +83,19 @@ async function main() {
           const msg = statusMessage(o, w.lastStatus, w.lastPayment, orderId);
           w.lastStatus = o.status ?? "";
           w.lastPayment = o.payment?.status ?? "";
-          if (msg) await sendblue.sendMessage(w.phone, msg, w.sendblueNumber).catch(() => {});
-          if (isTerminal(o.status)) { watched.delete(orderId); return; }
+          if (msg) await sendStatusReliable(w.phone, msg, w.sendblueNumber);
+          if (isTerminal(o.status)) { stopWatching(); return; }
         }
       } catch { /* transient — keep polling */ }
       if (w.tries < 240) setTimeout(tick, 5000); // ~20 min
-      else watched.delete(orderId);
+      else stopWatching();
     };
     setTimeout(tick, 5000);
+  }
+  // Re-arm watchers persisted before a restart, so in-flight orders keep
+  // notifying their customers instead of going silent.
+  for (const [orderId, ref] of Object.entries(relayStore.loadWatched())) {
+    watchOrder(ref.phone, ref.sendblueNumber, orderId);
   }
 
   // Persistent phone → buyer mapping so a returning customer keeps the same
@@ -83,9 +113,22 @@ async function main() {
 
   // One agent session per customer phone number (in-memory chat history; orders
   // + buyer identity persist via SLL-R + the buyer store).
+  // Bounded LRU: chat history for the 300 most-recent numbers; older sessions are
+  // evicted (their buyer identity + orders persist — only chat context is lost).
+  const CUSTOMER_SESSION_CAP = 300;
   const customers = new Map<string, Promise<AgentSession>>();
   function customerAgent(number: string): Promise<AgentSession> {
     let session = customers.get(number);
+    if (session) {
+      // Refresh recency (Map preserves insertion order → first key is oldest).
+      customers.delete(number);
+      customers.set(number, session);
+      return session;
+    }
+    if (customers.size >= CUSTOMER_SESSION_CAP) {
+      const oldest = customers.keys().next().value;
+      if (oldest !== undefined) customers.delete(oldest);
+    }
     if (!session) {
       session = createAgentSession(config, `iMessage ${number}`, {
         buyer: buyers.get(number),
@@ -177,7 +220,16 @@ async function main() {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
     if (req.method === "GET" && url.pathname === "/health") {
-      return json(res, 200, { ok: true, service: "sllr-agent-sendblue", merchants: merchantCount });
+      // Pilot readiness at a glance: merchantAuth=false means merchant replies
+      // run demo-only (runbook says don't start a live pilot in that state).
+      return json(res, 200, {
+        ok: true,
+        service: "sllr-agent-sendblue",
+        merchants: merchantCount,
+        merchantAuth: Boolean(merchantVerifyToken),
+        mode: merchantVerifyToken ? "live" : "demo-only",
+        watching: watched.size,
+      });
     }
     if (req.method !== "POST" || url.pathname !== "/sendblue/inbound") {
       return json(res, 404, { error: "not found" });

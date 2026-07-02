@@ -17,6 +17,7 @@ export type StoredQuote = {
   itemName: string;
   quantity: number;
   amountUsd: string; // subtotal — the amount consent/order must match
+  etaMinutes: number | null; // queue-aware wait quoted to the buyer (pickup only)
   intent: string;
   createdAt: string;
   expiresAt: string;
@@ -30,6 +31,7 @@ export async function persistQuote(
   quote: QuoteResult,
   buyerId: string | null,
   intent: string,
+  etaMinutes: number | null = null,
   nowIso: string = new Date().toISOString(),
 ): Promise<StoredQuote | null> {
   if (!quote.feasible || !quote.item) return null;
@@ -43,6 +45,7 @@ export async function persistQuote(
     itemName: quote.item.name,
     quantity: quote.item.quantity,
     amountUsd: quote.item.subtotalUsd,
+    etaMinutes,
     intent,
     createdAt: nowIso,
     expiresAt: new Date(new Date(nowIso).getTime() + DEFAULT_TTL_MS).toISOString(),

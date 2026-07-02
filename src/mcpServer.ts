@@ -195,6 +195,7 @@ const tools: ToolDefinition[] = [
         },
         quoteId: { type: "string", description: "Quote to bind the order to (from quote_order). Required when SLLR_REQUIRE_CONSENT is on." },
         consentId: { type: "string", description: "Consent receipt (from request_consent). Required when SLLR_REQUIRE_CONSENT is on." },
+        acceptDelay: { type: "boolean", description: "Set true ONLY after the buyer re-confirms a longer wait (the rail returns 409 reconfirm_with_acceptDelay when the queue-aware ETA now exceeds their deadline or the quoted ETA)." },
       },
     },
     handler: (args, _origin, buyerId) => {

@@ -20,6 +20,9 @@ const BUYER_TOOL_ALLOWLIST = new Set([
   // agent can't skip it or duplicate it.
   "list_my_orders",
   "recommend_for_buyer",
+  // The rating reply after pickup. Safe to expose: the rail refuses a review
+  // without fulfillment/payment proof, so the LLM can't mint a fake one.
+  "create_verified_review",
 ]);
 
 export type AgentSession = {

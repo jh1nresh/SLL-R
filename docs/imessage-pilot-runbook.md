@@ -29,7 +29,13 @@ SLLR_MERCHANT_NUMBER=+1...              # staff line for THIS pilot merchant
 # OR per-merchant: SLLR_MERCHANT_CHANNELS={"raposa-coffee":"+1..."}
 SLLR_AGENT_DEFAULT_MERCHANT=raposa-coffee   # scopes the Agent Card / order lane
 SLLR_MERCHANT_VERIFY_TOKEN=...          # authorizes merchant 1/2/3 → canonical status
+SLLR_RELAY_STORE=.sllr-relay.json       # durable pending-decision + watcher state (default shown)
 ```
+
+Rail-side (Vercel), recommended for the pilot: `SLLR_ETA_RECONFIRM=true` — if the
+queue-aware wait now exceeds the buyer's deadline or the quoted ETA, order
+creation returns a re-confirmation prompt (`acceptDelay`) instead of silently
+creating a delayed order.
 
 Rail-side (Vercel) for receipts when a payment link is used:
 `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` + the Stripe dashboard webhook
@@ -55,11 +61,14 @@ cd /Users/jhinresh/projects/sll-r/sllr-agent
 npm run check        # typecheck + contract/turn-queue/agent-card smokes must pass
 npm run start        # boots the Sendblue server
 
-curl -s https://<stable-host>/health   # → { ok, merchants: N }
+curl -s https://<stable-host>/health
+# → { ok, merchants: N, merchantAuth: true|false, mode: "live"|"demo-only", watching: N }
 ```
 
 If `/health` is unreachable at pilot time, **do not run the pilot** — a down agent
-must fail closed (no order is silently accepted).
+must fail closed (no order is silently accepted). If `merchantAuth: false`
+(`mode: "demo-only"`), merchant replies will NOT mutate live order state — set
+`SLLR_MERCHANT_VERIFY_TOKEN` before a real merchant window.
 
 ## Demo / pilot script
 

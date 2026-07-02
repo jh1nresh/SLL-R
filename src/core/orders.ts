@@ -87,6 +87,19 @@ async function activePickupOrders(merchantId: string, productionClass: string) {
   ));
 }
 
+// Queue-aware pickup wait for an item RIGHT NOW — the single ETA formula shared
+// by quotes and order promises, so a quote can never show "~7 min" while the
+// created order silently computes 52 (the trust bug the pilot audit caught).
+// null for non-pickup items.
+export async function estimatedPickupWaitMinutes(merchantId: string, item: CatalogItem): Promise<number | null> {
+  if (!item.fulfillment.includes("pickup")) return null;
+  const productionClass = productionClassFor(item);
+  const activeAhead = (await activePickupOrders(merchantId, productionClass)).length;
+  const capacity = capacityByClass[productionClass];
+  const prepMinutes = Math.max(item.prepMinutes || 5, 1);
+  return prepMinutes + Math.floor(activeAhead / capacity) * 15;
+}
+
 async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: OrderRequest, now: Date): Promise<SellerOrder["promise"]> {
   if (!item.fulfillment.includes("pickup")) {
     return {
@@ -103,11 +116,8 @@ async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input
   }
 
   const productionClass = productionClassFor(item);
-  const activeAhead = (await activePickupOrders(merchant.id, productionClass)).length;
-  const capacity = capacityByClass[productionClass];
   const capacityWindowMinutes = 15;
-  const prepMinutes = Math.max(item.prepMinutes || 5, 1);
-  const estimatedWaitMinutes = prepMinutes + Math.floor(activeAhead / capacity) * capacityWindowMinutes;
+  const estimatedWaitMinutes = (await estimatedPickupWaitMinutes(merchant.id, item))!;
   const promisedReadyAt = addMinutes(now, estimatedWaitMinutes);
   const requestedReadyAt = input.deadlineMinutes ? addMinutes(now, input.deadlineMinutes) : null;
 

@@ -9,3 +9,6 @@ dist/
 # local per-merchant Agent Card store
 .sllr-agent-cards.json
 .sllr-agent-cards.json.tmp
+# durable relay state (pending merchant decisions + watchers)
+.sllr-relay.json
+.sllr-relay.json.tmp

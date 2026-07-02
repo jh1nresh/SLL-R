@@ -652,6 +652,60 @@ async function smokeStoreBackend() {
   }
 }
 
+// ETA trust (pilot closure Gap 3): the quote's ETA is queue-aware (same formula
+// as the order promise), and with SLLR_ETA_RECONFIRM=true an order whose wait now
+// exceeds the buyer's deadline / the quoted ETA is NOT silently created — it asks
+// for reconfirmation (acceptDelay).
+async function smokeEtaReconfirm(origin: string) {
+  const fruitTea = { userIntent: "fruit tea", deadlineMinutes: 10, paymentMode: "counter" };
+
+  // Baseline quote: empty queue → ETA = prep minutes (2 for fruit-tea).
+  const q0 = await postJson(origin, "/merchants/game-day-boba/quote", fruitTea) as { etaMinutes?: number; quote?: { estimate?: { readyInMinutes?: number } } };
+  if (q0.quote?.estimate?.readyInMinutes !== 2 || q0.etaMinutes !== 2) {
+    throw new Error(`baseline quote ETA should be prep(2): ${JSON.stringify({ eta: q0.etaMinutes, est: q0.quote?.estimate })}`);
+  }
+
+  // Saturate the cold production class (capacity 12 → +15 min per full window).
+  for (let i = 0; i < 12; i++) {
+    const r = await fetch(`${origin}/merchants/game-day-boba/orders`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userIntent: "taro milk", paymentMode: "counter" }),
+    });
+    if (!r.ok) throw new Error(`saturation order ${i} failed: ${r.status}`);
+  }
+
+  // Quote is HONEST about the queue now: 2 + 15 = 17 min, not prep-only.
+  const q1 = await postJson(origin, "/merchants/game-day-boba/quote", fruitTea) as { etaMinutes?: number };
+  if (q1.etaMinutes !== 17) throw new Error(`queue-aware quote ETA should be 17, got ${q1.etaMinutes}`);
+
+  const prev = process.env.SLLR_ETA_RECONFIRM;
+  process.env.SLLR_ETA_RECONFIRM = "true";
+  try {
+    // Wait (17) exceeds the buyer's 10-min deadline → 409 reconfirm, no order.
+    const blocked = await fetch(`${origin}/merchants/game-day-boba/orders`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fruitTea),
+    });
+    const blockedBody = await blocked.json() as { error?: string };
+    if (blocked.status !== 409 || !/acceptDelay/.test(String(blockedBody.error))) {
+      throw new Error(`over-deadline order should 409 with reconfirm, got ${blocked.status}: ${JSON.stringify(blockedBody)}`);
+    }
+    // Buyer re-confirms the longer wait → order created, promise matches the
+    // same queue-aware formula (no contradiction).
+    const ok = await postJson(origin, "/merchants/game-day-boba/orders", { ...fruitTea, acceptDelay: true }) as { order?: { promise?: { estimatedWaitMinutes?: number } } };
+    if (ok.order?.promise?.estimatedWaitMinutes !== 17) {
+      throw new Error(`reconfirmed order promise should be 17 min, got ${JSON.stringify(ok.order?.promise?.estimatedWaitMinutes)}`);
+    }
+    // No deadline + no stale quote → unaffected by the gate.
+    const free = await fetch(`${origin}/merchants/game-day-boba/orders`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userIntent: "fruit tea", paymentMode: "counter" }),
+    });
+    if (!free.ok) throw new Error(`no-deadline order should not be gated: ${free.status}`);
+  } finally {
+    if (prev === undefined) delete process.env.SLLR_ETA_RECONFIRM; else process.env.SLLR_ETA_RECONFIRM = prev;
+  }
+}
+
 // Verified review / outcome layer (spec: local-commerce-os-for-agents §5). A
 // review only exists with proof; it records verifiedBy + eta + feedback and feeds
 // merchant ETA reliability.
@@ -1663,6 +1717,7 @@ async function main() {
     await smokeConsentGate(origin);
     await smokeActionLoop(origin);
     await smokeGameDayBoba(origin);
+    await smokeEtaReconfirm(origin);
     await smokeVerifiedReview(origin);
     await smokeStripePrepay(origin);
     await smokeCardOnFile(origin);
