@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { URL } from "node:url";
 
 // Constant-time string compare for secrets (length mismatch → false, no leak).
@@ -23,6 +25,7 @@ import { recommendFromMenu } from "./core/menuRecommend.js";
 import { createVerifiedReview, listMerchantReviews, getMerchantReliability } from "./core/verifiedReview.js";
 import { raposaOrderPage, raposaTerminalPage } from "./ui/raposa.js";
 import { merchantTerminalPage, standaloneAgentPage } from "./ui/agenticPos.js";
+import { merchantJourneyAssetNames, merchantJourneyEngine, merchantJourneyPage } from "./ui/merchantJourney.js";
 import { standaloneAgentMessage } from "./core/standaloneAgent.js";
 import { issueBuyerSession, resolveBuyer, revokeBuyerSession, buyerTokenFrom } from "./core/buyer.js";
 import { listOrdersForBuyer } from "./core/orders.js";
@@ -59,6 +62,32 @@ function markdown(response: ServerResponse, status: number, payload: string) {
 function svg(response: ServerResponse, status: number, payload: string) {
   response.writeHead(status, { "content-type": "image/svg+xml; charset=utf-8" });
   response.end(payload);
+}
+
+function javascript(response: ServerResponse, payload: string) {
+  response.writeHead(200, {
+    "content-type": "text/javascript; charset=utf-8",
+    "cache-control": "public, max-age=3600",
+  });
+  response.end(payload);
+}
+
+function merchantJourneyAsset(response: ServerResponse, filename: string) {
+  if (!merchantJourneyAssetNames.has(filename)) {
+    return json(response, 404, { error: "SLL-R journey asset not found." });
+  }
+  try {
+    const payload = readFileSync(resolve(process.cwd(), "public", "world", "assets", filename));
+    const contentType = filename.endsWith(".webp") ? "image/webp" : "video/mp4";
+    response.writeHead(200, {
+      "content-type": contentType,
+      "content-length": payload.length,
+      "cache-control": "public, max-age=31536000, immutable",
+    });
+    response.end(payload);
+  } catch {
+    return json(response, 404, { error: "SLL-R journey asset not found." });
+  }
 }
 
 // Friendly mobile page shown when Stripe redirects the customer's browser back
@@ -270,6 +299,17 @@ function rootDiscovery(origin: string) {
 export async function handleSllrRequest(request: IncomingMessage, response: ServerResponse) {
   try {
     const url = new URL(request.url || "/", originFrom(request));
+    if (request.method === "GET" && url.pathname === "/world") {
+      return html(response, 200, merchantJourneyPage());
+    }
+    if (request.method === "GET" && url.pathname === "/world/engine.js") {
+      return javascript(response, merchantJourneyEngine());
+    }
+    const worldAssetRoute = url.pathname.match(/^\/world\/assets\/([^/]+)$/);
+    if (request.method === "GET" && worldAssetRoute) {
+      return merchantJourneyAsset(response, worldAssetRoute[1]);
+    }
+
     // Load any persisted demo merchants into the in-process cache so a fresh
     // serverless instance resolves merchants created by an earlier request.
     await hydrateDemoMerchants();
