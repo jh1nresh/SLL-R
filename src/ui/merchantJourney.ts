@@ -67,7 +67,6 @@ export function merchantJourneyPage() {
     import "/world/engine.js";
     window.mountScrollWorld(document.getElementById("world"), {
       brand: { name: "SLL-R", href: "/world" },
-      cta: { label: "Open live demo", href: "/agent/raposa-shop" },
       hint: "Scroll to follow the order",
       nav: true,
       atmosphere: true,
