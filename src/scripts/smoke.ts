@@ -40,6 +40,13 @@ async function getJsonFailure(origin: string, path: string) {
   return { status: response.status, json };
 }
 
+async function getText(origin: string, path: string) {
+  const response = await fetch(`${origin}${path}`);
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${path} failed with ${response.status}: ${text}`);
+  return { response, text };
+}
+
 async function postJsonFailure(origin: string, path: string, payload: unknown) {
   const response = await fetch(`${origin}${path}`, {
     method: "POST",
@@ -1658,6 +1665,32 @@ async function main() {
   const origin = `http://127.0.0.1:${address.port}`;
 
   try {
+    const world = await getText(origin, "/world");
+    if (
+      !world.response.headers.get("content-type")?.includes("text/html")
+      || !world.text.includes("Tell the store what you need.")
+      || !world.text.includes("Every completed order can build trust.")
+      || !world.text.includes("/world/assets/intent-m.mp4")
+      || !world.text.includes("/world/assets/intent-m.webp")
+      || !world.text.includes("/world/assets/connector-fulfillment-receipt-m.mp4")
+      || !world.text.includes("/agent/raposa-shop")
+    ) {
+      throw new Error("Merchant journey page did not expose the complete desktop/mobile story.");
+    }
+    const engine = await getText(origin, "/world/engine.js");
+    if (
+      !engine.response.headers.get("content-type")?.includes("text/javascript")
+      || !engine.text.includes("prefers-reduced-motion")
+      || !engine.text.includes("clipMobile")
+      || !engine.text.includes("aria-current")
+    ) {
+      throw new Error("Merchant journey engine did not expose motion and accessibility safeguards.");
+    }
+    const unknownAsset = await fetch(`${origin}/world/assets/not-allowed.mp4`);
+    if (unknownAsset.status !== 404) {
+      throw new Error(`Unknown merchant journey asset should be 404, got ${unknownAsset.status}.`);
+    }
+
     const root = await getJson(origin, "/") as {
       product?: string;
       agentDiscovery?: {
