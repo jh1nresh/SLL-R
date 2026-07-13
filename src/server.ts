@@ -10,12 +10,12 @@ function safeEqual(a: string, b: string): boolean {
   const bb = Buffer.from(b);
   return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
-import { acceptOrder, claimOrder, createOrder, fulfillOrder, getOrder, listOrders, markOrderReady, rejectOrder } from "./core/orders.js";
+import { acceptOrder, attachPaymentProofMutation, claimOrder, createOrder, fulfillOrderMutation, getOrder, listOrders, markOrderReady, rejectOrder } from "./core/orders.js";
 import { quoteOrder } from "./core/quote.js";
 import { allMerchantProfiles, hydrateDemoMerchants, merchantForId } from "./merchants/profiles.js";
 import { pilotKitForMerchant } from "./merchants/pilotKits.js";
 import { sllrManifest } from "./manifest.js";
-import { attachPaymentProof } from "./core/orders.js";
+import { actionKeyFrom } from "./core/mutations.js";
 import { getUnavailableItems, setItemAvailability } from "./core/availability.js";
 import { nearbyMerchants } from "./core/nearby.js";
 import { issueMerchantToken, requireMerchantAuth } from "./core/merchantAuth.js";
@@ -239,13 +239,52 @@ function originFrom(request: IncomingMessage) {
   return `${protocol}://${host}`;
 }
 
+function mutationForResponse(error: unknown) {
+  if (typeof error !== "object" || !error || !("mutation" in error)) return null;
+  const mutation = error.mutation;
+  if (typeof mutation !== "object" || !mutation) return null;
+  const candidate = mutation as Record<string, unknown>;
+  if (
+    typeof candidate.actionKey !== "string"
+    || typeof candidate.resourceId !== "string"
+    || typeof candidate.state !== "string"
+    || typeof candidate.terminal !== "boolean"
+    || typeof candidate.retryable !== "boolean"
+    || !Array.isArray(candidate.allowedNextActions)
+    || !candidate.allowedNextActions.every((value) => typeof value === "string")
+    || !Array.isArray(candidate.proofRefs)
+    || !candidate.proofRefs.every((value) => typeof value === "string")
+  ) return null;
+  const refusal = typeof candidate.refusal === "object" && candidate.refusal
+    && typeof (candidate.refusal as Record<string, unknown>).code === "string"
+    && typeof (candidate.refusal as Record<string, unknown>).message === "string"
+    ? candidate.refusal as { code: string; message: string }
+    : null;
+  return {
+    actionKey: candidate.actionKey,
+    resourceId: candidate.resourceId,
+    state: candidate.state,
+    terminal: candidate.terminal,
+    retryable: candidate.retryable,
+    allowedNextActions: candidate.allowedNextActions,
+    proofRefs: candidate.proofRefs,
+    ...(typeof candidate.retryAfterMs === "number" ? { retryAfterMs: candidate.retryAfterMs } : {}),
+    ...(typeof candidate.expiresAt === "string" ? { expiresAt: candidate.expiresAt } : {}),
+    ...(typeof candidate.receiptRef === "string" ? { receiptRef: candidate.receiptRef } : {}),
+    ...(refusal ? { refusal } : {}),
+  };
+}
+
 function errorResponse(response: ServerResponse, error: unknown) {
   const status = typeof error === "object" && error && "status" in error && typeof error.status === "number"
     ? error.status
     : 500;
+  const mutation = mutationForResponse(error);
   json(response, status, {
     error: error instanceof Error ? error.message : "SLL-R request failed.",
     ...(typeof error === "object" && error && "quote" in error ? { quote: error.quote } : {}),
+    ...(typeof error === "object" && error && "code" in error && typeof error.code === "string" ? { code: error.code } : {}),
+    ...(mutation ? { mutation } : {}),
   });
 }
 
@@ -803,12 +842,16 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         if (request.method === "POST" && action === "fulfill") {
           const payload = await body(request);
           await requireMerchantAuth(request.headers, payload, String((payload as { merchantId?: unknown }).merchantId ?? ""));
-          const order = await fulfillOrder(orderId, payload as never);
+          const { result: order, mutation } = await fulfillOrderMutation(orderId, payload as never, {
+            requesterId: "merchant-terminal",
+            actionKey: actionKeyFrom(payload, "merchant_fulfill_order"),
+          });
           return json(response, 200, {
             product: "SLL-R merchant terminal",
             status: order.status,
             proofLevel: order.proofLevel,
             order,
+            ...(mutation ? { mutation } : {}),
           });
         }
         if (request.method === "POST" && action === "ready") {
@@ -835,12 +878,16 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         // caller can't forge a paid order + receipt (the trust layer). demo=true
         // works only when no verifier secret is configured.
         requirePaymentVerifier(request.headers, payload);
-        const order = await attachPaymentProof(payload as never);
+        const { result: order, mutation } = await attachPaymentProofMutation(payload as never, {
+          requesterId: "payment-provider",
+          actionKey: actionKeyFrom(payload, "attach_payment_proof"),
+        });
         return json(response, 200, {
           product: "SLL-R payment proof adapter",
           status: order.status,
           proofLevel: order.proofLevel,
           order,
+          ...(mutation ? { mutation } : {}),
         });
       }
 

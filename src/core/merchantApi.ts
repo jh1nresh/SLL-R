@@ -1,4 +1,4 @@
-import { attachPaymentProof, createOrder, fulfillOrder, getOrder, listOrders } from "./orders.js";
+import { attachPaymentProofMutation, createOrder, fulfillOrderMutation, getOrder, listOrders } from "./orders.js";
 import { quoteOrder } from "./quote.js";
 import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
 import { recurringSuggestion } from "./recurring.js";
@@ -325,27 +325,15 @@ export async function attachMerchantPayment(merchantId: string, headers: Record<
   requirePaymentVerifier(headers, payload);
 
   const actionKey = actionKeyFrom(payload, "attach_payment_proof");
-  const { result, mutation } = await withIdempotentMutation({
-    operation: "attach_payment_proof",
-    tenantId: merchant.id,
+  const { result, mutation } = await attachPaymentProofMutation({
+    orderId: order.id,
+    merchantId: merchant.id,
+    provider,
+    amountUsd: String(payload.amountUsd ?? order.item.subtotalUsd),
+    paymentId,
+  }, {
     requesterId: "merchant-verifier",
-    targetId: order.id,
     actionKey,
-    request: {
-      merchantId: merchant.id,
-      orderId: order.id,
-      provider,
-      amountUsd: String(payload.amountUsd || order.item.subtotalUsd),
-      paymentId,
-    },
-    run: () => attachPaymentProof({
-      orderId: order.id,
-      merchantId: merchant.id,
-      provider,
-      amountUsd: String(payload.amountUsd || order.item.subtotalUsd),
-      paymentId,
-    }),
-    mutationFromResult: (updated, key) => mutationResultForOrder(key, updated),
   });
   const updated = result;
   return {
@@ -363,24 +351,14 @@ export async function issueMerchantReceipt(merchantId: string, headers: Record<s
   if (!orderId) throw Object.assign(new Error("Missing orderId."), { status: 400 });
   requirePaymentVerifier(headers, payload);
   const actionKey = actionKeyFrom(payload, "issue_receipt");
-  const { result, mutation } = await withIdempotentMutation({
+  const { result, mutation } = await fulfillOrderMutation(orderId, {
+    merchantId,
+    actor: typeof payload.actor === "string" ? payload.actor : "merchant",
+    note: typeof payload.note === "string" ? payload.note : "Receipt issued through merchant API.",
+  }, {
     operation: "issue_receipt",
-    tenantId: merchantId,
     requesterId: "merchant-verifier",
-    targetId: orderId,
     actionKey,
-    request: {
-      merchantId,
-      orderId,
-      actor: typeof payload.actor === "string" ? payload.actor : "merchant",
-      note: typeof payload.note === "string" ? payload.note : "Receipt issued through merchant API.",
-    },
-    run: () => fulfillOrder(orderId, {
-      merchantId,
-      actor: typeof payload.actor === "string" ? payload.actor : "merchant",
-      note: typeof payload.note === "string" ? payload.note : "Receipt issued through merchant API.",
-    }),
-    mutationFromResult: (order, key) => mutationResultForOrder(key, order),
   });
   const order = result;
   return {

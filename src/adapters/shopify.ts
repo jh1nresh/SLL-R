@@ -283,6 +283,9 @@ export async function shopifyOrdersFulfilledWebhook(headers: Record<string, stri
     merchantId: order.merchantId,
     actor: "shopify",
     note: "Shopify fulfillment webhook received.",
+  }, {
+    requesterId: "shopify",
+    actionKey: `shopify:fulfilled:${paymentIdFrom(payload)}:${order.id}`,
   });
 }
 

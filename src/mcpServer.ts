@@ -11,7 +11,8 @@ import {
 } from "./core/merchantApi.js";
 import { recommendFromMenu } from "./core/menuRecommend.js";
 import { createVerifiedReview } from "./core/verifiedReview.js";
-import { acceptOrder, fulfillOrder, getOrder, listOrdersForBuyer, markOrderReady, rejectOrder } from "./core/orders.js";
+import { acceptOrder, fulfillOrderMutation, getOrder, listOrdersForBuyer, markOrderReady, rejectOrder } from "./core/orders.js";
+import { actionKeyFrom } from "./core/mutations.js";
 import { setItemAvailability } from "./core/availability.js";
 import { requireMerchantAuth } from "./core/merchantAuth.js";
 import { recommendForBuyer } from "./core/recommend.js";
@@ -449,15 +450,25 @@ const tools: ToolDefinition[] = [
         merchantId: { type: "string" },
         orderId: { type: "string" },
         verificationToken: { type: "string", description: "Merchant verifier secret." },
+        ...idempotencyProperties,
       },
     },
     handler: async (args) => {
       await requireMerchantAuth({}, args, requireString(args, "merchantId"));
-      const order = await fulfillOrder(requireString(args, "orderId"), {
+      const { result: order, mutation } = await fulfillOrderMutation(requireString(args, "orderId"), {
         merchantId: requireString(args, "merchantId"),
         actor: "agent-pos",
+      }, {
+        requesterId: "agent-pos",
+        actionKey: actionKeyFrom(args, "merchant_fulfill_order"),
       });
-      return { product: "SLL-R agent POS", status: order.status, proofLevel: order.proofLevel, order };
+      return {
+        product: "SLL-R agent POS",
+        status: order.status,
+        proofLevel: order.proofLevel,
+        order,
+        ...(mutation ? { mutation } : {}),
+      };
     },
   },
   {
