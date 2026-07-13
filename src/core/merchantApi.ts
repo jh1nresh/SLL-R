@@ -7,6 +7,7 @@ import { estimatedPickupWaitMinutes } from "./orders.js";
 import { grantConsent, validateConsentForOrder, expectedConfirmation } from "./consent.js";
 import { centsFromUsd } from "./money.js";
 import { recordLoopSafe, loopIdForQuote, loopIdForOrder } from "./actionLoop.js";
+import { actionKeyFrom, mutationResultForOrder, withIdempotentMutation } from "./mutations.js";
 import type { MerchantProfile, OrderRequest, PaymentRail, QuoteRequest } from "../types.js";
 
 function requireMerchant(merchantId: string) {
@@ -197,7 +198,16 @@ export async function grantMerchantConsent(payload: Record<string, unknown>) {
   return { product: "SLL-R consent receipt", consent, next: "create the order with this quoteId + consentId." };
 }
 
-export async function createMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
+type CreateMerchantOrderResult = {
+  product: string;
+  status: string;
+  quote: unknown;
+  order: Awaited<ReturnType<typeof createOrder>>["order"];
+  suggestRecurring: ReturnType<typeof recurringSuggestion>;
+  next: string;
+};
+
+async function createMerchantOrderOnce(merchantId: string, payload: Record<string, unknown>): Promise<CreateMerchantOrderResult> {
   requireMerchant(merchantId);
   const seedBuyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
   const seedIntent = typeof payload.userIntent === "string" ? payload.userIntent : "";
@@ -272,6 +282,23 @@ export async function createMerchantOrder(merchantId: string, payload: Record<st
   };
 }
 
+export async function createMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
+  requireMerchant(merchantId);
+  const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
+  const actionKey = actionKeyFrom(payload, "create_order");
+  const { result, mutation } = await withIdempotentMutation({
+    operation: "create_order",
+    tenantId: merchantId,
+    requesterId: buyerId,
+    targetId: merchantId,
+    actionKey,
+    request: { ...payload, merchantId },
+    run: () => createMerchantOrderOnce(merchantId, payload),
+    mutationFromResult: (created, key) => mutationResultForOrder(key, created.order),
+  });
+  return mutation ? { ...result, mutation } : result;
+}
+
 export async function listMerchantOrders(merchantId: string, status?: string | null) {
   requireMerchant(merchantId);
   return {
@@ -297,18 +324,36 @@ export async function attachMerchantPayment(merchantId: string, headers: Record<
   if (!paymentId) throw Object.assign(new Error("Missing paymentId."), { status: 400 });
   requirePaymentVerifier(headers, payload);
 
-  const updated = await attachPaymentProof({
-    orderId: order.id,
-    merchantId: merchant.id,
-    provider,
-    amountUsd: String(payload.amountUsd || order.item.subtotalUsd),
-    paymentId,
+  const actionKey = actionKeyFrom(payload, "attach_payment_proof");
+  const { result, mutation } = await withIdempotentMutation({
+    operation: "attach_payment_proof",
+    tenantId: merchant.id,
+    requesterId: "merchant-verifier",
+    targetId: order.id,
+    actionKey,
+    request: {
+      merchantId: merchant.id,
+      orderId: order.id,
+      provider,
+      amountUsd: String(payload.amountUsd || order.item.subtotalUsd),
+      paymentId,
+    },
+    run: () => attachPaymentProof({
+      orderId: order.id,
+      merchantId: merchant.id,
+      provider,
+      amountUsd: String(payload.amountUsd || order.item.subtotalUsd),
+      paymentId,
+    }),
+    mutationFromResult: (updated, key) => mutationResultForOrder(key, updated),
   });
+  const updated = result;
   return {
     product: "SLL-R merchant payment proof",
     status: updated.status,
     proofLevel: updated.proofLevel,
     order: updated,
+    ...(mutation ? { mutation } : {}),
   };
 }
 
@@ -317,15 +362,32 @@ export async function issueMerchantReceipt(merchantId: string, headers: Record<s
   const orderId = String(payload.orderId || "");
   if (!orderId) throw Object.assign(new Error("Missing orderId."), { status: 400 });
   requirePaymentVerifier(headers, payload);
-  const order = await fulfillOrder(orderId, {
-    merchantId,
-    actor: typeof payload.actor === "string" ? payload.actor : "merchant",
-    note: typeof payload.note === "string" ? payload.note : "Receipt issued through merchant API.",
+  const actionKey = actionKeyFrom(payload, "issue_receipt");
+  const { result, mutation } = await withIdempotentMutation({
+    operation: "issue_receipt",
+    tenantId: merchantId,
+    requesterId: "merchant-verifier",
+    targetId: orderId,
+    actionKey,
+    request: {
+      merchantId,
+      orderId,
+      actor: typeof payload.actor === "string" ? payload.actor : "merchant",
+      note: typeof payload.note === "string" ? payload.note : "Receipt issued through merchant API.",
+    },
+    run: () => fulfillOrder(orderId, {
+      merchantId,
+      actor: typeof payload.actor === "string" ? payload.actor : "merchant",
+      note: typeof payload.note === "string" ? payload.note : "Receipt issued through merchant API.",
+    }),
+    mutationFromResult: (order, key) => mutationResultForOrder(key, order),
   });
+  const order = result;
   return {
     product: "SLL-R merchant receipt",
     status: order.status,
     proofLevel: order.proofLevel,
     order,
+    ...(mutation ? { mutation } : {}),
   };
 }

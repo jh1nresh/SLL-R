@@ -63,6 +63,11 @@ const quoteProperties = {
   quantity: { type: "number", description: "Item quantity. Defaults to 1." },
 } as const;
 
+const idempotencyProperties = {
+  idempotencyKey: { type: "string", description: "Stable caller-generated key for safe retry/resume. Reusing the same key with a different request is rejected." },
+  actionKey: { type: "string", description: "Alias for idempotencyKey." },
+} as const;
+
 function requireString(args: Record<string, unknown>, key: string) {
   const value = args[key];
   if (typeof value !== "string" || !value.trim()) {
@@ -196,6 +201,7 @@ const tools: ToolDefinition[] = [
         quoteId: { type: "string", description: "Quote to bind the order to (from quote_order). Required when SLLR_REQUIRE_CONSENT is on." },
         consentId: { type: "string", description: "Consent receipt (from request_consent). Required when SLLR_REQUIRE_CONSENT is on." },
         acceptDelay: { type: "boolean", description: "Set true ONLY after the buyer re-confirms a longer wait (the rail returns 409 reconfirm_with_acceptDelay when the queue-aware ETA now exceeds their deadline or the quoted ETA)." },
+        ...idempotencyProperties,
       },
     },
     handler: (args, _origin, buyerId) => {
@@ -534,6 +540,7 @@ const tools: ToolDefinition[] = [
         amountUsd: { type: "string", description: "Paid amount in USD as a decimal string. Defaults to the order subtotal." },
         verificationToken: { type: "string", description: "Merchant payment verifier secret for production proof." },
         demo: { type: "boolean", description: "Local demo proof only. Production must use verificationToken." },
+        ...idempotencyProperties,
       },
     },
     handler: (args) => attachMerchantPayment(requireString(args, "merchantId"), {}, args),
@@ -569,6 +576,7 @@ const tools: ToolDefinition[] = [
         note: { type: "string", description: "Fulfillment note stored on the receipt." },
         verificationToken: { type: "string", description: "Merchant verifier secret, required when the server configures SLLR_MERCHANT_PAYMENT_VERIFY_SECRET." },
         demo: { type: "boolean", description: "Local demo proof only, accepted only when no verifier secret is configured." },
+        ...idempotencyProperties,
       },
     },
     handler: (args) => issueMerchantReceipt(requireString(args, "merchantId"), {}, args),
@@ -604,7 +612,9 @@ async function callTool(params: unknown, origin: string, id: JsonRpcId, buyerId:
   const rawArguments = typeof params === "object" && params && "arguments" in params
     ? (params as { arguments?: unknown }).arguments
     : {};
-  const args = typeof rawArguments === "object" && rawArguments ? rawArguments as Record<string, unknown> : {};
+  const args = typeof rawArguments === "object" && rawArguments
+    ? { ...(rawArguments as Record<string, unknown>), __mcpRequestId: id }
+    : { __mcpRequestId: id };
   try {
     const result = await tool.handler(args, origin, buyerId);
     return jsonRpcResult(id, {
@@ -614,8 +624,12 @@ async function callTool(params: unknown, origin: string, id: JsonRpcId, buyerId:
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "SLL-R tool call failed.";
+    const mutation = typeof error === "object" && error && "mutation" in error
+      ? (error as { mutation?: unknown }).mutation
+      : undefined;
     return jsonRpcResult(id, {
       content: [{ type: "text", text: message }],
+      ...(mutation ? { structuredContent: { mutation } } : {}),
       isError: true,
     });
   }

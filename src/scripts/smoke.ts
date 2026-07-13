@@ -8,6 +8,7 @@ import { getQuote } from "../core/quotes.js";
 import { grantConsent } from "../core/consent.js";
 import { getLoop, loopIdForQuote, loopIdForOrder } from "../core/actionLoop.js";
 import { setItemAvailability } from "../core/availability.js";
+import { attachMerchantPayment, createMerchantOrder, issueMerchantReceipt } from "../core/merchantApi.js";
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -157,6 +158,33 @@ async function smokeMcp(origin: string) {
     throw new Error(`MCP create_order failed: ${JSON.stringify(order)}`);
   }
 
+  const idempotentArgs = {
+    merchantId: "solyd",
+    userIntent: "I need a black MagSafe iPhone 16 case.",
+    deliverByDays: 7,
+    maxSpendUsd: "90.00",
+    agentId: "mcp-smoke",
+    customerLabel: "MCP smoke customer",
+    paymentMode: "checkout",
+    idempotencyKey: "mcp-smoke-create-order-1",
+  };
+  const firstIdempotent = await mcpToolCall(origin, "create_order", idempotentArgs);
+  const secondIdempotent = await mcpToolCall(origin, "create_order", idempotentArgs);
+  const firstId = (firstIdempotent.structuredContent as { order?: { id?: string }; mutation?: { actionKey?: string } } | undefined)?.order?.id;
+  const secondId = (secondIdempotent.structuredContent as { order?: { id?: string }; mutation?: { actionKey?: string } } | undefined)?.order?.id;
+  if (firstIdempotent.isError || secondIdempotent.isError || !firstId || firstId !== secondId) {
+    throw new Error(`MCP create_order idempotency did not replay semantic result: ${JSON.stringify({ firstIdempotent, secondIdempotent })}`);
+  }
+  const createMutation = secondIdempotent.structuredContent as { mutation?: { actionKey?: string; resourceId?: string; allowedNextActions?: string[] } } | undefined;
+  if (createMutation?.mutation?.actionKey !== "mcp-smoke-create-order-1" || createMutation.mutation.resourceId !== firstId || !createMutation.mutation.allowedNextActions?.includes("attach_payment_proof")) {
+    throw new Error(`MCP create_order did not return useful mutation metadata: ${JSON.stringify(secondIdempotent)}`);
+  }
+  const conflict = await mcpToolCall(origin, "create_order", { ...idempotentArgs, userIntent: "I need a clear MagSafe iPhone 16 case." });
+  const conflictMutation = conflict.structuredContent as { mutation?: { refusal?: { code?: string } } } | undefined;
+  if (!conflict.isError || conflictMutation?.mutation?.refusal?.code !== "idempotency_conflict") {
+    throw new Error(`MCP create_order should reject same key with different payload: ${JSON.stringify(conflict)}`);
+  }
+
   const paymentOptions = await mcpToolCall(origin, "get_payment_options", {
     merchantId: "raposa-coffee",
     orderId,
@@ -198,9 +226,27 @@ async function smokeMcp(origin: string) {
       provider: "counter",
       paymentId: "mcp_counter_demo",
       demo: true,
+      idempotencyKey: "mcp-smoke-payment-1",
     });
-    const demoProofContent = demoProof.structuredContent as { proofLevel?: string; order?: { payment?: { paymentId?: string } } } | undefined;
-    if (demoProof.isError || demoProofContent?.proofLevel !== "receipt_memory_issued" || demoProofContent.order?.payment?.paymentId !== "mcp_counter_demo") {
+    const demoProofReplay = await mcpToolCall(origin, "attach_payment_proof", {
+      merchantId: "raposa-coffee",
+      orderId,
+      provider: "counter",
+      paymentId: "mcp_counter_demo",
+      demo: true,
+      idempotencyKey: "mcp-smoke-payment-1",
+    });
+    const demoProofContent = demoProof.structuredContent as { proofLevel?: string; order?: { payment?: { paymentId?: string }; receipt?: { receiptHash?: string } }; mutation?: { terminal?: boolean; receiptRef?: string } } | undefined;
+    const replayContent = demoProofReplay.structuredContent as { order?: { receipt?: { receiptHash?: string } } } | undefined;
+    if (
+      demoProof.isError
+      || demoProofReplay.isError
+      || demoProofContent?.proofLevel !== "receipt_memory_issued"
+      || demoProofContent.order?.payment?.paymentId !== "mcp_counter_demo"
+      || !demoProofContent.order?.receipt?.receiptHash
+      || demoProofContent.order.receipt.receiptHash !== replayContent?.order?.receipt?.receiptHash
+      || demoProofContent.mutation?.terminal !== true
+    ) {
       throw new Error(`MCP attach_payment_proof demo path failed: ${JSON.stringify(demoProof)}`);
     }
   } finally {
@@ -270,9 +316,26 @@ async function smokeMcp(origin: string) {
     actor: "raposa-staff",
     note: "Counter paid and handed off during MCP smoke.",
     demo: true,
+    idempotencyKey: "mcp-smoke-receipt-1",
   });
-  const receiptContent = receipt.structuredContent as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } } | undefined;
-  if (receipt.isError || receiptContent?.proofLevel !== "receipt_memory_issued" || !receiptContent.order?.receipt?.receiptHash) {
+  const receiptReplay = await mcpToolCall(origin, "issue_receipt", {
+    merchantId: "raposa-coffee",
+    orderId: receiptOrderId,
+    actor: "raposa-staff",
+    note: "Counter paid and handed off during MCP smoke.",
+    demo: true,
+    idempotencyKey: "mcp-smoke-receipt-1",
+  });
+  const receiptContent = receipt.structuredContent as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } }; mutation?: { terminal?: boolean } } | undefined;
+  const receiptReplayContent = receiptReplay.structuredContent as { order?: { receipt?: { receiptHash?: string } } } | undefined;
+  if (
+    receipt.isError
+    || receiptReplay.isError
+    || receiptContent?.proofLevel !== "receipt_memory_issued"
+    || !receiptContent.order?.receipt?.receiptHash
+    || receiptContent.order.receipt.receiptHash !== receiptReplayContent?.order?.receipt?.receiptHash
+    || receiptContent.mutation?.terminal !== true
+  ) {
     throw new Error(`MCP issue_receipt failed: ${JSON.stringify(receipt)}`);
   }
 }
@@ -657,6 +720,67 @@ async function smokeStoreBackend() {
   if (storeBackendName() !== "memory") {
     throw new Error("Store should fall back to memory backend after KV env is cleared.");
   }
+}
+
+async function smokeIdempotentMutationRestart() {
+  await withFakeRedis(async () => {
+    const orderPayload = {
+      userIntent: "black magsafe iphone 16 case",
+      deliverByDays: 7,
+      maxSpendUsd: "90.00",
+      paymentMode: "checkout",
+      idempotencyKey: "restart-create-order-1",
+    };
+    const first = await createMerchantOrder("solyd", orderPayload) as { order?: { id?: string }; mutation?: { resourceId?: string } };
+    const firstOrderId = first.order?.id;
+    if (!firstOrderId || first.mutation?.resourceId !== firstOrderId) {
+      throw new Error(`Initial idempotent order did not return mutation metadata: ${JSON.stringify(first)}`);
+    }
+    resetStoreForTest();
+    const replay = await createMerchantOrder("solyd", orderPayload) as { order?: { id?: string }; mutation?: { resourceId?: string } };
+    if (replay.order?.id !== firstOrderId || replay.mutation?.resourceId !== firstOrderId) {
+      throw new Error(`Idempotent order did not replay after store restart: ${JSON.stringify({ first, replay })}`);
+    }
+    const conflict = await createMerchantOrder("solyd", { ...orderPayload, userIntent: "clear magsafe iphone 16 case" })
+      .then(() => null)
+      .catch((error) => error as Error & { code?: string; mutation?: { refusal?: { code?: string } } });
+    if (!conflict || conflict.code !== "idempotency_conflict" || conflict.mutation?.refusal?.code !== "idempotency_conflict") {
+      throw new Error(`Idempotency conflict did not survive restart: ${JSON.stringify(conflict)}`);
+    }
+
+    const payment = await attachMerchantPayment("solyd", {}, {
+      orderId: firstOrderId,
+      provider: "stripe",
+      paymentId: "restart-stripe-payment",
+      demo: true,
+      idempotencyKey: "restart-payment-1",
+    }) as { order?: { receipt?: { receiptHash?: string } }; mutation?: { terminal?: boolean; receiptRef?: string } };
+    const receiptHash = payment.order?.receipt?.receiptHash;
+    if (!receiptHash || payment.mutation?.terminal !== true || !payment.mutation.receiptRef) {
+      throw new Error(`Initial idempotent payment did not issue terminal receipt metadata: ${JSON.stringify(payment)}`);
+    }
+    resetStoreForTest();
+    const paymentReplay = await attachMerchantPayment("solyd", {}, {
+      orderId: firstOrderId,
+      provider: "stripe",
+      paymentId: "restart-stripe-payment",
+      demo: true,
+      idempotencyKey: "restart-payment-1",
+    }) as { order?: { receipt?: { receiptHash?: string } } };
+    if (paymentReplay.order?.receipt?.receiptHash !== receiptHash) {
+      throw new Error(`Idempotent payment did not replay the same receipt after restart: ${JSON.stringify(paymentReplay)}`);
+    }
+    const fulfillReplay = await issueMerchantReceipt("solyd", {}, {
+      orderId: firstOrderId,
+      actor: "solyd-staff",
+      note: "Already paid and fulfilled.",
+      demo: true,
+      idempotencyKey: "restart-receipt-after-payment",
+    }) as { order?: { receipt?: { receiptHash?: string } } };
+    if (fulfillReplay.order?.receipt?.receiptHash !== receiptHash) {
+      throw new Error(`Receipt lifecycle should keep one canonical terminal receipt: ${JSON.stringify(fulfillReplay)}`);
+    }
+  });
 }
 
 // ETA trust (pilot closure Gap 3): the quote's ETA is queue-aware (same formula
@@ -1744,6 +1868,7 @@ async function main() {
     }
 
     await smokeStoreBackend();
+    await smokeIdempotentMutationRestart();
     await smokeMcp(origin);
     await smokeReceiptGating(origin);
     await smokeBuyerAuth(origin);

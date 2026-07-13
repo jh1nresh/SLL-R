@@ -570,6 +570,7 @@ export function sllrOpenApi(origin: string) {
         OrderRequestBody: {
           allOf: [
             { $ref: "#/components/schemas/QuoteRequestBody" },
+            { $ref: "#/components/schemas/IdempotencyFields" },
             {
               type: "object",
               properties: {
@@ -579,6 +580,13 @@ export function sllrOpenApi(origin: string) {
               },
             },
           ],
+        },
+        IdempotencyFields: {
+          type: "object",
+          properties: {
+            idempotencyKey: { type: "string", description: "Stable caller-generated key for safe retry/resume. Reusing the same key with a different normalized request is rejected." },
+            actionKey: { type: "string", description: "Alias for idempotencyKey." },
+          },
         },
         StandaloneAgentMessageBody: {
           type: "object",
@@ -606,6 +614,8 @@ export function sllrOpenApi(origin: string) {
             reference: { type: "string" },
             demo: { type: "boolean" },
             verificationToken: { type: "string" },
+            idempotencyKey: { type: "string" },
+            actionKey: { type: "string" },
           },
         },
         PaymentOptionsBody: {
@@ -640,6 +650,8 @@ export function sllrOpenApi(origin: string) {
             reference: { type: "string" },
             demo: { type: "boolean" },
             verificationToken: { type: "string" },
+            idempotencyKey: { type: "string" },
+            actionKey: { type: "string" },
           },
         },
         ReceiptBody: {
@@ -649,6 +661,8 @@ export function sllrOpenApi(origin: string) {
             orderId: { type: "string" },
             actor: { type: "string" },
             note: { type: "string" },
+            idempotencyKey: { type: "string" },
+            actionKey: { type: "string" },
           },
         },
       },
