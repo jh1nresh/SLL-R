@@ -9,6 +9,8 @@ import { grantConsent } from "../core/consent.js";
 import { getLoop, loopIdForQuote, loopIdForOrder } from "../core/actionLoop.js";
 import { setItemAvailability } from "../core/availability.js";
 import { attachMerchantPayment, createMerchantOrder, issueMerchantReceipt } from "../core/merchantApi.js";
+import { attachPaymentProof } from "../core/orders.js";
+import { withIdempotentMutation } from "../core/mutations.js";
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -117,7 +119,7 @@ async function smokeMcp(origin: string) {
 
   const toolsList = await mcpRequest(origin, "tools/list") as { tools?: Array<{ name?: string; inputSchema?: unknown }> };
   const toolNames = toolsList.tools?.map((tool) => tool.name) || [];
-  for (const required of ["list_merchants", "get_menu", "quote_order", "create_order", "get_payment_options", "attach_payment_proof", "check_order_status", "issue_receipt", "create_demo_merchant"]) {
+  for (const required of ["list_merchants", "get_menu", "quote_order", "create_order", "get_payment_options", "attach_payment_proof", "check_order_status", "issue_receipt", "merchant_fulfill_order", "create_demo_merchant"]) {
     if (!toolNames.includes(required)) {
       throw new Error(`MCP tools/list is missing ${required}: ${JSON.stringify(toolNames)}`);
     }
@@ -338,6 +340,57 @@ async function smokeMcp(origin: string) {
   ) {
     throw new Error(`MCP issue_receipt failed: ${JSON.stringify(receipt)}`);
   }
+
+  const fulfillOrderCall = await mcpToolCall(origin, "create_order", {
+    merchantId: "raposa-coffee",
+    userIntent: "I need an espresso in 10 minutes.",
+    deadlineMinutes: 10,
+    maxSpendUsd: "10.00",
+    agentId: "mcp-smoke",
+    paymentMode: "counter",
+  });
+  const fulfillOrderId = (fulfillOrderCall.structuredContent as { order?: { id?: string } } | undefined)?.order?.id;
+  if (fulfillOrderCall.isError || !fulfillOrderId) {
+    throw new Error(`MCP fulfill test order failed: ${JSON.stringify(fulfillOrderCall)}`);
+  }
+  const fulfillArgs = {
+    merchantId: "raposa-coffee",
+    orderId: fulfillOrderId,
+    demo: true,
+    idempotencyKey: "mcp-smoke-fulfill-1",
+  };
+  const fulfilled = await mcpToolCall(origin, "merchant_fulfill_order", fulfillArgs);
+  const fulfilledReplay = await mcpToolCall(origin, "merchant_fulfill_order", fulfillArgs);
+  const fulfilledContent = fulfilled.structuredContent as { order?: { receipt?: { receiptHash?: string } }; mutation?: { terminal?: boolean; receiptRef?: string } } | undefined;
+  const fulfilledReplayContent = fulfilledReplay.structuredContent as { order?: { receipt?: { receiptHash?: string } } } | undefined;
+  if (
+    fulfilled.isError
+    || fulfilledReplay.isError
+    || !fulfilledContent?.order?.receipt?.receiptHash
+    || fulfilledContent.order.receipt.receiptHash !== fulfilledReplayContent?.order?.receipt?.receiptHash
+    || fulfilledContent.mutation?.terminal !== true
+    || !fulfilledContent.mutation.receiptRef
+  ) {
+    throw new Error(`MCP merchant_fulfill_order did not replay the terminal mutation: ${JSON.stringify({ fulfilled, fulfilledReplay })}`);
+  }
+  const secondFulfillOrderCall = await mcpToolCall(origin, "create_order", {
+    merchantId: "raposa-coffee",
+    userIntent: "I need a croissant in 10 minutes.",
+    deadlineMinutes: 10,
+    maxSpendUsd: "10.00",
+    agentId: "mcp-smoke",
+    paymentMode: "counter",
+  });
+  const secondFulfillOrderId = (secondFulfillOrderCall.structuredContent as { order?: { id?: string } } | undefined)?.order?.id;
+  if (!secondFulfillOrderId) throw new Error(`Second MCP fulfill test order failed: ${JSON.stringify(secondFulfillOrderCall)}`);
+  const fulfillConflict = await mcpToolCall(origin, "merchant_fulfill_order", {
+    ...fulfillArgs,
+    orderId: secondFulfillOrderId,
+  });
+  const fulfillConflictContent = fulfillConflict.structuredContent as { mutation?: { refusal?: { code?: string } } } | undefined;
+  if (!fulfillConflict.isError || fulfillConflictContent?.mutation?.refusal?.code !== "idempotency_conflict") {
+    throw new Error(`MCP merchant_fulfill_order should reject a reused key for another order: ${JSON.stringify(fulfillConflict)}`);
+  }
 }
 
 async function smokeReceiptGating(origin: string) {
@@ -391,6 +444,44 @@ async function smokeReceiptGating(origin: string) {
     }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } };
     if (receiptWithSecret.proofLevel !== "receipt_memory_issued" || !receiptWithSecret.order?.receipt?.receiptHash) {
       throw new Error(`Receipt with verifier secret failed: ${JSON.stringify(receiptWithSecret)}`);
+    }
+
+    const directOrder = await postJson(origin, "/merchants/raposa-coffee/orders", {
+      userIntent: "I need a cold brew in 10 minutes.",
+      deadlineMinutes: 10,
+      maxSpendUsd: "10.00",
+      paymentMode: "counter",
+    }) as { order?: { id?: string } };
+    const directOrderId = directOrder.order?.id;
+    if (!directOrderId) throw new Error(`Direct fulfill test order failed: ${JSON.stringify(directOrder)}`);
+    const directFulfillPayload = {
+      merchantId: "raposa-coffee",
+      actor: "raposa-staff",
+      note: "Handed over at the counter.",
+      verificationToken: "verify-smoke-secret",
+      idempotencyKey: "http-smoke-fulfill-1",
+    };
+    const directFulfill = await postJson(origin, `/orders/${directOrderId}/fulfill`, directFulfillPayload) as {
+      order?: { receipt?: { receiptHash?: string } };
+      mutation?: { terminal?: boolean; receiptRef?: string };
+    };
+    const directFulfillReplay = await postJson(origin, `/orders/${directOrderId}/fulfill`, directFulfillPayload) as {
+      order?: { receipt?: { receiptHash?: string } };
+    };
+    if (
+      !directFulfill.order?.receipt?.receiptHash
+      || directFulfill.order.receipt.receiptHash !== directFulfillReplay.order?.receipt?.receiptHash
+      || directFulfill.mutation?.terminal !== true
+      || !directFulfill.mutation.receiptRef
+    ) {
+      throw new Error(`Direct fulfill route did not replay the terminal mutation: ${JSON.stringify({ directFulfill, directFulfillReplay })}`);
+    }
+    const directFulfillConflict = await postJsonFailure(origin, `/orders/${directOrderId}/fulfill`, {
+      ...directFulfillPayload,
+      note: "Changed fulfillment proof.",
+    });
+    if (directFulfillConflict.status !== 409 || directFulfillConflict.json.code !== "idempotency_conflict") {
+      throw new Error(`Direct fulfill route should reject a changed request with the same key: ${JSON.stringify(directFulfillConflict)}`);
     }
   } finally {
     if (previousSecret === undefined) {
@@ -542,9 +633,16 @@ async function smokeDemoMerchants(origin: string) {
 
 // Minimal in-process Upstash / Vercel KV REST server to exercise the
 // RedisRestStore command encoding (GET/SET/SADD/SMEMBERS) end to end.
-async function withFakeRedis<T>(run: () => Promise<T>): Promise<T> {
+type FakeRedisControl = {
+  failNextUnconditionalSet: () => void;
+  unconditionalSetAttempts: () => number;
+};
+
+async function withFakeRedis<T>(run: (control: FakeRedisControl) => Promise<T>): Promise<T> {
   const values = new Map<string, string>();
   const sets = new Map<string, Set<string>>();
+  let failNextUnconditionalSet = false;
+  let unconditionalSetAttempts = 0;
   const token = "fake-redis-token";
   const server = createServer((request, response) => {
     if (request.headers.authorization !== `Bearer ${token}`) {
@@ -565,9 +663,20 @@ async function withFakeRedis<T>(run: () => Promise<T>): Promise<T> {
         response.writeHead(400);
         return response.end(JSON.stringify({ error: "bad command" }));
       }
-      const [op, key, value] = command as string[];
+      const [op, key, value, modifier] = command as string[];
       let result: unknown = null;
-      if (op === "SET") { values.set(key, value); result = "OK"; }
+      if (op === "SET") {
+        if (modifier !== "NX") {
+          unconditionalSetAttempts += 1;
+          if (failNextUnconditionalSet) {
+            failNextUnconditionalSet = false;
+            response.writeHead(500, { "content-type": "application/json" });
+            return response.end(JSON.stringify({ error: "injected SET failure" }));
+          }
+        }
+        if (modifier === "NX" && values.has(key)) result = null;
+        else { values.set(key, value); result = "OK"; }
+      }
       else if (op === "GET") { result = values.has(key) ? values.get(key) : null; }
       else if (op === "SADD") {
         const set = sets.get(key) ?? new Set<string>();
@@ -590,7 +699,10 @@ async function withFakeRedis<T>(run: () => Promise<T>): Promise<T> {
   process.env.KV_REST_API_TOKEN = token;
   resetStoreForTest();
   try {
-    return await run();
+    return await run({
+      failNextUnconditionalSet: () => { failNextUnconditionalSet = true; },
+      unconditionalSetAttempts: () => unconditionalSetAttempts,
+    });
   } finally {
     if (prevUrl === undefined) delete process.env.KV_REST_API_URL; else process.env.KV_REST_API_URL = prevUrl;
     if (prevToken === undefined) delete process.env.KV_REST_API_TOKEN; else process.env.KV_REST_API_TOKEN = prevToken;
@@ -626,12 +738,19 @@ async function withFakeSupabase<T>(run: () => Promise<T>): Promise<T> {
       if (request.method === "POST" && url.pathname === "/rest/v1/sllr_kv") {
         const prefer = String(request.headers.prefer || "");
         const rows = JSON.parse(Buffer.concat(chunks).toString("utf8") || "[]") as Array<{ key: string; value: unknown }>;
-        // Mirror PostgREST: a PK conflict without merge-duplicates is a 409.
-        if (!url.searchParams.has("on_conflict") || !prefer.includes("resolution=merge-duplicates")) {
+        const mergeDuplicates = prefer.includes("resolution=merge-duplicates");
+        const ignoreDuplicates = prefer.includes("resolution=ignore-duplicates");
+        // Mirror PostgREST: a PK conflict without an explicit resolution is a 409.
+        if (!url.searchParams.has("on_conflict") || (!mergeDuplicates && !ignoreDuplicates)) {
           if (rows.some((row) => kv.has(row.key))) return sendJson(409, { message: "duplicate key" });
         }
-        for (const row of rows) kv.set(row.key, row.value);
-        return sendJson(201, undefined);
+        const changed: Array<{ key: string }> = [];
+        for (const row of rows) {
+          if (ignoreDuplicates && kv.has(row.key)) continue;
+          kv.set(row.key, row.value);
+          changed.push({ key: row.key });
+        }
+        return sendJson(201, prefer.includes("return=representation") ? changed : undefined);
       }
       if (request.method === "GET" && url.pathname === "/rest/v1/sllr_index") {
         const members = [...(index.get(eqValue("index_key")) ?? [])];
@@ -688,6 +807,11 @@ async function smokeStoreBackend() {
     if (loaded?.id !== "ord_supa" || loaded.status !== "accepted") {
       throw new Error(`Supabase JSON upsert round-trip failed: ${JSON.stringify(loaded)}`);
     }
+    if (!await store.setJsonIfAbsent("sllr:test:claim", { owner: "first" })
+      || await store.setJsonIfAbsent("sllr:test:claim", { owner: "second" })
+      || (await store.getJson<{ owner?: string }>("sllr:test:claim"))?.owner !== "first") {
+      throw new Error("Supabase conditional insert did not preserve the first writer.");
+    }
     await store.addToIndex("sllr:test:index", "ord_supa");
     await store.addToIndex("sllr:test:index", "ord_supa");
     await store.addToIndex("sllr:test:index", "ord_supa_2");
@@ -709,6 +833,11 @@ async function smokeStoreBackend() {
     if (loaded?.id !== "ord_redis" || loaded.status !== "pending_payment") {
       throw new Error(`Redis-backed JSON round-trip failed: ${JSON.stringify(loaded)}`);
     }
+    if (!await store.setJsonIfAbsent("sllr:test:claim", { owner: "first" })
+      || await store.setJsonIfAbsent("sllr:test:claim", { owner: "second" })
+      || (await store.getJson<{ owner?: string }>("sllr:test:claim"))?.owner !== "first") {
+      throw new Error("Redis conditional insert did not preserve the first writer.");
+    }
     await store.addToIndex("sllr:test:index", "ord_redis");
     await store.addToIndex("sllr:test:index", "ord_redis");
     await store.addToIndex("sllr:test:index", "ord_redis_2");
@@ -720,6 +849,75 @@ async function smokeStoreBackend() {
   if (storeBackendName() !== "memory") {
     throw new Error("Store should fall back to memory backend after KV env is cleared.");
   }
+}
+
+async function assertConcurrentMutationClaim(label: string) {
+  let runCount = 0;
+  const mutate = () => withIdempotentMutation({
+    operation: "concurrent_smoke",
+    tenantId: label,
+    requesterId: "smoke",
+    targetId: "order-concurrent",
+    actionKey: `concurrent-${label}`,
+    request: { orderId: "order-concurrent", note: "same request" },
+    run: async () => {
+      runCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return { id: `result-${runCount}` };
+    },
+    mutationFromResult: (result, actionKey) => ({
+      actionKey,
+      resourceId: result.id,
+      state: "completed",
+      terminal: true,
+      retryable: false,
+      allowedNextActions: [],
+      proofRefs: [],
+    }),
+  });
+
+  const [first, second] = await Promise.all([mutate(), mutate()]);
+  if (runCount !== 1 || first.result.id !== second.result.id) {
+    throw new Error(`${label} did not atomically claim a concurrent mutation: ${JSON.stringify({ runCount, first, second })}`);
+  }
+}
+
+async function smokeConcurrentMutationClaims() {
+  await assertConcurrentMutationClaim("memory");
+  await withFakeRedis(() => assertConcurrentMutationClaim("redis"));
+  await withFakeSupabase(() => assertConcurrentMutationClaim("supabase"));
+}
+
+async function smokeCompletionPersistenceFailure() {
+  await withFakeRedis(async (control) => {
+    let runCount = 0;
+    const failure = await withIdempotentMutation({
+      operation: "completion_failure_smoke",
+      tenantId: "redis",
+      requesterId: "smoke",
+      targetId: "order-completion-failure",
+      actionKey: "completion-failure",
+      request: { orderId: "order-completion-failure" },
+      run: async () => {
+        runCount += 1;
+        control.failNextUnconditionalSet();
+        return { id: "completed-business-result" };
+      },
+      mutationFromResult: (result, actionKey) => ({
+        actionKey,
+        resourceId: result.id,
+        state: "completed",
+        terminal: true,
+        retryable: false,
+        allowedNextActions: [],
+        proofRefs: [],
+      }),
+    }).then(() => null).catch((error) => error as Error & { status?: number });
+
+    if (!failure || failure.status !== 503 || runCount !== 1 || control.unconditionalSetAttempts() !== 1) {
+      throw new Error(`Completion persistence failure should not be rewritten as a failed mutation: ${JSON.stringify({ failure: failure?.message, status: failure?.status, runCount, setAttempts: control.unconditionalSetAttempts() })}`);
+    }
+  });
 }
 
 async function smokeIdempotentMutationRestart() {
@@ -779,6 +977,39 @@ async function smokeIdempotentMutationRestart() {
     }) as { order?: { receipt?: { receiptHash?: string } } };
     if (fulfillReplay.order?.receipt?.receiptHash !== receiptHash) {
       throw new Error(`Receipt lifecycle should keep one canonical terminal receipt: ${JSON.stringify(fulfillReplay)}`);
+    }
+
+    const directOrder = await createMerchantOrder("solyd", {
+      userIntent: "black magsafe iphone 16 case",
+      deliverByDays: 7,
+      maxSpendUsd: "90.00",
+      paymentMode: "checkout",
+      idempotencyKey: "restart-direct-payment-order",
+    }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+    const directOrderId = directOrder.order?.id;
+    if (!directOrderId || !directOrder.order?.item?.subtotalUsd) {
+      throw new Error(`Direct payment restart order failed: ${JSON.stringify(directOrder)}`);
+    }
+    const directPayment = {
+      orderId: directOrderId,
+      merchantId: "solyd",
+      provider: "stripe" as const,
+      amountUsd: directOrder.order.item.subtotalUsd,
+      paymentId: "restart-direct-stripe-payment",
+    };
+    const directPaid = await attachPaymentProof(directPayment);
+    const directReceiptHash = directPaid.receipt?.receiptHash;
+    if (!directReceiptHash) throw new Error(`Direct payment did not issue receipt memory: ${JSON.stringify(directPaid)}`);
+    resetStoreForTest();
+    const directReplay = await attachPaymentProof(directPayment);
+    if (directReplay.receipt?.receiptHash !== directReceiptHash) {
+      throw new Error(`Direct payment adapter did not replay after store restart: ${JSON.stringify(directReplay)}`);
+    }
+    const directConflict = await attachPaymentProof({ ...directPayment, amountUsd: "999.99" })
+      .then(() => null)
+      .catch((error) => error as Error & { code?: string });
+    if (!directConflict || directConflict.code !== "idempotency_conflict") {
+      throw new Error(`Direct payment adapter should reject changed replay data after restart: ${JSON.stringify(directConflict)}`);
     }
   });
 }
@@ -1868,6 +2099,8 @@ async function main() {
     }
 
     await smokeStoreBackend();
+    await smokeConcurrentMutationClaims();
+    await smokeCompletionPersistenceFailure();
     await smokeIdempotentMutationRestart();
     await smokeMcp(origin);
     await smokeReceiptGating(origin);
@@ -2257,14 +2490,28 @@ async function main() {
       order?: { id?: string; item?: { subtotalUsd?: string } };
     };
     if (!shopifyOrder.order?.id) throw new Error(`Shopify smoke order was not created: ${JSON.stringify(shopifyOrder)}`);
-    const shopifyPaid = await postJson(origin, "/webhooks/shopify/orders-paid", {
+    const shopifyPaidPayload = {
       sllr_order_id: shopifyOrder.order.id,
       current_total_price: shopifyOrder.order.item?.subtotalUsd,
       admin_graphql_api_id: "gid://shopify/Order/123",
       demo: true,
-    }) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
-    if (shopifyPaid.proofLevel !== "receipt_memory_issued" || shopifyPaid.order?.payment?.provider !== "shopify" || !shopifyPaid.order.receipt?.receiptHash) {
+    };
+    const shopifyPaid = await postJson(origin, "/webhooks/shopify/orders-paid", shopifyPaidPayload) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
+    const shopifyPaidReplay = await postJson(origin, "/webhooks/shopify/orders-paid", shopifyPaidPayload) as { order?: { receipt?: { receiptHash?: string } } };
+    if (
+      shopifyPaid.proofLevel !== "receipt_memory_issued"
+      || shopifyPaid.order?.payment?.provider !== "shopify"
+      || !shopifyPaid.order.receipt?.receiptHash
+      || shopifyPaid.order.receipt.receiptHash !== shopifyPaidReplay.order?.receipt?.receiptHash
+    ) {
       throw new Error(`Shopify paid webhook proof did not issue receipt memory: ${JSON.stringify(shopifyPaid)}`);
+    }
+    const shopifyPaidConflict = await postJsonFailure(origin, "/webhooks/shopify/orders-paid", {
+      ...shopifyPaidPayload,
+      current_total_price: "999.99",
+    });
+    if (shopifyPaidConflict.status !== 409 || shopifyPaidConflict.json.code !== "idempotency_conflict") {
+      throw new Error(`Shopify paid webhook should reject changed replay data: ${JSON.stringify(shopifyPaidConflict)}`);
     }
 
     const raposaTerminal = await fetch(`${origin}/raposa`).then((response) => response.text());
@@ -2440,6 +2687,17 @@ async function main() {
       throw new Error(`Unsupported merchant payment provider should be rejected: ${JSON.stringify(unsupportedPayment)}`);
     }
 
+    const zeroPayment = await postJsonFailure(origin, "/merchants/solyd/payment", {
+      orderId: merchantOrder.order.id,
+      provider: "moonpay",
+      amountUsd: 0,
+      paymentId: "merchant_pay_zero",
+      demo: true,
+    });
+    if (zeroPayment.status !== 409) {
+      throw new Error(`Zero-value merchant payment proof should be rejected: ${JSON.stringify(zeroPayment)}`);
+    }
+
     const merchantPayment = await postJson(origin, "/merchants/solyd/payment", {
       orderId: merchantOrder.order.id,
       provider: "moonpay",
@@ -2577,16 +2835,35 @@ async function main() {
       process.env.SLLR_HELIO_CHECKOUT_BASE_URL = previousHelioUrl;
     }
 
-    const paid = await postJson(origin, "/webhooks/payment", {
+    const paymentWebhookPayload = {
       orderId: orderResult.order.id,
       merchantId: "raposa-shop",
       provider: "moonpay",
       amountUsd: orderResult.order.item?.subtotalUsd,
       paymentId: "pay_smoke",
       demo: true,
-    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string; cnftStatus?: string } } };
-    if (paid.proofLevel !== "receipt_memory_issued" || !paid.order?.receipt?.receiptHash) {
+    };
+    const paid = await postJson(origin, "/webhooks/payment", paymentWebhookPayload) as {
+      proofLevel?: string;
+      order?: { receipt?: { receiptHash?: string; cnftStatus?: string } };
+      mutation?: { terminal?: boolean; receiptRef?: string };
+    };
+    const paidReplay = await postJson(origin, "/webhooks/payment", paymentWebhookPayload) as { order?: { receipt?: { receiptHash?: string } } };
+    if (
+      paid.proofLevel !== "receipt_memory_issued"
+      || !paid.order?.receipt?.receiptHash
+      || paid.order.receipt.receiptHash !== paidReplay.order?.receipt?.receiptHash
+      || paid.mutation?.terminal !== true
+      || !paid.mutation.receiptRef
+    ) {
       throw new Error(`Payment proof did not issue receipt handoff: ${JSON.stringify(paid)}`);
+    }
+    const paidConflict = await postJsonFailure(origin, "/webhooks/payment", {
+      ...paymentWebhookPayload,
+      amountUsd: "999.99",
+    });
+    if (paidConflict.status !== 409 || paidConflict.json.code !== "idempotency_conflict") {
+      throw new Error(`Generic payment webhook should reject changed replay data: ${JSON.stringify(paidConflict)}`);
     }
 
     console.log("SLL-R smoke passed");

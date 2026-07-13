@@ -8,6 +8,7 @@ import { quoteOrder } from "./quote.js";
 import { isItemAvailable } from "./availability.js";
 import { sllrStore } from "./store.js";
 import { buyerOrdersIndex } from "./buyer.js";
+import { mutationResultForOrder, withIdempotentMutation } from "./mutations.js";
 
 const ORDER_KEY_PREFIX = "sllr:order:";
 const ORDER_INDEX = "sllr:order-ids";
@@ -246,7 +247,13 @@ export async function rejectOrder(orderId: string, input: MerchantActionRequest)
   return updated;
 }
 
-export async function fulfillOrder(orderId: string, input: MerchantActionRequest) {
+type OrderMutationOptions = {
+  operation?: string;
+  requesterId?: string | null;
+  actionKey?: unknown;
+};
+
+async function fulfillOrderOnce(orderId: string, input: MerchantActionRequest) {
   const order = await requireOrderForMerchant(orderId, input);
   if (order.status === "rejected") {
     throw Object.assign(new Error("Rejected orders cannot be fulfilled."), { status: 409 });
@@ -266,6 +273,29 @@ export async function fulfillOrder(orderId: string, input: MerchantActionRequest
   fulfilled.updatedAt = new Date().toISOString();
   await saveOrder(fulfilled);
   return fulfilled;
+}
+
+export function fulfillOrderMutation(orderId: string, input: MerchantActionRequest, options: OrderMutationOptions = {}) {
+  const operation = options.operation || "merchant_fulfill_order";
+  return withIdempotentMutation({
+    operation,
+    tenantId: input.merchantId,
+    requesterId: options.requesterId ?? "merchant-operator",
+    targetId: orderId,
+    actionKey: options.actionKey ?? `${operation}:${orderId}`,
+    request: {
+      merchantId: input.merchantId,
+      orderId,
+      actor: input.actor || "merchant",
+      note: input.note || null,
+    },
+    run: () => fulfillOrderOnce(orderId, input),
+    mutationFromResult: (order, key) => mutationResultForOrder(key, order),
+  });
+}
+
+export async function fulfillOrder(orderId: string, input: MerchantActionRequest, options: OrderMutationOptions = {}) {
+  return (await fulfillOrderMutation(orderId, input, options)).result;
 }
 
 export async function markOrderReady(orderId: string, input: MerchantActionRequest) {
@@ -327,7 +357,7 @@ export async function claimOrder(orderId: string, input: MerchantActionRequest) 
   return claimed;
 }
 
-export async function attachPaymentProof(input: PaymentWebhook) {
+async function attachPaymentProofOnce(input: PaymentWebhook) {
   const order = await getOrder(input.orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${input.orderId}`), { status: 404 });
   // Idempotency: payment webhooks can be delivered or replayed more than once
@@ -367,4 +397,28 @@ export async function attachPaymentProof(input: PaymentWebhook) {
     receiptRef: input.paymentId, ids: { orderId: updated.id, paymentReceiptId: input.paymentId, receiptId: updated.receipt?.receiptHash ?? null },
   });
   return updated;
+}
+
+export function attachPaymentProofMutation(input: PaymentWebhook, options: OrderMutationOptions = {}) {
+  const operation = options.operation || "attach_payment_proof";
+  return withIdempotentMutation({
+    operation,
+    tenantId: input.merchantId,
+    requesterId: options.requesterId ?? "payment-provider",
+    targetId: input.orderId,
+    actionKey: options.actionKey ?? `${input.provider}:${input.paymentId}`,
+    request: {
+      merchantId: input.merchantId,
+      orderId: input.orderId,
+      provider: input.provider,
+      amountUsd: input.amountUsd,
+      paymentId: input.paymentId,
+    },
+    run: () => attachPaymentProofOnce(input),
+    mutationFromResult: (order, key) => mutationResultForOrder(key, order),
+  });
+}
+
+export async function attachPaymentProof(input: PaymentWebhook, options: OrderMutationOptions = {}) {
+  return (await attachPaymentProofMutation(input, options)).result;
 }
