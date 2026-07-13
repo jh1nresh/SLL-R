@@ -16,7 +16,19 @@ export type MutationResult = {
   refusal?: { code: string; message: string };
 };
 
-type MutationRecord<T> = {
+type MutationClaim = {
+  phase: "pending";
+  actionKey: string;
+  scopedKey: string;
+  operation: string;
+  requestHash: string;
+  targetId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type CompletedMutationRecord<T> = {
+  phase?: "completed";
   actionKey: string;
   scopedKey: string;
   operation: string;
@@ -27,6 +39,21 @@ type MutationRecord<T> = {
   createdAt: string;
   updatedAt: string;
 };
+
+type FailedMutationRecord = {
+  phase: "failed";
+  actionKey: string;
+  scopedKey: string;
+  operation: string;
+  requestHash: string;
+  resourceId: string;
+  mutation: MutationResult;
+  failure: { status: number; code: string };
+  createdAt: string;
+  updatedAt: string;
+};
+
+type StoredMutation<T> = MutationClaim | CompletedMutationRecord<T> | FailedMutationRecord;
 
 type IdempotentMutationArgs<T> = {
   operation: string;
@@ -40,6 +67,8 @@ type IdempotentMutationArgs<T> = {
 };
 
 const PRIVATE_KEYS = new Set(["verificationToken", "secret", "token", "__mcpRequestId"]);
+const CONCURRENT_WAIT_MS = 2_000;
+const CONCURRENT_POLL_MS = 25;
 
 function stableNormalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableNormalize);
@@ -69,6 +98,69 @@ export function actionKeyFrom(payload: Record<string, unknown>, operation: strin
 
 function recordKey(tenantId: string, operation: string, requesterId: string | null | undefined, actionKey: string) {
   return `sllr:mutation:${sha256(JSON.stringify({ tenantId, operation, requesterId: requesterId || null, actionKey }))}`;
+}
+
+function resourceIdFor<T>(record: StoredMutation<T>) {
+  return record.phase === "pending" ? record.targetId || "pending" : record.resourceId;
+}
+
+function conflictError<T>(operation: string, actionKey: string, record: StoredMutation<T>) {
+  const proofRefs = record.phase === "pending" ? [] : record.mutation.proofRefs;
+  const receiptRef = record.phase === "pending" ? undefined : record.mutation.receiptRef;
+  return Object.assign(new Error(`Idempotency key conflict for ${operation}. Reuse the same key only with the same normalized request.`), {
+    status: 409,
+    code: "idempotency_conflict",
+    mutation: {
+      actionKey,
+      resourceId: resourceIdFor(record),
+      state: "refused",
+      terminal: true,
+      retryable: false,
+      allowedNextActions: [],
+      proofRefs,
+      ...(receiptRef ? { receiptRef } : {}),
+      refusal: { code: "idempotency_conflict", message: "Same action key was reused with a different normalized request." },
+    } satisfies MutationResult,
+  });
+}
+
+function replayFailure(record: FailedMutationRecord) {
+  return Object.assign(new Error(`The ${record.operation} mutation previously failed for this action key.`), {
+    status: record.failure.status,
+    code: record.failure.code,
+    mutation: record.mutation,
+  });
+}
+
+function inProgressError(actionKey: string, targetId: string | null | undefined) {
+  return Object.assign(new Error("An identical mutation is still in progress. Retry with the same action key."), {
+    status: 409,
+    code: "idempotency_in_progress",
+    mutation: {
+      actionKey,
+      resourceId: targetId || "pending",
+      state: "in_progress",
+      terminal: false,
+      retryable: true,
+      retryAfterMs: CONCURRENT_POLL_MS,
+      allowedNextActions: [],
+      proofRefs: [],
+    } satisfies MutationResult,
+  });
+}
+
+async function waitForMutation<T>(key: string, hash: string, operation: string, actionKey: string, targetId: string | null | undefined) {
+  const deadline = Date.now() + CONCURRENT_WAIT_MS;
+  while (Date.now() < deadline) {
+    const record = await sllrStore().getJson<StoredMutation<T>>(key);
+    if (record) {
+      if (record.requestHash !== hash) throw conflictError(operation, actionKey, record);
+      if (record.phase === "failed") throw replayFailure(record);
+      if (record.phase !== "pending") return { result: record.result, mutation: record.mutation };
+    }
+    await new Promise((resolve) => setTimeout(resolve, CONCURRENT_POLL_MS));
+  }
+  throw inProgressError(actionKey, targetId);
 }
 
 export function allowedNextActionsForOrder(order: SellerOrder): string[] {
@@ -124,41 +216,70 @@ export async function withIdempotentMutation<T>(args: IdempotentMutationArgs<T>)
     targetId: args.targetId || null,
     ...args.request,
   });
-  const existing = await sllrStore().getJson<MutationRecord<T>>(key);
+  const store = sllrStore();
+  const existing = await store.getJson<StoredMutation<T>>(key);
   if (existing) {
-    if (existing.requestHash !== hash) {
-      throw Object.assign(new Error(`Idempotency key conflict for ${args.operation}. Reuse the same key only with the same normalized request.`), {
-        status: 409,
-        code: "idempotency_conflict",
-        mutation: {
-          actionKey,
-          resourceId: existing.resourceId,
-          state: "refused",
-          terminal: true,
-          retryable: false,
-          allowedNextActions: [],
-          proofRefs: existing.mutation.proofRefs,
-          ...(existing.mutation.receiptRef ? { receiptRef: existing.mutation.receiptRef } : {}),
-          refusal: { code: "idempotency_conflict", message: "Same action key was reused with a different normalized request." },
-        } satisfies MutationResult,
-      });
-    }
-    return { result: existing.result, mutation: existing.mutation };
+    if (existing.requestHash !== hash) throw conflictError(args.operation, actionKey, existing);
+    if (existing.phase === "failed") throw replayFailure(existing);
+    if (existing.phase !== "pending") return { result: existing.result, mutation: existing.mutation };
+    return waitForMutation(key, hash, args.operation, actionKey, args.targetId);
   }
 
-  const result = await args.run();
-  const mutation = args.mutationFromResult(result, actionKey);
   const now = new Date().toISOString();
-  await sllrStore().setJson(key, {
+  const claimed = await store.setJsonIfAbsent(key, {
+    phase: "pending",
     actionKey,
     scopedKey: key,
     operation: args.operation,
     requestHash: hash,
-    resourceId: mutation.resourceId,
-    result,
-    mutation,
+    targetId: args.targetId || null,
     createdAt: now,
     updatedAt: now,
-  } satisfies MutationRecord<T>);
-  return { result, mutation };
+  } satisfies MutationClaim);
+  if (!claimed) return waitForMutation(key, hash, args.operation, actionKey, args.targetId);
+
+  try {
+    const result = await args.run();
+    const mutation = args.mutationFromResult(result, actionKey);
+    await store.setJson(key, {
+      phase: "completed",
+      actionKey,
+      scopedKey: key,
+      operation: args.operation,
+      requestHash: hash,
+      resourceId: mutation.resourceId,
+      result,
+      mutation,
+      createdAt: now,
+      updatedAt: new Date().toISOString(),
+    } satisfies CompletedMutationRecord<T>);
+    return { result, mutation };
+  } catch (error) {
+    const status = typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : 500;
+    const rawCode = (error as { code?: unknown })?.code;
+    const code = typeof rawCode === "string" && /^[a-z0-9_.-]{1,64}$/i.test(rawCode) ? rawCode : "mutation_failed";
+    const mutation = {
+      actionKey,
+      resourceId: args.targetId || "pending",
+      state: "failed",
+      terminal: true,
+      retryable: false,
+      allowedNextActions: [],
+      proofRefs: [],
+      refusal: { code, message: "The mutation failed and was not re-executed for this action key." },
+    } satisfies MutationResult;
+    await store.setJson(key, {
+      phase: "failed",
+      actionKey,
+      scopedKey: key,
+      operation: args.operation,
+      requestHash: hash,
+      resourceId: args.targetId || "pending",
+      mutation,
+      failure: { status, code },
+      createdAt: now,
+      updatedAt: new Date().toISOString(),
+    } satisfies FailedMutationRecord);
+    throw Object.assign(error instanceof Error ? error : new Error("Mutation failed."), { status, code, mutation });
+  }
 }

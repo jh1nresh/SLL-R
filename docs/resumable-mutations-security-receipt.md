@@ -11,6 +11,11 @@ Scope: SLL-R merchant runtime mutations for `create_order`, payment proof, and m
 - Direct payment adapters use `provider + paymentId` as the fallback action key.
 - Direct fulfillment paths use `operation + orderId` when the caller does not provide a key.
 - `merchant_fulfill_order`, `POST /orders/:id/fulfill`, and payment adapters now share the same domain-level mutation wrapper as the merchant API.
+- The wrapper atomically claims a new action key before executing the mutation:
+  - Redis uses `SET ... NX`.
+  - Supabase uses the `sllr_kv.key` primary key with `resolution=ignore-duplicates`.
+  - The in-process store uses one synchronous check-and-set operation.
+- A concurrent identical request waits for and replays the winning result instead of executing the mutation again.
 - The mutation ledger stores the semantic result for a scoped action:
   - tenant
   - requester
@@ -48,9 +53,10 @@ Coverage added:
 - Shopify and generic payment webhook retries return the same receipt and reject changed amounts for the same provider event.
 - Redis-backed restart smoke replays the same order and payment receipt after store reinitialization.
 - A direct payment adapter replays the same provider event after Redis-backed store reinitialization without requiring a caller-supplied key.
+- Concurrent first delivery executes once and replays one result on memory, Redis, and Supabase store paths.
 - A paid order keeps one canonical receipt when fulfillment is retried later.
 
 ## Residual Scope
 
 - Buyer claim still relies on its order-state guard rather than a first-class action-ledger record; it is outside this merchant fulfillment/payment scope.
-- The current store abstraction is upsert-based, not a compare-and-swap transaction. This PR improves retry/restart safety, but high-concurrency duplicate-submit races should be closed with a store-level conditional insert if/when the backend supports it.
+- A process crash after claiming an action key but before persisting its terminal result leaves that key in `in_progress`. SLL-R intentionally does not auto-steal an abandoned claim because doing so could repeat an external side effect; recovery requires inspecting the target order/payment before resolving the ledger entry.

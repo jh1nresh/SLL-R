@@ -10,6 +10,7 @@ import { getLoop, loopIdForQuote, loopIdForOrder } from "../core/actionLoop.js";
 import { setItemAvailability } from "../core/availability.js";
 import { attachMerchantPayment, createMerchantOrder, issueMerchantReceipt } from "../core/merchantApi.js";
 import { attachPaymentProof } from "../core/orders.js";
+import { withIdempotentMutation } from "../core/mutations.js";
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -655,9 +656,12 @@ async function withFakeRedis<T>(run: () => Promise<T>): Promise<T> {
         response.writeHead(400);
         return response.end(JSON.stringify({ error: "bad command" }));
       }
-      const [op, key, value] = command as string[];
+      const [op, key, value, modifier] = command as string[];
       let result: unknown = null;
-      if (op === "SET") { values.set(key, value); result = "OK"; }
+      if (op === "SET") {
+        if (modifier === "NX" && values.has(key)) result = null;
+        else { values.set(key, value); result = "OK"; }
+      }
       else if (op === "GET") { result = values.has(key) ? values.get(key) : null; }
       else if (op === "SADD") {
         const set = sets.get(key) ?? new Set<string>();
@@ -716,12 +720,19 @@ async function withFakeSupabase<T>(run: () => Promise<T>): Promise<T> {
       if (request.method === "POST" && url.pathname === "/rest/v1/sllr_kv") {
         const prefer = String(request.headers.prefer || "");
         const rows = JSON.parse(Buffer.concat(chunks).toString("utf8") || "[]") as Array<{ key: string; value: unknown }>;
-        // Mirror PostgREST: a PK conflict without merge-duplicates is a 409.
-        if (!url.searchParams.has("on_conflict") || !prefer.includes("resolution=merge-duplicates")) {
+        const mergeDuplicates = prefer.includes("resolution=merge-duplicates");
+        const ignoreDuplicates = prefer.includes("resolution=ignore-duplicates");
+        // Mirror PostgREST: a PK conflict without an explicit resolution is a 409.
+        if (!url.searchParams.has("on_conflict") || (!mergeDuplicates && !ignoreDuplicates)) {
           if (rows.some((row) => kv.has(row.key))) return sendJson(409, { message: "duplicate key" });
         }
-        for (const row of rows) kv.set(row.key, row.value);
-        return sendJson(201, undefined);
+        const changed: Array<{ key: string }> = [];
+        for (const row of rows) {
+          if (ignoreDuplicates && kv.has(row.key)) continue;
+          kv.set(row.key, row.value);
+          changed.push({ key: row.key });
+        }
+        return sendJson(201, prefer.includes("return=representation") ? changed : undefined);
       }
       if (request.method === "GET" && url.pathname === "/rest/v1/sllr_index") {
         const members = [...(index.get(eqValue("index_key")) ?? [])];
@@ -778,6 +789,11 @@ async function smokeStoreBackend() {
     if (loaded?.id !== "ord_supa" || loaded.status !== "accepted") {
       throw new Error(`Supabase JSON upsert round-trip failed: ${JSON.stringify(loaded)}`);
     }
+    if (!await store.setJsonIfAbsent("sllr:test:claim", { owner: "first" })
+      || await store.setJsonIfAbsent("sllr:test:claim", { owner: "second" })
+      || (await store.getJson<{ owner?: string }>("sllr:test:claim"))?.owner !== "first") {
+      throw new Error("Supabase conditional insert did not preserve the first writer.");
+    }
     await store.addToIndex("sllr:test:index", "ord_supa");
     await store.addToIndex("sllr:test:index", "ord_supa");
     await store.addToIndex("sllr:test:index", "ord_supa_2");
@@ -799,6 +815,11 @@ async function smokeStoreBackend() {
     if (loaded?.id !== "ord_redis" || loaded.status !== "pending_payment") {
       throw new Error(`Redis-backed JSON round-trip failed: ${JSON.stringify(loaded)}`);
     }
+    if (!await store.setJsonIfAbsent("sllr:test:claim", { owner: "first" })
+      || await store.setJsonIfAbsent("sllr:test:claim", { owner: "second" })
+      || (await store.getJson<{ owner?: string }>("sllr:test:claim"))?.owner !== "first") {
+      throw new Error("Redis conditional insert did not preserve the first writer.");
+    }
     await store.addToIndex("sllr:test:index", "ord_redis");
     await store.addToIndex("sllr:test:index", "ord_redis");
     await store.addToIndex("sllr:test:index", "ord_redis_2");
@@ -810,6 +831,43 @@ async function smokeStoreBackend() {
   if (storeBackendName() !== "memory") {
     throw new Error("Store should fall back to memory backend after KV env is cleared.");
   }
+}
+
+async function assertConcurrentMutationClaim(label: string) {
+  let runCount = 0;
+  const mutate = () => withIdempotentMutation({
+    operation: "concurrent_smoke",
+    tenantId: label,
+    requesterId: "smoke",
+    targetId: "order-concurrent",
+    actionKey: `concurrent-${label}`,
+    request: { orderId: "order-concurrent", note: "same request" },
+    run: async () => {
+      runCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return { id: `result-${runCount}` };
+    },
+    mutationFromResult: (result, actionKey) => ({
+      actionKey,
+      resourceId: result.id,
+      state: "completed",
+      terminal: true,
+      retryable: false,
+      allowedNextActions: [],
+      proofRefs: [],
+    }),
+  });
+
+  const [first, second] = await Promise.all([mutate(), mutate()]);
+  if (runCount !== 1 || first.result.id !== second.result.id) {
+    throw new Error(`${label} did not atomically claim a concurrent mutation: ${JSON.stringify({ runCount, first, second })}`);
+  }
+}
+
+async function smokeConcurrentMutationClaims() {
+  await assertConcurrentMutationClaim("memory");
+  await withFakeRedis(() => assertConcurrentMutationClaim("redis"));
+  await withFakeSupabase(() => assertConcurrentMutationClaim("supabase"));
 }
 
 async function smokeIdempotentMutationRestart() {
@@ -1991,6 +2049,7 @@ async function main() {
     }
 
     await smokeStoreBackend();
+    await smokeConcurrentMutationClaims();
     await smokeIdempotentMutationRestart();
     await smokeMcp(origin);
     await smokeReceiptGating(origin);

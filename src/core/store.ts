@@ -15,6 +15,7 @@
 export interface SllrStore {
   getJson<T>(key: string): Promise<T | null>;
   setJson(key: string, value: unknown): Promise<void>;
+  setJsonIfAbsent(key: string, value: unknown): Promise<boolean>;
   addToIndex(indexKey: string, member: string): Promise<void>;
   indexMembers(indexKey: string): Promise<string[]>;
 }
@@ -30,6 +31,12 @@ class MemoryStore implements SllrStore {
 
   async setJson(key: string, value: unknown): Promise<void> {
     this.values.set(key, JSON.stringify(value));
+  }
+
+  async setJsonIfAbsent(key: string, value: unknown): Promise<boolean> {
+    if (this.values.has(key)) return false;
+    this.values.set(key, JSON.stringify(value));
+    return true;
   }
 
   async addToIndex(indexKey: string, member: string): Promise<void> {
@@ -88,6 +95,10 @@ class RedisRestStore implements SllrStore {
 
   async setJson(key: string, value: unknown): Promise<void> {
     await this.command(["SET", key, JSON.stringify(value)]);
+  }
+
+  async setJsonIfAbsent(key: string, value: unknown): Promise<boolean> {
+    return (await this.command<string | null>(["SET", key, JSON.stringify(value), "NX"])) === "OK";
   }
 
   async addToIndex(indexKey: string, member: string): Promise<void> {
@@ -169,6 +180,15 @@ class SupabaseStore implements SllrStore {
       prefer: "resolution=merge-duplicates,return=minimal",
       body: JSON.stringify([{ key, value }]),
     });
+  }
+
+  async setJsonIfAbsent(key: string, value: unknown): Promise<boolean> {
+    const rows = await this.request<Array<{ key: string }>>("/sllr_kv?on_conflict=key&select=key", {
+      method: "POST",
+      prefer: "resolution=ignore-duplicates,return=representation",
+      body: JSON.stringify([{ key, value }]),
+    });
+    return (rows || []).some((row) => row.key === key);
   }
 
   async addToIndex(indexKey: string, member: string): Promise<void> {
