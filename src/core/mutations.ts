@@ -238,24 +238,14 @@ export async function withIdempotentMutation<T>(args: IdempotentMutationArgs<T>)
   } satisfies MutationClaim);
   if (!claimed) return waitForMutation(key, hash, args.operation, actionKey, args.targetId);
 
+  let result: T;
   try {
-    const result = await args.run();
-    const mutation = args.mutationFromResult(result, actionKey);
-    await store.setJson(key, {
-      phase: "completed",
-      actionKey,
-      scopedKey: key,
-      operation: args.operation,
-      requestHash: hash,
-      resourceId: mutation.resourceId,
-      result,
-      mutation,
-      createdAt: now,
-      updatedAt: new Date().toISOString(),
-    } satisfies CompletedMutationRecord<T>);
-    return { result, mutation };
+    result = await args.run();
   } catch (error) {
-    const status = typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : 500;
+    const rawStatus = (error as { status?: unknown })?.status;
+    const status = typeof rawStatus === "number" && Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599
+      ? rawStatus
+      : 500;
     const rawCode = (error as { code?: unknown })?.code;
     const code = typeof rawCode === "string" && /^[a-z0-9_.-]{1,64}$/i.test(rawCode) ? rawCode : "mutation_failed";
     const mutation = {
@@ -282,4 +272,22 @@ export async function withIdempotentMutation<T>(args: IdempotentMutationArgs<T>)
     } satisfies FailedMutationRecord);
     throw Object.assign(error instanceof Error ? error : new Error("Mutation failed."), { status, code, mutation });
   }
+
+  const mutation = args.mutationFromResult(result, actionKey);
+  // Completion persistence is deliberately outside the execution catch. If it
+  // fails after the business mutation succeeded, leave the claim pending for
+  // reconciliation instead of overwriting a successful side effect as failed.
+  await store.setJson(key, {
+    phase: "completed",
+    actionKey,
+    scopedKey: key,
+    operation: args.operation,
+    requestHash: hash,
+    resourceId: mutation.resourceId,
+    result,
+    mutation,
+    createdAt: now,
+    updatedAt: new Date().toISOString(),
+  } satisfies CompletedMutationRecord<T>);
+  return { result, mutation };
 }

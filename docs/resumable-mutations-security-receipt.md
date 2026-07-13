@@ -15,7 +15,7 @@ Scope: SLL-R merchant runtime mutations for `create_order`, payment proof, and m
   - Redis uses `SET ... NX`.
   - Supabase uses the `sllr_kv.key` primary key with `resolution=ignore-duplicates`.
   - The in-process store uses one synchronous check-and-set operation.
-- A concurrent identical request waits for and replays the winning result instead of executing the mutation again.
+- A concurrent identical request waits up to two seconds for the winning result and replays it without executing the mutation again. If the winner is still running, SLL-R returns retryable `idempotency_in_progress`; retrying with the same key remains safe.
 - The mutation ledger stores the semantic result for a scoped action:
   - tenant
   - requester
@@ -54,9 +54,10 @@ Coverage added:
 - Redis-backed restart smoke replays the same order and payment receipt after store reinitialization.
 - A direct payment adapter replays the same provider event after Redis-backed store reinitialization without requiring a caller-supplied key.
 - Concurrent first delivery executes once and replays one result on memory, Redis, and Supabase store paths.
+- A completion-ledger write failure after successful business execution leaves the claim pending instead of overwriting it with a false failed result.
 - A paid order keeps one canonical receipt when fulfillment is retried later.
 
 ## Residual Scope
 
 - Buyer claim still relies on its order-state guard rather than a first-class action-ledger record; it is outside this merchant fulfillment/payment scope.
-- A process crash after claiming an action key but before persisting its terminal result leaves that key in `in_progress`. SLL-R intentionally does not auto-steal an abandoned claim because doing so could repeat an external side effect; recovery requires inspecting the target order/payment before resolving the ledger entry.
+- A process crash, or a completion-ledger write failure after successful business execution, leaves the action key in `in_progress`. SLL-R intentionally does not auto-steal an abandoned claim because doing so could repeat an external side effect; recovery requires inspecting the target order/payment before resolving the ledger entry.

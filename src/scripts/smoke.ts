@@ -633,9 +633,16 @@ async function smokeDemoMerchants(origin: string) {
 
 // Minimal in-process Upstash / Vercel KV REST server to exercise the
 // RedisRestStore command encoding (GET/SET/SADD/SMEMBERS) end to end.
-async function withFakeRedis<T>(run: () => Promise<T>): Promise<T> {
+type FakeRedisControl = {
+  failNextUnconditionalSet: () => void;
+  unconditionalSetAttempts: () => number;
+};
+
+async function withFakeRedis<T>(run: (control: FakeRedisControl) => Promise<T>): Promise<T> {
   const values = new Map<string, string>();
   const sets = new Map<string, Set<string>>();
+  let failNextUnconditionalSet = false;
+  let unconditionalSetAttempts = 0;
   const token = "fake-redis-token";
   const server = createServer((request, response) => {
     if (request.headers.authorization !== `Bearer ${token}`) {
@@ -659,6 +666,14 @@ async function withFakeRedis<T>(run: () => Promise<T>): Promise<T> {
       const [op, key, value, modifier] = command as string[];
       let result: unknown = null;
       if (op === "SET") {
+        if (modifier !== "NX") {
+          unconditionalSetAttempts += 1;
+          if (failNextUnconditionalSet) {
+            failNextUnconditionalSet = false;
+            response.writeHead(500, { "content-type": "application/json" });
+            return response.end(JSON.stringify({ error: "injected SET failure" }));
+          }
+        }
         if (modifier === "NX" && values.has(key)) result = null;
         else { values.set(key, value); result = "OK"; }
       }
@@ -684,7 +699,10 @@ async function withFakeRedis<T>(run: () => Promise<T>): Promise<T> {
   process.env.KV_REST_API_TOKEN = token;
   resetStoreForTest();
   try {
-    return await run();
+    return await run({
+      failNextUnconditionalSet: () => { failNextUnconditionalSet = true; },
+      unconditionalSetAttempts: () => unconditionalSetAttempts,
+    });
   } finally {
     if (prevUrl === undefined) delete process.env.KV_REST_API_URL; else process.env.KV_REST_API_URL = prevUrl;
     if (prevToken === undefined) delete process.env.KV_REST_API_TOKEN; else process.env.KV_REST_API_TOKEN = prevToken;
@@ -868,6 +886,38 @@ async function smokeConcurrentMutationClaims() {
   await assertConcurrentMutationClaim("memory");
   await withFakeRedis(() => assertConcurrentMutationClaim("redis"));
   await withFakeSupabase(() => assertConcurrentMutationClaim("supabase"));
+}
+
+async function smokeCompletionPersistenceFailure() {
+  await withFakeRedis(async (control) => {
+    let runCount = 0;
+    const failure = await withIdempotentMutation({
+      operation: "completion_failure_smoke",
+      tenantId: "redis",
+      requesterId: "smoke",
+      targetId: "order-completion-failure",
+      actionKey: "completion-failure",
+      request: { orderId: "order-completion-failure" },
+      run: async () => {
+        runCount += 1;
+        control.failNextUnconditionalSet();
+        return { id: "completed-business-result" };
+      },
+      mutationFromResult: (result, actionKey) => ({
+        actionKey,
+        resourceId: result.id,
+        state: "completed",
+        terminal: true,
+        retryable: false,
+        allowedNextActions: [],
+        proofRefs: [],
+      }),
+    }).then(() => null).catch((error) => error as Error & { status?: number });
+
+    if (!failure || failure.status !== 503 || runCount !== 1 || control.unconditionalSetAttempts() !== 1) {
+      throw new Error(`Completion persistence failure should not be rewritten as a failed mutation: ${JSON.stringify({ failure: failure?.message, status: failure?.status, runCount, setAttempts: control.unconditionalSetAttempts() })}`);
+    }
+  });
 }
 
 async function smokeIdempotentMutationRestart() {
@@ -2050,6 +2100,7 @@ async function main() {
 
     await smokeStoreBackend();
     await smokeConcurrentMutationClaims();
+    await smokeCompletionPersistenceFailure();
     await smokeIdempotentMutationRestart();
     await smokeMcp(origin);
     await smokeReceiptGating(origin);
