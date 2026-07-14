@@ -1,18 +1,20 @@
 # SLL-R
 
-SLL-R is an installable seller-side operating agent for merchants.
+SLL-R is a merchant-backed commerce rail that personal agents can call.
 
-It lets buyer agents place real-world orders with a merchant, checks merchant
-constraints, routes checkout through existing systems, and turns completed
-orders into verified receipt memory.
+It lets a buyer's own agent compare real merchant capabilities, obtain exact
+quotes, ask for consent, place and track orders through existing checkout
+systems, and turn completed outcomes into verified receipt memory.
 
 The current product goal is not a hackathon-only demo. The goal is to list SLL-R
 on AgentShack as a reusable merchant-agent service and onboard Raposa / SOLYD as
 the first merchant pilots.
 
 ```text
-BUY-R / Hermes / ChatGPT
+Personal agent / Hermes / ChatGPT
 -> SLL-R
+-> compare merchant-backed quotes
+-> explicit buyer consent
 -> POS / checkout adapters
 -> payment or fulfillment proof
 -> SLL-R receipt memory / Solana cNFT
@@ -20,10 +22,10 @@ BUY-R / Hermes / ChatGPT
 
 ## Product Boundary
 
-- **SLL-R**: seller agent runtime for merchants.
+- **SLL-R**: merchant runtime plus the safe cross-merchant interface personal agents call.
 - **Receipt memory**: proof-backed order, payment, and fulfillment record.
 - **POS adapters**: internal SLL-R tools for Shopify, MoonPay, Binance Pay, Telegram staff flow, Browser Use, Stripe, or future POS systems.
-- **BUY-R**: buyer-side agent caller. This can be Hermes, ChatGPT, Telegram, AgentShack, or another personal agent.
+- **Personal agent**: buyer-side caller. This can be Hermes, ChatGPT, Telegram, AgentShack, or another user-owned agent.
 
 SLL-R is not a full POS replacement. It operates the merchant's existing checkout
 and staff workflows.
@@ -58,19 +60,21 @@ MVP success means:
 - Raposa / SOLYD can understand what they need to configure in less than one
   meeting.
 
-The main product surface is now the standalone agentic POS flow:
+The primary agent flow is:
 
 ```text
-customer QR / web agent
--> natural-language intent
--> SLL-R quote
--> SLL-R order
+personal agent receives natural-language intent
+-> SLL-R shop_for_me compares bounded merchant candidates
+-> merchant-backed quotes ranked by intent, receipt memory, location, time, and price
+-> user confirms one exact quote
+-> SLL-R consent + idempotent order
 -> existing checkout or staff fulfillment
--> SLL-R receipt memory and loyalty-ready history
+-> cross-merchant tracking
+-> verified receipt memory improves the next recommendation
 ```
 
-MCP, OpenAPI, and ChatGPT Actions are distribution surfaces. They are not the
-product core.
+The standalone merchant agent remains available for QR/web pilots. MCP,
+OpenAPI, and ChatGPT Actions expose the same commerce rail to personal agents.
 
 ## Adapter Contract
 
@@ -177,7 +181,7 @@ SLL-R exposes a real MCP server (stateless Streamable HTTP) at `/mcp`:
 claude mcp add --transport http sllr http://localhost:3100/mcp
 ```
 
-Tools: `list_merchants`, `get_merchant`, `get_menu`, `quote_order`,
+Tools: `list_merchants`, `get_merchant`, `get_menu`, `shop_for_me`, `quote_order`,
 `create_order`, `list_orders`, `check_order_status`, `get_payment_options`,
 `attach_payment_proof`, `issue_receipt`, `create_demo_merchant`.
 
@@ -196,6 +200,9 @@ GET  /.well-known/ai-plugin.json
 GET  /.well-known/base-mcp-plugin.md
 GET  /.well-known/solana-sllr-plugin.md
 GET  /openapi.json
+POST /buyer/session
+POST /buyer/shop
+GET  /buyer/orders
 GET  /raposa
 GET  /raposa/order
 GET  /capabilities?merchantId=raposa-coffee
@@ -359,7 +366,9 @@ curl -X POST http://localhost:3100/demo-merchants \
 The response includes the agent page, terminal page, and an example MCP
 prompt. The same flow is exposed as the `create_demo_merchant` MCP tool.
 Demo merchants get `counter` + `shopify` payment rails, live in memory, and
-reset on restart. Set `SLLR_DEMO_MERCHANT_SECRET` on public deployments.
+reset on restart. Public registration is disabled unless
+`SLLR_DEMO_MERCHANT_SECRET` is configured; an existing demo merchant id cannot
+be replaced through this endpoint.
 
 ## Example Shopify Adapter
 

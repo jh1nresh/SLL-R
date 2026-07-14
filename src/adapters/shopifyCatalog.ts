@@ -224,9 +224,13 @@ function merchantIdFrom(payload: Record<string, unknown>, domain: string) {
   return base;
 }
 
-function requireDemoMerchantAuth(headers: Record<string, string | string[] | undefined>, payload: Record<string, unknown>) {
+function requireDemoMerchantAuth(headers: Record<string, string | string[] | undefined>, payload: Record<string, unknown>, origin: string) {
   const expected = process.env.SLLR_DEMO_MERCHANT_SECRET?.trim();
-  if (!expected) return;
+  if (!expected) {
+    const hostname = new URL(origin).hostname;
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return;
+    throw inputError("Demo merchant registration is disabled until SLLR_DEMO_MERCHANT_SECRET is configured.", 503);
+  }
   const header = headers["x-sllr-demo-secret"];
   const provided = typeof header === "string" && header.trim()
     ? header.trim()
@@ -239,11 +243,11 @@ function requireDemoMerchantAuth(headers: Record<string, string | string[] | und
 }
 
 export async function createDemoMerchant(headers: Record<string, string | string[] | undefined>, payload: Record<string, unknown>, origin: string) {
-  requireDemoMerchantAuth(headers, payload);
+  requireDemoMerchantAuth(headers, payload, origin);
   const domain = assertSafeShopifyDomain(payload.storeDomain);
   const merchantId = merchantIdFrom(payload, domain);
-  if (merchantForId(merchantId) && !merchantForId(merchantId)?.id.startsWith("demo-")) {
-    throw inputError(`Merchant id ${merchantId} is reserved.`, 409);
+  if (merchantForId(merchantId)) {
+    throw inputError(`Merchant id ${merchantId} already exists. Choose a new id; demo merchant identities cannot be replaced.`, 409);
   }
   const fulfillment = fulfillmentFrom(payload.fulfillment);
 

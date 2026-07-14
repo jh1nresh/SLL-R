@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { sllrStore } from "./store.js";
 import { getQuote, isQuoteExpired, type StoredQuote } from "./quotes.js";
+import { centsFromUsd, formatUsd } from "./money.js";
 
 // Quote-bound consent (spec: bounded-action rail). Consent binds to a SPECIFIC
 // quote — not generic intent — so a casual "yes" can never authorize a charge.
@@ -22,7 +23,8 @@ const CONSENT_KEY = (id: string) => `sllr:consent:${id}`;
 
 // The exact phrase a channel can require for explicit confirmation.
 export function expectedConfirmation(quote: StoredQuote): string {
-  return `CONFIRM $${quote.amountUsd} ${quote.itemName} at ${quote.merchantName}`;
+  const unitPrice = formatUsd(centsFromUsd(quote.amountUsd) / quote.quantity);
+  return `CONFIRM ${quote.quantity} x ${quote.itemName} at ${quote.merchantName}, $${unitPrice} each, $${quote.amountUsd} total`;
 }
 
 function normalize(s: string): string {

@@ -43,6 +43,7 @@ import { createCardSetup, payWithSavedCard } from "./adapters/cardOnFile.js";
 import { cancelSubscription, confirmRun, createSubscription, declineRun, listPendingRuns, listSubscriptions, sweepDueSubscriptions } from "./core/recurring.js";
 import { linePayConfirm } from "./adapters/linePay.js";
 import { createDemoMerchant, listDemoMerchants } from "./adapters/shopifyCatalog.js";
+import { shopForBuyer } from "./core/personalShop.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -295,6 +296,7 @@ function rootDiscovery(origin: string) {
     status: "ready",
     agentDiscovery: {
       mcp: `${origin}/mcp`,
+      personalAgent: `${origin}/buyer/shop`,
       sllrManifest: `${origin}/.well-known/sllr-agent.json`,
       sllrMcpManifest: `${origin}/.well-known/sllr-mcp.json`,
       aiPluginManifest: `${origin}/.well-known/ai-plugin.json`,
@@ -458,6 +460,16 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           buyerId: session.buyerId,
           orders: await listOrdersForBuyer(session.buyerId),
         });
+      }
+      if (request.method === "POST" && url.pathname === "/buyer/shop") {
+        const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+        if (!session) return json(response, 401, { error: "Missing or invalid buyer token. Obtain one from POST /buyer/session." });
+        const payload = await body(request);
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          throw Object.assign(new Error("Request body must be a JSON object."), { status: 400 });
+        }
+        delete payload.buyerId;
+        return json(response, 200, await shopForBuyer(session.buyerId, payload));
       }
       // Card on file: start saving a card (returns a SetupIntent client secret the
       // app confirms with Stripe). Buyer-gated.

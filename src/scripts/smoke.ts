@@ -65,10 +65,10 @@ async function postJsonFailure(origin: string, path: string, payload: unknown) {
 
 let nextMcpRequestId = 0;
 
-async function mcpRequest(origin: string, method: string, params?: unknown) {
+async function mcpRequest(origin: string, method: string, params?: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}/mcp`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
     body: JSON.stringify({ jsonrpc: "2.0", id: ++nextMcpRequestId, method, ...(params === undefined ? {} : { params }) }),
   });
   const json = await response.json() as { result?: Record<string, unknown>; error?: { code?: number; message?: string } };
@@ -79,13 +79,41 @@ async function mcpRequest(origin: string, method: string, params?: unknown) {
   return json.result;
 }
 
-async function mcpToolCall(origin: string, name: string, args: Record<string, unknown>) {
-  const result = await mcpRequest(origin, "tools/call", { name, arguments: args }) as {
+async function mcpToolCall(origin: string, name: string, args: Record<string, unknown>, headers: Record<string, string> = {}) {
+  const result = await mcpRequest(origin, "tools/call", { name, arguments: args }, headers) as {
     isError?: boolean;
     content?: Array<{ type?: string; text?: string }>;
     structuredContent?: Record<string, unknown>;
   };
   return result;
+}
+
+async function createBuyerOrder(
+  origin: string,
+  token: string,
+  merchantId: string,
+  request: Record<string, unknown>,
+) {
+  const headers = { authorization: `Bearer ${token}` };
+  const quote = await postJson(origin, `/merchants/${merchantId}/quote`, request, headers) as {
+    quoteId?: string;
+    confirmationText?: string;
+    request?: Record<string, unknown>;
+  };
+  if (!quote.quoteId || !quote.confirmationText || !quote.request) {
+    throw new Error(`Authenticated quote was not resumable: ${JSON.stringify(quote)}`);
+  }
+  const consent = await postJson(origin, "/consent", {
+    quoteId: quote.quoteId,
+    confirmationText: quote.confirmationText,
+  }, headers) as { consent?: { id?: string } };
+  if (!consent.consent?.id) throw new Error(`Authenticated consent failed: ${JSON.stringify(consent)}`);
+  return postJson(origin, `/merchants/${merchantId}/orders`, {
+    ...request,
+    ...quote.request,
+    quoteId: quote.quoteId,
+    consentId: consent.consent.id,
+  }, headers);
 }
 
 async function smokeMcp(origin: string) {
@@ -119,7 +147,7 @@ async function smokeMcp(origin: string) {
 
   const toolsList = await mcpRequest(origin, "tools/list") as { tools?: Array<{ name?: string; inputSchema?: unknown }> };
   const toolNames = toolsList.tools?.map((tool) => tool.name) || [];
-  for (const required of ["list_merchants", "get_menu", "quote_order", "create_order", "get_payment_options", "attach_payment_proof", "check_order_status", "issue_receipt", "merchant_fulfill_order", "create_demo_merchant"]) {
+  for (const required of ["list_merchants", "get_menu", "shop_for_me", "quote_order", "request_consent", "create_order", "get_payment_options", "attach_payment_proof", "check_order_status", "issue_receipt", "merchant_fulfill_order", "create_demo_merchant"]) {
     if (!toolNames.includes(required)) {
       throw new Error(`MCP tools/list is missing ${required}: ${JSON.stringify(toolNames)}`);
     }
@@ -588,7 +616,7 @@ async function smokeDemoMerchants(origin: string) {
   }
 
   const badFulfillment = await postJsonFailure(origin, "/demo-merchants", {
-    storeDomain: "demo-roaster-smoke.com",
+    storeDomain: "bad-fulfillment-roaster-smoke.com",
     fulfillment: "teleport",
     products: fixtureProducts,
   });
@@ -604,6 +632,21 @@ async function smokeDemoMerchants(origin: string) {
     throw new Error(`Empty mapped catalog should be rejected with 422: ${JSON.stringify(emptyCatalog)}`);
   }
 
+  const previousPublicOrigin = process.env.SLLR_PUBLIC_ORIGIN;
+  process.env.SLLR_PUBLIC_ORIGIN = "https://sllr.example";
+  try {
+    const unconfiguredPublicRegistration = await postJsonFailure(origin, "/demo-merchants", {
+      storeDomain: "public-roaster-smoke.com",
+      products: fixtureProducts,
+    });
+    if (unconfiguredPublicRegistration.status !== 503) {
+      throw new Error(`Public demo registration without a secret should be disabled: ${JSON.stringify(unconfiguredPublicRegistration)}`);
+    }
+  } finally {
+    if (previousPublicOrigin === undefined) delete process.env.SLLR_PUBLIC_ORIGIN;
+    else process.env.SLLR_PUBLIC_ORIGIN = previousPublicOrigin;
+  }
+
   const previousDemoSecret = process.env.SLLR_DEMO_MERCHANT_SECRET;
   process.env.SLLR_DEMO_MERCHANT_SECRET = "demo-smoke-secret";
   try {
@@ -614,12 +657,20 @@ async function smokeDemoMerchants(origin: string) {
     if (missingSecret.status !== 401) {
       throw new Error(`Demo merchant without secret should be rejected with 401: ${JSON.stringify(missingSecret)}`);
     }
-    const withSecret = await postJson(origin, "/demo-merchants", {
+    const replacement = await postJsonFailure(origin, "/demo-merchants", {
       storeDomain: "demo-roaster-smoke.com",
       products: fixtureProducts,
       secret: "demo-smoke-secret",
+    });
+    if (replacement.status !== 409) {
+      throw new Error(`Existing demo merchant identity should not be replaceable: ${JSON.stringify(replacement)}`);
+    }
+    const withSecret = await postJson(origin, "/demo-merchants", {
+      storeDomain: "secret-roaster-smoke.com",
+      products: fixtureProducts,
+      secret: "demo-smoke-secret",
     }) as { merchant?: { id?: string } };
-    if (withSecret.merchant?.id !== "demo-roaster-smoke-com") {
+    if (withSecret.merchant?.id !== "demo-secret-roaster-smoke-com") {
       throw new Error(`Demo merchant with secret failed: ${JSON.stringify(withSecret)}`);
     }
   } finally {
@@ -1075,10 +1126,12 @@ async function smokeVerifiedReview(origin: string) {
   const s = await postJson(origin, "/buyer/session", { label: "review buyer" }) as { token?: string; buyerId?: string };
   const token = s.token!;
   const auth = { authorization: `Bearer ${token}` };
-  const created = await fetch(`${origin}/merchants/solyd/orders`, {
-    method: "POST", headers: { "content-type": "application/json", ...auth },
-    body: JSON.stringify({ userIntent: "Ship me a black MagSafe iPhone 16 case under $100", maxSpendUsd: "100.00", deliverByDays: 7, paymentMode: "checkout" }),
-  }).then((r) => r.json()) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+  const created = await createBuyerOrder(origin, token, "solyd", {
+    userIntent: "Ship me a black MagSafe iPhone 16 case under $100",
+    maxSpendUsd: "100.00",
+    deliverByDays: 7,
+    paymentMode: "checkout",
+  }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
   const orderId = created.order?.id!;
 
   // No proof yet → review blocked.
@@ -1215,7 +1268,7 @@ async function smokeConsentGate(origin: string) {
 
     // 2. quote → returns a quoteId + confirmation text.
     const q = await postJson(origin, "/merchants/raposa-coffee/quote", cold) as { quoteId?: string; amountUsd?: string; confirmationText?: string };
-    if (!q.quoteId?.startsWith("quote_") || !q.confirmationText?.startsWith("CONFIRM $")) {
+    if (!q.quoteId?.startsWith("quote_") || !q.confirmationText?.startsWith("CONFIRM 1 x") || !q.confirmationText.includes(" total")) {
       throw new Error(`quote did not return a bindable quoteId: ${JSON.stringify(q)}`);
     }
 
@@ -1243,6 +1296,29 @@ async function smokeConsentGate(origin: string) {
     //    item → fresh quote amount ≠ consent amount → blocked.
     const drift = await order({ userIntent: "iced latte in 10 minutes", deadlineMinutes: 10, paymentMode: "counter", quoteId: q.quoteId, consentId: c.consent.id });
     if (drift.status !== 409) throw new Error(`price-drift order should be 409, got ${drift.status}`);
+
+    // Same-price item substitution is also drift: consent binds item identity,
+    // not only the amount. Raposa Shop has two $15.95 coffee products.
+    const samePriceQuote = await postJson(origin, "/merchants/raposa-shop/quote", {
+      userIntent: "sunrise blend coffee",
+      itemId: "sunrise-blend",
+      deliverByDays: 7,
+      paymentMode: "checkout",
+    }) as { quoteId?: string };
+    const samePriceConsent = await postJson(origin, "/consent", { quoteId: samePriceQuote.quoteId }) as { consent?: { id?: string } };
+    const substituted = await fetch(`${origin}/merchants/raposa-shop/orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        userIntent: "ethiopia yirgacheffe coffee",
+        itemId: "ethiopia-yirgacheffe",
+        deliverByDays: 7,
+        paymentMode: "checkout",
+        quoteId: samePriceQuote.quoteId,
+        consentId: samePriceConsent.consent?.id,
+      }),
+    });
+    if (substituted.status !== 409) throw new Error(`same-price item substitution should be 409, got ${substituted.status}`);
 
     // 8. expired quote → consent refused (deterministic via injected now).
     const q2 = await postJson(origin, "/merchants/raposa-coffee/quote", cold) as { quoteId?: string };
@@ -1484,13 +1560,13 @@ async function smokeCardOnFile(origin: string) {
     return s as { token: string; buyerId: string };
   };
   const orderFor = async (token: string) => {
-    const res = await fetch(`${origin}/merchants/raposa-coffee/orders`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ userIntent: "iced latte in 10 minutes", deadlineMinutes: 10, maxSpendUsd: "10.00", paymentMode: "counter" }),
-    });
-    const j = await res.json() as { order?: { id?: string; buyerId?: string } };
-    if (!res.ok || !j.order?.id) throw new Error(`order create failed: ${JSON.stringify(j)}`);
+    const j = await createBuyerOrder(origin, token, "raposa-coffee", {
+      userIntent: "iced latte in 10 minutes",
+      deadlineMinutes: 10,
+      maxSpendUsd: "10.00",
+      paymentMode: "counter",
+    }) as { order?: { id?: string; buyerId?: string } };
+    if (!j.order?.id) throw new Error(`order create failed: ${JSON.stringify(j)}`);
     return j.order.id;
   };
   // Fire the demo setup_intent.succeeded webhook that saves a card for a buyer.
@@ -1605,13 +1681,13 @@ async function smokeCheckoutSavesCard(origin: string) {
   delete process.env.STRIPE_WEBHOOK_SECRET; // demo webhook path
 
   const orderFor = async (token: string) => {
-    const res = await fetch(`${origin}/merchants/solyd/orders`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ userIntent: "Ship me a black MagSafe iPhone 16 case under $100", maxSpendUsd: "100.00", deliverByDays: 7, paymentMode: "checkout" }),
-    });
-    const j = await res.json() as { order?: { id?: string; item?: { subtotalUsd?: string } } };
-    if (!res.ok || !j.order?.id) throw new Error(`order create failed: ${JSON.stringify(j)}`);
+    const j = await createBuyerOrder(origin, token, "solyd", {
+      userIntent: "Ship me a black MagSafe iPhone 16 case under $100",
+      maxSpendUsd: "100.00",
+      deliverByDays: 7,
+      paymentMode: "checkout",
+    }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+    if (!j.order?.id) throw new Error(`order create failed: ${JSON.stringify(j)}`);
     return j.order;
   };
 
@@ -1731,11 +1807,12 @@ async function smokeRecurring(origin: string) {
   try {
     // suggestRecurring hint rides on the order response ("SLL-R asks").
     const hintBuyer = await newBuyer();
-    const order = await fetch(`${origin}/merchants/noun-coffee/orders`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${hintBuyer.token}` },
-      body: JSON.stringify({ userIntent: "crowd pleaser pourover under $15 in 15 minutes", deadlineMinutes: 15, maxSpendUsd: "15.00", paymentMode: "counter" }),
-    }).then((r) => r.json()) as { suggestRecurring?: { eligible?: boolean; prompt?: string } };
+    const order = await createBuyerOrder(origin, hintBuyer.token, "noun-coffee", {
+      userIntent: "crowd pleaser pourover under $15 in 15 minutes",
+      deadlineMinutes: 15,
+      maxSpendUsd: "15.00",
+      paymentMode: "counter",
+    }) as { suggestRecurring?: { eligible?: boolean; prompt?: string } };
     if (!order.suggestRecurring?.eligible || !order.suggestRecurring.prompt) {
       throw new Error(`order missing recurring suggestion: ${JSON.stringify(order.suggestRecurring)}`);
     }
@@ -1907,14 +1984,36 @@ async function smokeBuyerAuth(origin: string) {
   }
   const token = session.token;
 
-  // REST order with Bearer token binds to the buyerId.
-  const authedRes = await fetch(`${origin}/merchants/raposa-coffee/orders`, {
+  // Buyer-authenticated mutation without quote-bound consent is blocked.
+  const missingConsent = await fetch(`${origin}/merchants/raposa-coffee/orders`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ userIntent: "iced latte in 10 minutes", deadlineMinutes: 10, maxSpendUsd: "10.00", paymentMode: "counter" }),
   });
-  const authed = await authedRes.json() as { order?: { id?: string; buyerId?: string } };
-  if (!authedRes.ok || authed.order?.buyerId !== session.buyerId) {
+  if (missingConsent.status !== 409) throw new Error(`Authenticated order without consent should be 409, got ${missingConsent.status}`);
+
+  const consentProbe = await postJson(origin, "/merchants/raposa-coffee/quote", {
+    userIntent: "iced latte in 10 minutes",
+    deadlineMinutes: 10,
+    maxSpendUsd: "10.00",
+  }, { authorization: `Bearer ${token}` }) as { quoteId?: string };
+  const missingConfirmation = await fetch(`${origin}/consent`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ quoteId: consentProbe.quoteId }),
+  });
+  if (missingConfirmation.status !== 422) {
+    throw new Error(`Authenticated consent without confirmationText should be 422, got ${missingConfirmation.status}`);
+  }
+
+  // Quote → exact confirmation → order binds the resolved buyerId.
+  const authed = await createBuyerOrder(origin, token, "raposa-coffee", {
+    userIntent: "iced latte in 10 minutes",
+    deadlineMinutes: 10,
+    maxSpendUsd: "10.00",
+    paymentMode: "counter",
+  }) as { order?: { id?: string; buyerId?: string } };
+  if (authed.order?.buyerId !== session.buyerId) {
     throw new Error(`Authed order did not bind buyerId: ${JSON.stringify(authed)}`);
   }
 
@@ -1929,13 +2028,31 @@ async function smokeBuyerAuth(origin: string) {
   const noToken = await fetch(`${origin}/buyer/orders`);
   if (noToken.status !== 401) throw new Error(`/buyer/orders without token should be 401, got ${noToken.status}`);
 
-  // MCP create_order with the Bearer token binds buyerId; list_my_orders sees it.
-  const mcpCreate = await fetch(`${origin}/mcp`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ jsonrpc: "2.0", id: ++nextMcpRequestId, method: "tools/call", params: { name: "create_order", arguments: { merchantId: "raposa-coffee", userIntent: "cortado pickup in 10 min", deadlineMinutes: 10, paymentMode: "counter" } } }),
-  }).then((r) => r.json()) as { result?: { structuredContent?: { order?: { id?: string; buyerId?: string } } } };
-  const mcpOrder = mcpCreate.result?.structuredContent?.order;
+  // MCP exposes the same quote → consent → create choreography.
+  const mcpHeaders = { authorization: `Bearer ${token}` };
+  const mcpQuoteResult = await mcpToolCall(origin, "quote_order", {
+    merchantId: "raposa-coffee",
+    userIntent: "cortado pickup in 10 min",
+    deadlineMinutes: 10,
+  }, mcpHeaders);
+  const mcpQuote = mcpQuoteResult.structuredContent as { quoteId?: string; confirmationText?: string; request?: Record<string, unknown> } | undefined;
+  if (!mcpQuote?.quoteId || !mcpQuote.confirmationText || !mcpQuote.request) {
+    throw new Error(`MCP quote was not resumable: ${JSON.stringify(mcpQuoteResult)}`);
+  }
+  const mcpConsentResult = await mcpToolCall(origin, "request_consent", {
+    quoteId: mcpQuote.quoteId,
+    confirmationText: mcpQuote.confirmationText,
+  }, mcpHeaders);
+  const mcpConsent = mcpConsentResult.structuredContent as { consent?: { id?: string } } | undefined;
+  if (!mcpConsent?.consent?.id) throw new Error(`MCP consent failed: ${JSON.stringify(mcpConsentResult)}`);
+  const mcpCreate = await mcpToolCall(origin, "create_order", {
+    merchantId: "raposa-coffee",
+    ...mcpQuote.request,
+    quoteId: mcpQuote.quoteId,
+    consentId: mcpConsent.consent.id,
+    paymentMode: "counter",
+  }, mcpHeaders);
+  const mcpOrder = (mcpCreate.structuredContent as { order?: { id?: string; buyerId?: string } } | undefined)?.order;
   if (mcpOrder?.buyerId !== session.buyerId) {
     throw new Error(`MCP create_order did not bind buyerId from Bearer: ${JSON.stringify(mcpCreate)}`);
   }
@@ -1994,12 +2111,12 @@ async function smokeBuyerAuth(origin: string) {
       userIntent: "iced latte", maxSpendUsd: "10.00", paymentMode: "counter",
     });
     if (rejected.status !== 401) throw new Error(`Anon order under require-auth should be 401: ${JSON.stringify(rejected)}`);
-    const stillOk = await fetch(`${origin}/merchants/raposa-coffee/orders`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ userIntent: "cold brew", maxSpendUsd: "10.00", paymentMode: "counter" }),
-    });
-    if (!stillOk.ok) throw new Error(`Authed order under require-auth should succeed, got ${stillOk.status}`);
+    const stillOk = await createBuyerOrder(origin, token, "raposa-coffee", {
+      userIntent: "cold brew",
+      maxSpendUsd: "10.00",
+      paymentMode: "counter",
+    }) as { order?: { buyerId?: string } };
+    if (stillOk.order?.buyerId !== session.buyerId) throw new Error(`Authed consented order under require-auth should succeed: ${JSON.stringify(stillOk)}`);
   } finally {
     if (prev === undefined) delete process.env.SLLR_REQUIRE_BUYER_AUTH; else process.env.SLLR_REQUIRE_BUYER_AUTH = prev;
   }
@@ -2009,6 +2126,196 @@ async function smokeBuyerAuth(origin: string) {
   if (!revokeRes.ok) throw new Error(`Revoke should succeed, got ${revokeRes.status}`);
   const afterRevoke = await fetch(`${origin}/buyer/orders`, { headers: { authorization: `Bearer ${token}` } });
   if (afterRevoke.status !== 401) throw new Error(`Revoked token should be 401, got ${afterRevoke.status}`);
+}
+
+async function smokePersonalShop(origin: string) {
+  const anonymous = await fetch(`${origin}/buyer/shop`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ userIntent: "iced coffee under $10" }),
+  });
+  if (anonymous.status !== 401) {
+    throw new Error(`/buyer/shop without a buyer session should be 401, got ${anonymous.status}`);
+  }
+
+  const session = await postJson(origin, "/buyer/session", { label: "personal shop buyer" }) as { token?: string; buyerId?: string };
+  if (!session.token || !session.buyerId) throw new Error(`Personal-shop buyer session was not issued: ${JSON.stringify(session)}`);
+  const authorization = { authorization: `Bearer ${session.token}` };
+  const ordersBefore = await fetch(`${origin}/buyer/orders`, { headers: authorization }).then((response) => response.json()) as { orders?: unknown[] };
+
+  const comparisonResponse = await fetch(`${origin}/buyer/shop`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authorization },
+    body: JSON.stringify({
+      userIntent: "iced coffee",
+      merchantIds: ["raposa-coffee", "noun-coffee", "solyd", "missing-merchant"],
+      deadlineMinutes: 10,
+      maxSpendUsd: "20.00",
+      quantity: 2,
+      limit: 3,
+      buyerId: "buyer_forged",
+    }),
+  });
+  const comparison = await comparisonResponse.json() as {
+    buyerId?: string;
+    recommended?: { rank?: number; quoteId?: string } | null;
+    options?: Array<{
+      merchant?: { id?: string };
+      quoteId?: string;
+      expiresAt?: string;
+      confirmationText?: string;
+      quote?: { item?: { id?: string } };
+      orderRequest?: { itemId?: string; quoteId?: string };
+      next?: { consent?: { tool?: string }; order?: { tool?: string } };
+    }>;
+    rejected?: Array<{ merchantId?: string; reasons?: string[] }>;
+  };
+  if (
+    !comparisonResponse.ok
+    || comparison.buyerId !== session.buyerId
+    || !comparison.options?.length
+    || comparison.recommended?.rank !== 1
+    || !comparison.rejected?.some((entry) => entry.merchantId === "missing-merchant")
+    || !comparison.rejected?.some((entry) => entry.merchantId === "solyd" && entry.reasons?.some((reason) => reason.includes("pickup")))
+  ) {
+    throw new Error(`Cross-merchant comparison was not grounded: ${JSON.stringify(comparison)}`);
+  }
+  for (const option of comparison.options) {
+    if (
+      !option.quoteId
+      || !option.expiresAt
+      || !option.confirmationText
+      || !option.confirmationText.startsWith("CONFIRM 2 x")
+      || !option.confirmationText.includes(" each, $")
+      || !option.confirmationText.endsWith(" total")
+      || option.orderRequest?.itemId !== option.quote?.item?.id
+      || option.orderRequest?.quoteId !== option.quoteId
+      || option.next?.consent?.tool !== "request_consent"
+      || option.next?.order?.tool !== "create_order"
+    ) {
+      throw new Error(`Personal-shop option cannot be safely resumed: ${JSON.stringify(option)}`);
+    }
+    const stored = await getQuote(option.quoteId);
+    if (!stored || stored.buyerId !== session.buyerId || stored.itemId !== option.quote?.item?.id) {
+      throw new Error(`Personal-shop quote was not buyer-bound: ${JSON.stringify({ option, stored })}`);
+    }
+  }
+
+  const ordersAfterComparison = await fetch(`${origin}/buyer/orders`, { headers: authorization }).then((response) => response.json()) as { orders?: unknown[] };
+  if ((ordersAfterComparison.orders?.length ?? 0) !== (ordersBefore.orders?.length ?? 0)) {
+    throw new Error(`Personal shopping created an order before consent: ${JSON.stringify(ordersAfterComparison)}`);
+  }
+
+  const nearbyResponse = await fetch(`${origin}/buyer/shop`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authorization },
+    body: JSON.stringify({
+      userIntent: "iced latte",
+      category: "cafe",
+      lat: 25.7907,
+      lng: -80.13,
+      radiusKm: 2,
+      deadlineMinutes: 10,
+      maxSpendUsd: "10.00",
+    }),
+  });
+  const nearby = await nearbyResponse.json() as { options?: Array<{ merchant?: { id?: string }; distanceKm?: number }> };
+  if (!nearbyResponse.ok || nearby.options?.length !== 1 || nearby.options[0]?.merchant?.id !== "raposa-coffee" || nearby.options[0]?.distanceKm !== 0) {
+    throw new Error(`Personal shopping did not honor nearby constraints: ${JSON.stringify(nearby)}`);
+  }
+
+  const infeasibleResponse = await fetch(`${origin}/buyer/shop`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authorization },
+    body: JSON.stringify({ userIntent: "iced latte", merchantIds: ["raposa-coffee"], maxSpendUsd: "1.00", deadlineMinutes: 10 }),
+  });
+  const infeasible = await infeasibleResponse.json() as { options?: unknown[]; rejected?: Array<{ reasons?: string[] }> };
+  if (!infeasibleResponse.ok || infeasible.options?.length !== 0 || !infeasible.rejected?.some((entry) => entry.reasons?.some((reason) => reason.includes("exceeds max spend")))) {
+    throw new Error(`Personal shopping did not return grounded infeasibility: ${JSON.stringify(infeasible)}`);
+  }
+
+  await setItemAvailability("raposa-coffee", "iced-latte", false);
+  try {
+    const unavailable = await postJson(origin, "/merchants/raposa-coffee/quote", {
+      userIntent: "iced latte",
+      itemId: "iced-latte",
+      deadlineMinutes: 10,
+      maxSpendUsd: "10.00",
+    }) as { quote?: { feasible?: boolean; reasons?: string[] }; quoteId?: string };
+    if (unavailable.quote?.feasible !== false || unavailable.quoteId || !unavailable.quote?.reasons?.some((reason) => reason.includes("unavailable"))) {
+      throw new Error(`Unavailable item should not produce a persisted quote: ${JSON.stringify(unavailable)}`);
+    }
+  } finally {
+    await setItemAvailability("raposa-coffee", "iced-latte", true);
+  }
+
+  const tooMany = await fetch(`${origin}/buyer/shop`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authorization },
+    body: JSON.stringify({ userIntent: "coffee", merchantIds: Array.from({ length: 9 }, (_, index) => `merchant-${index}`) }),
+  });
+  if (tooMany.status !== 400) throw new Error(`Personal shopping should reject unbounded fan-out, got ${tooMany.status}`);
+
+  const nonObject = await fetch(`${origin}/buyer/shop`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authorization },
+    body: JSON.stringify([]),
+  });
+  if (nonObject.status !== 400) throw new Error(`Personal shopping should reject non-object JSON, got ${nonObject.status}`);
+
+  const unsafeSpend = await fetch(`${origin}/buyer/shop`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authorization },
+    body: JSON.stringify({ userIntent: "coffee", maxSpendUsd: "999999999999999999999999999999999999999999999999" }),
+  });
+  if (unsafeSpend.status !== 400) throw new Error(`Personal shopping should reject unsafe spend values, got ${unsafeSpend.status}`);
+
+  const mcpComparison = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authorization },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: ++nextMcpRequestId,
+      method: "tools/call",
+      params: {
+        name: "shop_for_me",
+        arguments: { userIntent: "cold coffee", merchantIds: ["raposa-coffee", "noun-coffee"], deadlineMinutes: 10, maxSpendUsd: "10.00" },
+      },
+    }),
+  }).then((response) => response.json()) as { result?: { isError?: boolean; structuredContent?: { buyerId?: string; options?: unknown[] } } };
+  if (mcpComparison.result?.isError || mcpComparison.result?.structuredContent?.buyerId !== session.buyerId || !mcpComparison.result.structuredContent.options?.length) {
+    throw new Error(`MCP shop_for_me did not use the buyer session: ${JSON.stringify(mcpComparison)}`);
+  }
+  const anonymousMcp = await mcpToolCall(origin, "shop_for_me", { userIntent: "coffee" });
+  if (!anonymousMcp.isError || !anonymousMcp.content?.[0]?.text?.includes("buyer session")) {
+    throw new Error(`Anonymous MCP shop_for_me should fail: ${JSON.stringify(anonymousMcp)}`);
+  }
+
+  const completedOrder = await createBuyerOrder(origin, session.token, "raposa-coffee", {
+    userIntent: "iced latte",
+    itemId: "iced-latte",
+    deadlineMinutes: 10,
+    paymentMode: "counter",
+  }) as { order?: { id?: string; item?: { subtotalUsd?: string } } };
+  if (!completedOrder.order?.id) throw new Error(`Taste-memory order was not created: ${JSON.stringify(completedOrder)}`);
+  const proof = await postJson(origin, "/merchants/raposa-coffee/payment", {
+    orderId: completedOrder.order.id,
+    provider: "counter",
+    paymentId: "personal_shop_taste_proof",
+    amountUsd: completedOrder.order.item?.subtotalUsd,
+    demo: true,
+  }) as { proofLevel?: string };
+  if (proof.proofLevel !== "receipt_memory_issued") throw new Error(`Taste-memory proof did not issue receipt memory: ${JSON.stringify(proof)}`);
+
+  const tasteResponse = await fetch(`${origin}/buyer/shop`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authorization },
+    body: JSON.stringify({ userIntent: "surprise me", merchantIds: ["raposa-coffee", "noun-coffee"], maxSpendUsd: "50.00", limit: 5 }),
+  });
+  const taste = await tasteResponse.json() as { options?: Array<{ why?: string[] }> };
+  if (!tasteResponse.ok || !taste.options?.some((option) => option.why?.some((reason) => reason.includes("Verified receipt memory")))) {
+    throw new Error(`Verified receipt memory did not inform the next comparison: ${JSON.stringify(taste)}`);
+  }
 }
 
 async function main() {
@@ -2050,6 +2357,7 @@ async function main() {
       product?: string;
       agentDiscovery?: {
         openapi?: string;
+        personalAgent?: string;
         baseMcpPluginSpec?: string;
         sllrMcpManifest?: string;
         solanaPluginSpec?: string;
@@ -2060,6 +2368,7 @@ async function main() {
       root.product !== "SLL-R"
       || !(root.agentDiscovery as { mcp?: string } | undefined)?.mcp?.endsWith("/mcp")
       || !root.agentDiscovery?.openapi?.endsWith("/openapi.json")
+      || !root.agentDiscovery?.personalAgent?.endsWith("/buyer/shop")
       || !root.agentDiscovery?.sllrMcpManifest?.endsWith("/.well-known/sllr-mcp.json")
       || !root.agentDiscovery?.baseMcpPluginSpec?.endsWith("/.well-known/base-mcp-plugin.md")
       || !root.agentDiscovery?.solanaPluginSpec?.endsWith("/.well-known/solana-sllr-plugin.md")
@@ -2091,7 +2400,9 @@ async function main() {
       || mcpManifest.transport?.type !== "streamable_http"
       || !mcpManifest.transport.url?.endsWith("/mcp")
       || !mcpManifest.safety?.noAutonomousPayment
+      || !mcpManifest.tools?.some((tool) => tool.name === "shop_for_me" && tool.path === "/buyer/shop")
       || !mcpManifest.tools?.some((tool) => tool.name === "quote_order" && tool.path === "/merchants/{merchantId}/quote")
+      || !mcpManifest.tools?.some((tool) => tool.name === "request_consent" && tool.path === "/consent")
       || !mcpManifest.tools?.some((tool) => tool.name === "create_order" && tool.path === "/merchants/{merchantId}/orders")
       || !mcpManifest.tools?.some((tool) => tool.name === "get_payment_options" && tool.path === "/merchants/{merchantId}/payment-options")
     ) {
@@ -2102,6 +2413,7 @@ async function main() {
     await smokeConcurrentMutationClaims();
     await smokeCompletionPersistenceFailure();
     await smokeIdempotentMutationRestart();
+    await smokePersonalShop(origin);
     await smokeMcp(origin);
     await smokeReceiptGating(origin);
     await smokeBuyerAuth(origin);
@@ -2131,6 +2443,8 @@ async function main() {
     };
     if (
       openapi.openapi !== "3.1.0"
+      || !openapi.paths?.["/buyer/shop"]
+      || !openapi.paths?.["/consent"]
       || !openapi.paths?.["/base-plugin/coffee/prepare-payment"]
       || !openapi.paths?.["/agent/{merchantId}"]
       || !openapi.paths?.["/agent/{merchantId}/message"]

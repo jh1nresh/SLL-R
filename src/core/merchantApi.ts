@@ -8,6 +8,7 @@ import { grantConsent, validateConsentForOrder, expectedConfirmation } from "./c
 import { centsFromUsd } from "./money.js";
 import { recordLoopSafe, loopIdForQuote, loopIdForOrder } from "./actionLoop.js";
 import { actionKeyFrom, mutationResultForOrder, withIdempotentMutation } from "./mutations.js";
+import { isItemAvailable } from "./availability.js";
 import type { MerchantProfile, OrderRequest, PaymentRail, QuoteRequest } from "../types.js";
 
 function requireMerchant(merchantId: string) {
@@ -130,8 +131,9 @@ export function getMerchantMenu(merchantId: string) {
   };
 }
 
-// Consent gate is OPT-IN so existing callers (REST, MCP, recurring, etc.) keep
-// working; flip SLLR_REQUIRE_CONSENT=true to enforce quote→consent→order.
+// Legacy anonymous channels can keep quote→order flows working. Buyer-authenticated
+// agents always require quote-bound consent; the env flag additionally enforces it
+// for anonymous channels.
 function consentRequired(): boolean {
   return process.env.SLLR_REQUIRE_CONSENT === "true";
 }
@@ -146,10 +148,21 @@ async function queueAwareEta(merchant: MerchantProfile, itemId: string | undefin
 export async function quoteMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
   const merchant = requireMerchant(merchantId);
   const quote = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
+  if (quote.feasible && quote.item && !(await isItemAvailable(merchant.id, quote.item.id))) {
+    quote.feasible = false;
+    quote.decision = "negotiate_or_ask_user";
+    quote.reasons = [`${quote.item.name} is currently unavailable at ${merchant.name}.`];
+  }
   // Honest ETA: replace the prep-only estimate with the queue-aware wait so the
   // quote and the created order's promise always come from one formula.
-  const etaMinutes = quote.feasible && quote.item ? await queueAwareEta(merchant, quote.item.id) : null;
+  let etaMinutes = quote.feasible && quote.item ? await queueAwareEta(merchant, quote.item.id) : null;
   if (etaMinutes !== null) quote.estimate.readyInMinutes = etaMinutes;
+  if (quote.feasible && quote.item && !(await isItemAvailable(merchant.id, quote.item.id))) {
+    quote.feasible = false;
+    quote.decision = "negotiate_or_ask_user";
+    quote.reasons = [`${quote.item.name} became unavailable at ${merchant.name} before the quote was persisted.`];
+    etaMinutes = null;
+  }
   // Persist feasible quotes so consent + the order can bind to a quoteId.
   const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
   const intent = typeof payload.userIntent === "string" ? payload.userIntent : "";
@@ -174,6 +187,7 @@ export async function quoteMerchantOrder(merchantId: string, payload: Record<str
         // "confirm" into create_order deterministically (no LLM re-guessing).
         request: {
           userIntent: intent,
+          ...(typeof payload.itemId === "string" ? { itemId: payload.itemId } : {}),
           ...(typeof payload.deadlineMinutes === "number" ? { deadlineMinutes: payload.deadlineMinutes } : {}),
           ...(typeof payload.maxSpendUsd === "string" ? { maxSpendUsd: payload.maxSpendUsd } : {}),
           ...(typeof payload.deliverByDays === "number" ? { deliverByDays: payload.deliverByDays } : {}),
@@ -190,6 +204,9 @@ export async function grantMerchantConsent(payload: Record<string, unknown>) {
   const quoteId = String(payload.quoteId || "");
   const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
   const confirmationText = typeof payload.confirmationText === "string" ? payload.confirmationText : undefined;
+  if (buyerId && confirmationText === undefined) {
+    throw Object.assign(new Error("Authenticated buyer consent requires the exact confirmationText returned with the quote."), { status: 422 });
+  }
   const consent = await grantConsent({ quoteId, buyerId, confirmationText });
   await recordLoopSafe(loopIdForQuote(quoteId), { buyerId, merchantId: consent.merchantId }, {
     eventType: "consent", actor: "user", stateAfter: "consent_granted", claimLevel: "consent_requested",
@@ -215,11 +232,12 @@ async function createMerchantOrderOnce(merchantId: string, payload: Record<strin
   const seed = { buyerId: seedBuyerId, merchantId, intent: seedIntent };
   // Opt-in policy gate: no quote-bound consent → no order. Blocks are first-class
   // loop events (the spec's policy_block_receipt).
-  if (consentRequired()) {
+  if (consentRequired() || seedBuyerId !== null) {
     const consentId = String(payload.consentId || "");
     let consent;
+    let boundQuote;
     try {
-      ({ consent } = await validateConsentForOrder(payloadQuoteId, consentId, seedBuyerId));
+      ({ consent, quote: boundQuote } = await validateConsentForOrder(payloadQuoteId, consentId, seedBuyerId));
     } catch (error) {
       const e = error as Error & { requiredNextStep?: string };
       await recordLoopSafe(payloadQuoteId ? loopIdForQuote(payloadQuoteId) : `loop_blk_${Date.now()}`, seed, {
@@ -229,15 +247,23 @@ async function createMerchantOrderOnce(merchantId: string, payload: Record<strin
       });
       throw error;
     }
-    // Order amount must equal the consented quote amount (catch price drift).
+    // The order must remain the exact merchant, item, quantity, and amount the
+    // buyer confirmed. Price-only comparison is insufficient for same-price items.
     const fresh = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
-    if (!fresh.feasible || !fresh.item || centsFromUsd(fresh.item.subtotalUsd) !== centsFromUsd(consent.amountUsd)) {
+    if (
+      !fresh.feasible
+      || !fresh.item
+      || boundQuote.merchantId !== merchantId
+      || fresh.item.id !== boundQuote.itemId
+      || fresh.item.quantity !== boundQuote.quantity
+      || centsFromUsd(fresh.item.subtotalUsd) !== centsFromUsd(consent.amountUsd)
+    ) {
       await recordLoopSafe(loopIdForQuote(payloadQuoteId), seed, {
         eventType: "policy_block", actor: "client_agent",
-        blockReason: `price_drift: order != consented $${consent.amountUsd} (next: quote_order)`,
+        blockReason: `quote_drift: order != consented ${boundQuote.itemId} x${boundQuote.quantity} at $${consent.amountUsd} (next: quote_order)`,
         ids: { quoteId: payloadQuoteId },
       });
-      throw Object.assign(new Error(`Price changed since consent ($${consent.amountUsd}) — request a fresh quote + consent.`), { status: 409, requiredNextStep: "quote_order" });
+      throw Object.assign(new Error("Order details changed since consent — request a fresh quote and consent."), { status: 409, requiredNextStep: "quote_order" });
     }
   }
   // ETA reconfirm gate (opt-in SLLR_ETA_RECONFIRM): if the queue-aware wait now

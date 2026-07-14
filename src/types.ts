@@ -70,6 +70,7 @@ export type MerchantProfile = {
 export type QuoteRequest = {
   merchantId: string;
   userIntent: string;
+  itemId?: string;
   maxSpendUsd?: string;
   deadlineMinutes?: number;
   deliverByDays?: number;

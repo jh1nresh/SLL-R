@@ -55,9 +55,10 @@ async function allOrders(): Promise<SellerOrder[]> {
   return loadOrdersByIds(ids);
 }
 
-export async function listOrdersForBuyer(buyerId: string): Promise<SellerOrder[]> {
+export async function listOrdersForBuyer(buyerId: string, limit?: number): Promise<SellerOrder[]> {
   const ids = await sllrStore().indexMembers(buyerOrdersIndex(buyerId));
-  return (await loadOrdersByIds(ids)).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const boundedIds = limit === undefined ? ids : ids.slice(-Math.max(1, Math.min(limit, 500)));
+  return (await loadOrdersByIds(boundedIds)).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
 const capacityByClass = {
