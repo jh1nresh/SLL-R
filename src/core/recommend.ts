@@ -38,7 +38,8 @@ export async function recommendForBuyer(
     return true;
   });
 
-  const past = await listOrdersForBuyer(buyerId);
+  const past = (await listOrdersForBuyer(buyerId, 100))
+    .filter((order) => order.proofLevel === "receipt_memory_issued" && order.receipt !== null);
 
   // Taste = tag frequency from verified purchases; also track merchants tried and
   // exact items already bought.

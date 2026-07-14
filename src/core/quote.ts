@@ -16,7 +16,7 @@ function maxSpendCents(value: string | undefined) {
   return cents > 0 ? cents : null;
 }
 
-function scoreItem(intent: string, item: CatalogItem) {
+export function scoreCatalogItem(intent: string, item: CatalogItem) {
   const text = normalized(intent);
   const terms = [item.id, item.name, ...(item.tags || [])].flatMap((term) => [
     term,
@@ -38,9 +38,11 @@ export function quoteOrder(input: QuoteRequest): QuoteResult {
   const quantity = quantityFrom(input.quantity);
   const maxCents = maxSpendCents(input.maxSpendUsd);
   const ranked = merchant.catalog
-    .map((item) => ({ item, score: scoreItem(input.userIntent, item) }))
+    .map((item) => ({ item, score: scoreCatalogItem(input.userIntent, item) }))
     .sort((left, right) => right.score - left.score || centsFromUsd(left.item.amountUsd) - centsFromUsd(right.item.amountUsd));
-  const selected = ranked.find((entry) => entry.score > 0)?.item || merchant.catalog[0] || null;
+  const selected = input.itemId
+    ? merchant.catalog.find((item) => item.id === input.itemId) || null
+    : ranked.find((entry) => entry.score > 0)?.item || merchant.catalog[0] || null;
 
   if (!selected) {
     return {
@@ -49,13 +51,21 @@ export function quoteOrder(input: QuoteRequest): QuoteResult {
       decision: "negotiate_or_ask_user",
       item: null,
       estimate: { readyInMinutes: null, shippingDays: null },
-      reasons: ["Merchant has no configured catalog items."],
+      reasons: [input.itemId
+        ? `Item ${input.itemId} is not in ${merchant.name}'s catalog.`
+        : "Merchant has no configured catalog items."],
       alternatives: [],
     };
   }
 
   const subtotalCents = centsFromUsd(selected.amountUsd) * quantity;
   const reasons: string[] = [];
+  if (input.deadlineMinutes && !selected.fulfillment.includes("pickup")) {
+    reasons.push(`${selected.name} is not available for pickup.`);
+  }
+  if (input.deliverByDays && !selected.fulfillment.includes("shipping")) {
+    reasons.push(`${selected.name} is not available for shipping.`);
+  }
   if (maxCents !== null && subtotalCents > maxCents) {
     reasons.push(`Subtotal $${formatUsd(subtotalCents)} exceeds max spend $${formatUsd(maxCents)}.`);
   }

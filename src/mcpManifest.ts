@@ -2,7 +2,7 @@ export function sllrMcpManifest(origin: string) {
   return {
     name: "SLL-R Merchant MCP",
     version: "0.1.0",
-    description: "Generic merchant ordering tools for catalog discovery, quote, order, payment options, fulfillment status, and receipt memory.",
+    description: "Merchant-backed commerce tools for personal-agent comparison, quote, consent, order, payment options, fulfillment status, and receipt memory.",
     transport: {
       type: "streamable_http",
       url: `${origin}/mcp`,
@@ -34,10 +34,10 @@ export function sllrMcpManifest(origin: string) {
         description: "Read normalized catalog and menu sections for a merchant.",
       },
       {
-        name: "quote_order",
+        name: "shop_for_me",
         method: "POST",
-        path: "/merchants/{merchantId}/quote",
-        description: "Quote buyer intent against merchant catalog, budget, quantity, pickup deadline, or shipping deadline.",
+        path: "/buyer/shop",
+        description: "Compare bounded merchant candidates and return ranked, persisted merchant-backed quotes. Requires a buyer bearer token and never creates an order or payment.",
         inputSchema: {
           type: "object",
           required: ["userIntent"],
@@ -47,6 +47,44 @@ export function sllrMcpManifest(origin: string) {
             deadlineMinutes: { type: "number" },
             deliverByDays: { type: "number" },
             quantity: { type: "number" },
+            merchantIds: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string" } },
+            category: { type: "string" },
+            lat: { type: "number" },
+            lng: { type: "number" },
+            radiusKm: { type: "number" },
+            limit: { type: "number", maximum: 5 },
+          },
+        },
+      },
+      {
+        name: "quote_order",
+        method: "POST",
+        path: "/merchants/{merchantId}/quote",
+        description: "Quote buyer intent against merchant catalog, budget, quantity, pickup deadline, or shipping deadline.",
+        inputSchema: {
+          type: "object",
+          required: ["userIntent"],
+          properties: {
+            userIntent: { type: "string" },
+            itemId: { type: "string" },
+            maxSpendUsd: { type: "string" },
+            deadlineMinutes: { type: "number" },
+            deliverByDays: { type: "number" },
+            quantity: { type: "number" },
+          },
+        },
+      },
+      {
+        name: "request_consent",
+        method: "POST",
+        path: "/consent",
+        description: "Bind explicit buyer confirmation to a live quote before an authenticated order mutation.",
+        inputSchema: {
+          type: "object",
+          required: ["quoteId", "confirmationText"],
+          properties: {
+            quoteId: { type: "string" },
+            confirmationText: { type: "string" },
           },
         },
       },
@@ -60,6 +98,9 @@ export function sllrMcpManifest(origin: string) {
           required: ["userIntent"],
           properties: {
             userIntent: { type: "string" },
+            itemId: { type: "string" },
+            quoteId: { type: "string" },
+            consentId: { type: "string" },
             maxSpendUsd: { type: "string" },
             deadlineMinutes: { type: "number" },
             deliverByDays: { type: "number" },

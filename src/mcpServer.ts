@@ -21,12 +21,13 @@ import { cancelSubscription, confirmRun, createSubscription, listPendingRuns, li
 import { nearbyMerchants } from "./core/nearby.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { createDemoMerchant } from "./adapters/shopifyCatalog.js";
+import { shopForBuyer } from "./core/personalShop.js";
 
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
 
 const SERVER_INSTRUCTIONS = [
-  "SLL-R is a seller-side merchant runtime. Tools cover catalog discovery, quote, order, payment options, payment proof, fulfillment status, and receipt memory.",
+  "SLL-R is a merchant-backed commerce rail for personal agents. Use shop_for_me to compare grounded quotes across merchants, then keep consent, order, payment, fulfillment, and receipt as separate steps.",
   "Never submit or record a payment without explicit user approval.",
   "Before asking the user to approve payment, show merchant, item, amount, payment rail, and recipient or checkout URL.",
   "Most merchants accept non-crypto rails first: counter pay at pickup or Shopify checkout handoff. Crypto rails (base_usdc, solana_pay, helio) are optional adapters.",
@@ -58,6 +59,7 @@ type ToolDefinition = {
 const quoteProperties = {
   merchantId: { type: "string", description: "Merchant id from list_merchants, for example raposa-coffee or solyd." },
   userIntent: { type: "string", description: "Natural-language buyer intent, for example 'I need an iced latte in 10 minutes.'" },
+  itemId: { type: "string", description: "Optional exact catalog item id. Use the itemId returned by shop_for_me when continuing its quote." },
   maxSpendUsd: { type: "string", description: "Maximum budget in USD as a decimal string, for example '10.00'." },
   deadlineMinutes: { type: "number", description: "Pickup deadline in minutes for pickup merchants." },
   deliverByDays: { type: "number", description: "Shipping deadline in days for shipping merchants." },
@@ -103,6 +105,34 @@ const tools: ToolDefinition[] = [
       properties: { merchantId: quoteProperties.merchantId },
     },
     handler: (args) => getMerchantMenu(requireString(args, "merchantId")),
+  },
+  {
+    name: "shop_for_me",
+    description: "Personal-agent entry point: compare several merchants against the buyer's intent, budget, location, and pickup or shipping deadline. Returns persisted merchant-backed quotes only; it never creates consent, orders, payments, fulfillment, or receipts. Requires a buyer session.",
+    inputSchema: {
+      type: "object",
+      required: ["userIntent"],
+      properties: {
+        userIntent: quoteProperties.userIntent,
+        maxSpendUsd: quoteProperties.maxSpendUsd,
+        deadlineMinutes: quoteProperties.deadlineMinutes,
+        deliverByDays: quoteProperties.deliverByDays,
+        quantity: quoteProperties.quantity,
+        merchantIds: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string" }, description: "Optional merchant ids to compare. Otherwise SLL-R uses nearby or configured merchants." },
+        category: { type: "string", description: "Optional merchant category filter, for example cafe." },
+        lat: { type: "number", minimum: -90, maximum: 90, description: "Optional buyer latitude. Supply with lng." },
+        lng: { type: "number", minimum: -180, maximum: 180, description: "Optional buyer longitude. Supply with lat." },
+        radiusKm: { type: "number", exclusiveMinimum: 0, maximum: 100, description: "Nearby search radius. Defaults to 25 km." },
+        limit: { type: "integer", minimum: 1, maximum: 5, description: "Maximum ranked quote options. Defaults to 3." },
+      },
+    },
+    handler: (args, _origin, buyerId) => {
+      if (!buyerId) {
+        throw Object.assign(new Error("No buyer session. Connect with an Authorization: Bearer <buyer token> header."), { status: 401 });
+      }
+      const { buyerId: _ignored, ...safeArgs } = args;
+      return shopForBuyer(buyerId, safeArgs);
+    },
   },
   {
     name: "quote_order",
@@ -172,13 +202,13 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "request_consent",
-    description: "Record the buyer's quote-bound consent before creating an order. Pass the quoteId from quote_order; optionally pass the exact confirmationText the buyer sent. Returns a consentId for create_order. (Only enforced when the rail runs with SLLR_REQUIRE_CONSENT.)",
+    description: "Record the buyer's quote-bound consent before creating an authenticated order. Pass the quoteId from quote_order and the exact confirmationText shown to the buyer. Returns a consentId for create_order.",
     inputSchema: {
       type: "object",
-      required: ["quoteId"],
+      required: ["quoteId", "confirmationText"],
       properties: {
         quoteId: { type: "string", description: "The quoteId returned by quote_order." },
-        confirmationText: { type: "string", description: "Optional: the buyer's exact confirmation, e.g. 'CONFIRM $6.50 Iced latte at Raposa Coffee'." },
+        confirmationText: { type: "string", description: "The exact quantity, unit-price, and total confirmationText returned with the quote." },
       },
     },
     handler: (args, _origin, buyerId) =>
@@ -186,7 +216,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "create_order",
-    description: "Create an SLL-R order after the user accepts the quote. Do not create orders the user has not confirmed. When the rail enforces consent (SLLR_REQUIRE_CONSENT), pass quoteId + consentId.",
+    description: "Create an SLL-R order after the user accepts the quote. Buyer-authenticated calls must pass the bound quoteId + consentId; anonymous legacy channels can also be forced through consent with SLLR_REQUIRE_CONSENT.",
     inputSchema: {
       type: "object",
       required: ["merchantId", "userIntent"],

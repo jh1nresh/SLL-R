@@ -563,11 +563,12 @@ export async function registerDemoMerchantProfile(profile: MerchantProfile) {
   if (merchantProfiles[profile.id]) {
     throw Object.assign(new Error(`Merchant id ${profile.id} is reserved.`), { status: 409 });
   }
-  if (!demoMerchantProfiles.has(profile.id) && demoMerchantProfiles.size >= MAX_DEMO_MERCHANTS) {
-    throw Object.assign(new Error(`Demo merchant limit reached (${MAX_DEMO_MERCHANTS}). Reuse an existing demo merchant id.`), { status: 409 });
+  if (demoMerchantProfiles.has(profile.id)) {
+    throw Object.assign(new Error(`Demo merchant id ${profile.id} already exists and cannot be replaced.`), { status: 409 });
   }
-  // Re-registering the same id replaces the profile so a demo can re-ingest a
-  // fresher catalog without losing the slot.
+  if (!demoMerchantProfiles.has(profile.id) && demoMerchantProfiles.size >= MAX_DEMO_MERCHANTS) {
+    throw Object.assign(new Error(`Demo merchant limit reached (${MAX_DEMO_MERCHANTS}). Use configured merchant onboarding for additional stores.`), { status: 409 });
+  }
   demoMerchantProfiles.set(profile.id, profile);
   const store = sllrStore();
   await store.setJson(demoKey(profile.id), profile);

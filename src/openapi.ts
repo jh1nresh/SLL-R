@@ -37,6 +37,7 @@ export function sllrOpenApi(origin: string) {
     ],
     tags: [
       { name: "Discovery", description: "Agent-readable merchant and manifest discovery." },
+      { name: "Personal Agent", description: "Buyer-authenticated cross-merchant comparison without autonomous mutation." },
       { name: "Standalone Agent", description: "Hosted customer agent and merchant terminal pages." },
       { name: "Merchant Runtime", description: "Merchant-scoped quote, order, payment, and receipt tools." },
       { name: "Shopify", description: "Shopify Storefront MCP, checkout handoff, and webhook proof tools." },
@@ -116,6 +117,81 @@ export function sllrOpenApi(origin: string) {
           operationId: "listMerchants",
           summary: "List configured SLL-R merchants.",
           responses: { "200": jsonResponse("Merchant list") },
+        },
+      },
+      "/buyer/shop": {
+        post: {
+          tags: ["Personal Agent"],
+          operationId: "shopForBuyer",
+          summary: "Compare merchants and return ranked merchant-backed quotes.",
+          description: "Requires a buyer bearer token. This operation persists short-lived quotes only and never creates consent, orders, payments, fulfillment, or receipts.",
+          security: [{ BuyerBearer: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/PersonalShopRequestBody" },
+              },
+            },
+          },
+          responses: {
+            "200": jsonResponse("Ranked merchant-backed quotes"),
+            "401": jsonResponse("Missing or invalid buyer session"),
+            ...errorResponses(),
+          },
+        },
+      },
+      "/buyer/session": {
+        post: {
+          tags: ["Personal Agent"],
+          operationId: "createBuyerSession",
+          summary: "Create a buyer session for personal-agent tools.",
+          requestBody: {
+            required: false,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { label: { type: "string" } },
+                },
+              },
+            },
+          },
+          responses: { "201": jsonResponse("Buyer session and bearer token"), ...errorResponses() },
+        },
+      },
+      "/buyer/orders": {
+        get: {
+          tags: ["Personal Agent"],
+          operationId: "listBuyerOrders",
+          summary: "Track the current buyer's orders across merchants.",
+          security: [{ BuyerBearer: [] }],
+          responses: {
+            "200": jsonResponse("Buyer orders and fulfillment state"),
+            "401": jsonResponse("Missing or invalid buyer session"),
+          },
+        },
+      },
+      "/consent": {
+        post: {
+          tags: ["Personal Agent"],
+          operationId: "requestConsent",
+          summary: "Bind explicit buyer confirmation to a live quote.",
+          description: "Use the same buyer bearer token that created the quote. The returned consentId is required for buyer-authenticated order creation.",
+          security: [{ BuyerBearer: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ConsentRequestBody" },
+              },
+            },
+          },
+          responses: {
+            "200": jsonResponse("Quote-bound consent receipt"),
+            "401": jsonResponse("Missing or invalid buyer session"),
+            ...errorResponses(),
+          },
         },
       },
       "/agent/{merchantId}": {
@@ -508,6 +584,14 @@ export function sllrOpenApi(origin: string) {
       },
     },
     components: {
+      securitySchemes: {
+        BuyerBearer: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "SLL-R buyer token",
+          description: "Token returned by POST /buyer/session.",
+        },
+      },
       parameters: {
         MerchantId: {
           name: "merchantId",
@@ -561,10 +645,28 @@ export function sllrOpenApi(origin: string) {
           required: ["userIntent"],
           properties: {
             userIntent: { type: "string" },
+            itemId: { type: "string", description: "Optional exact catalog item id returned by shop_for_me." },
             maxSpendUsd: { type: "string" },
             deadlineMinutes: { type: "integer", minimum: 1 },
             deliverByDays: { type: "integer", minimum: 1 },
             quantity: { type: "integer", minimum: 1 },
+          },
+        },
+        PersonalShopRequestBody: {
+          type: "object",
+          required: ["userIntent"],
+          properties: {
+            userIntent: { type: "string", minLength: 1, maxLength: 500 },
+            maxSpendUsd: { type: "string" },
+            deadlineMinutes: { type: "integer", minimum: 1, maximum: 1440, description: "Pickup deadline. Mutually exclusive with deliverByDays." },
+            deliverByDays: { type: "integer", minimum: 1, maximum: 365, description: "Shipping deadline. Mutually exclusive with deadlineMinutes." },
+            quantity: { type: "integer", minimum: 1, maximum: 20 },
+            merchantIds: { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: { type: "string" } },
+            category: { type: "string" },
+            lat: { type: "number", minimum: -90, maximum: 90 },
+            lng: { type: "number", minimum: -180, maximum: 180 },
+            radiusKm: { type: "number", exclusiveMinimum: 0, maximum: 100 },
+            limit: { type: "integer", minimum: 1, maximum: 5, default: 3 },
           },
         },
         OrderRequestBody: {
@@ -574,12 +676,22 @@ export function sllrOpenApi(origin: string) {
             {
               type: "object",
               properties: {
+                quoteId: { type: "string", description: "Live quote id. Required for buyer-authenticated order creation." },
+                consentId: { type: "string", description: "Consent id bound to quoteId. Required for buyer-authenticated order creation." },
                 agentId: { type: "string" },
                 customerLabel: { type: "string" },
                 paymentMode: { type: "string", enum: ["counter", "checkout", "crypto"] },
               },
             },
           ],
+        },
+        ConsentRequestBody: {
+          type: "object",
+          required: ["quoteId", "confirmationText"],
+          properties: {
+            quoteId: { type: "string" },
+            confirmationText: { type: "string", description: "Exact confirmationText returned with the quote, including quantity, unit price, and total." },
+          },
         },
         IdempotencyFields: {
           type: "object",
