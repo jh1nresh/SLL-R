@@ -76,18 +76,25 @@ export function pendingConfirmFromQuoteResult(result: unknown): PendingConfirm |
 }
 
 // The create_order args for a pending confirm (consentId from request_consent).
-export function createOrderArgs(p: PendingConfirm, consentId: string): Record<string, unknown> {
+export function createOrderArgs(p: PendingConfirm, consentId: string, customerLabel = "iMessage confirm"): Record<string, unknown> {
   return {
     merchantId: p.merchantId,
     userIntent: p.userIntent,
     quoteId: p.quoteId,
     consentId,
-    customerLabel: "iMessage confirm",
+    customerLabel,
     ...(p.deadlineMinutes !== undefined ? { deadlineMinutes: p.deadlineMinutes } : {}),
     ...(p.maxSpendUsd !== undefined ? { maxSpendUsd: p.maxSpendUsd } : {}),
     ...(p.deliverByDays !== undefined ? { deliverByDays: p.deliverByDays } : {}),
     ...(p.quantity !== undefined ? { quantity: p.quantity } : {}),
     ...(p.acceptDelay ? { acceptDelay: true } : {}),
+  };
+}
+
+export function requestConsentArgs(p: PendingConfirm): Record<string, unknown> {
+  return {
+    quoteId: p.quoteId,
+    confirmationText: p.confirmationText,
   };
 }
 

@@ -75,6 +75,8 @@ personal agent receives natural-language intent
 
 The standalone merchant agent remains available for QR/web pilots. MCP,
 OpenAPI, and ChatGPT Actions expose the same commerce rail to personal agents.
+The consumer agent also has iMessage and LINE Messaging transports; both reuse
+the same quote-bound consent, order, payment-option, status, and receipt state.
 
 ## Adapter Contract
 

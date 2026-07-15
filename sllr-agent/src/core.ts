@@ -3,6 +3,7 @@ import { SllrMcp } from "./mcp.js";
 import { GeminiAgent } from "./llm-gemini.js";
 import type { LlmAgent, LlmTool } from "./llm.js";
 import { SYSTEM_PROMPT } from "./systemPrompt.js";
+import type { Channel } from "./responseContract.js";
 
 // Buyer-facing tools only. Merchant/server-side tools (issue_receipt,
 // attach_payment_proof, create_demo_merchant) are intentionally NOT exposed to
@@ -38,6 +39,7 @@ export type ToolResultHook = (name: string, args: Record<string, unknown>, resul
 
 export type AgentSessionOpts = {
   onToolResult?: ToolResultHook;
+  channel?: Channel;
   // Reuse an existing buyer (from a persistent channel→buyer mapping) so the
   // customer keeps the same buyerId + order history across restarts. If the
   // token is invalid/expired, a fresh session is issued.
@@ -88,9 +90,11 @@ export async function createAgentSession(
         : { type: "object", properties: {} },
     }));
 
-  const systemPrompt = pastOrders.length > 0
-    ? `${SYSTEM_PROMPT}\n\n${pastOrderMemory(pastOrders)}`
-    : SYSTEM_PROMPT;
+  const channel = opts.channel ?? "imessage";
+  const channelPrompt = `CURRENT CHANNEL: ${channel}. In every response envelope set channel to "${channel}" and conversationId to ${JSON.stringify(customerLabel)}.`;
+  const systemPrompt = [SYSTEM_PROMPT, channelPrompt, pastOrders.length > 0 ? pastOrderMemory(pastOrders) : ""]
+    .filter(Boolean)
+    .join("\n\n");
 
   const agent = new GeminiAgent(config.geminiApiKey, config.geminiModel, {
     systemPrompt,
