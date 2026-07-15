@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { pendingConfirmFromQuoteResult, isPureConfirmation, isConfirmExpired, createOrderArgs, isEtaReconfirm } from "./confirmFastPath.js";
+import { pendingConfirmFromQuoteResult, isPureConfirmation, isConfirmExpired, createOrderArgs, isEtaReconfirm, requestConsentArgs } from "./confirmFastPath.js";
 
 // A realistic quote_order tool result (rail shape incl. the request echo).
 const quoteResult = {
@@ -49,6 +49,10 @@ assert.deepEqual(args, {
   deadlineMinutes: 10,
 });
 assert.equal(createOrderArgs({ ...p!, acceptDelay: true }, "cons_1").acceptDelay, true);
+assert.deepEqual(requestConsentArgs(p!), {
+  quoteId: "quote_abc",
+  confirmationText: "CONFIRM $5.75 Fruit Tea at Game Day Boba Bar",
+});
 
 // 6. Only the rail's ETA-gate error is handled in-path.
 assert.ok(isEtaReconfirm(new Error("Wait is now ~17 min — ... Re-confirm with acceptDelay: true ...")));

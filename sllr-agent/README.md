@@ -7,13 +7,14 @@ that talks to consumers.
 
 **Step 1** is a CLI harness that validates the brain (Gemini + SLL-R MCP).
 **Step 2** is the Sendblue iMessage server — customers text in, the merchant gets
-the order on iMessage and replies `1/2/3`. Both drive the same `AgentCore`;
-iMessage / LINE are just transports.
+the order on iMessage and replies `1/2/3`. **Step 3** is a standalone LINE
+Messaging service for Taiwan. All three drive the same `AgentCore`; the channel
+is transport, while SLL-R remains the source of truth for consent and orders.
 
 ## Architecture
 
 ```
-You (CLI / later: iMessage, LINE)
+You (CLI / iMessage / LINE)
   → AgentCore (Gemini loop)  ← src/core.ts, llm-gemini.ts
   → MCP client               ← src/mcp.ts  (POST sll-r/.../mcp, buyer Bearer token)
   → SLL-R                    (quote / order / payment options / receipt, bound to buyerId)
@@ -60,6 +61,35 @@ npm run server                    # listens on :8787, POST /sendblue/inbound
 Expose `:8787` publicly (e.g. `ngrok http 8787` or deploy to Railway/Render) and
 point your **Sendblue webhook** (dashboard → Settings → Webhooks) at
 `https://<host>/sendblue/inbound`.
+
+## Run (LINE Messaging service)
+
+Create a LINE Official Account and Messaging API channel, then configure:
+
+```bash
+cd sllr-agent
+export GEMINI_API_KEY=...
+export SLLR_BASE_URL=https://sll-r.vercel.app
+export LINE_CHANNEL_ACCESS_TOKEN=...
+export LINE_CHANNEL_SECRET=...
+npm run line-server              # listens on :8788 by default
+```
+
+Expose the service over HTTPS and set this webhook URL in LINE Developers:
+
+```text
+https://<host>/channels/line/webhook
+```
+
+The service verifies `x-line-signature` against the unmodified request body,
+deduplicates `webhookEventId`, acknowledges immediately, and sends the eventual
+agent result through LINE's push-message API. V0 accepts one-to-one text events;
+group chats and non-text media are ignored.
+
+LINE Pay is a separate backend rail. Merchants that want LINE Pay must also set
+`LINE_PAY_CHANNEL_ID` and `LINE_PAY_CHANNEL_SECRET` on the SLL-R backend. Without
+that rail, the LINE agent falls back to Stripe, Shopify checkout, or counter pay
+according to the merchant profile.
 
 ## Deploy (Railway)
 
@@ -118,10 +148,12 @@ Customer iMessage ─▶ /sendblue/inbound ─▶ AgentCore (Gemini + SLL-R) ─
 | `SENDBLUE_FROM_NUMBER` | Sendblue default | optional sender number |
 | `SENDBLUE_WEBHOOK_SECRET` | — | optional; if set, inbound webhook must present it |
 | `SLLR_MERCHANT_NUMBER` | — | merchant iMessage number for order push (blank = push off) |
-| `PORT` | `8787` | server port |
+| `LINE_CHANNEL_ACCESS_TOKEN` | — | required for `npm run line-server`; sends replies through LINE Messaging API |
+| `LINE_CHANNEL_SECRET` | — | required for `npm run line-server`; verifies the raw webhook body |
+| `LINE_API_BASE_URL` | `https://api.line.me` | test override only |
+| `PORT` | `8787` Sendblue / `8788` LINE | server port |
 
 ## Next (not in this step)
 - Merchant decision → SLL-R order state (a merchant order-status MCP tool).
-- LINE adapter (LINE Pay) for Taiwan. Stripe-link payment in the order flow.
 - Multi-merchant number routing; persist chat history across restarts.
 See `specs/2026-06-13-agent-service-skeleton.md`.

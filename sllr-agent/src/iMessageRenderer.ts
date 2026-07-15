@@ -5,6 +5,10 @@ export type OutboundMessage = {
 };
 
 export function renderEnvelopeToSendblueMessages(envelope: SllrResponseEnvelope): OutboundMessage[] {
+  return [{ content: renderEnvelopeToText(envelope) }];
+}
+
+export function renderEnvelopeToText(envelope: SllrResponseEnvelope): string {
   const lines: string[] = [];
   for (const block of envelope.blocks) {
     const rendered = renderBlock(block);
@@ -13,7 +17,7 @@ export function renderEnvelopeToSendblueMessages(envelope: SllrResponseEnvelope)
   const actions = renderActions(envelope.actions);
   if (actions) lines.push(actions);
   const content = lines.join("\n\n").trim();
-  return content ? [{ content }] : [{ content: "I need one more confirmed detail before I can say that." }];
+  return content || "I need one more confirmed detail before I can say that.";
 }
 
 function renderBlock(block: SllrBlock): string {

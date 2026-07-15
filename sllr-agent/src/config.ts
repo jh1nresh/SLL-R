@@ -28,6 +28,13 @@ export type SendblueConfig = {
   port: number;
 };
 
+export type LineConfig = {
+  channelAccessToken: string;
+  channelSecret: string;
+  apiBaseUrl: string;
+  port: number;
+};
+
 // Parse SLLR_MERCHANT_CHANNELS, a JSON map of merchantId -> notify number, e.g.
 // {"raposa-coffee":"+13055551234","louisa-coffee":"+886912345678"}. Each merchant
 // gets its own line; orders route by merchantId. Bad JSON -> empty (logged by caller).
@@ -60,5 +67,20 @@ export function loadSendblueConfig(): SendblueConfig {
     merchantNumber: (process.env.SLLR_MERCHANT_NUMBER || "").trim(),
     merchantChannels: parseMerchantChannels(process.env.SLLR_MERCHANT_CHANNELS || ""),
     port: Number.isFinite(port) ? port : 8787,
+  };
+}
+
+export function loadLineConfig(): LineConfig {
+  const channelAccessToken = (process.env.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
+  const channelSecret = (process.env.LINE_CHANNEL_SECRET || "").trim();
+  if (!channelAccessToken || !channelSecret) {
+    throw new Error("LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET are required for the LINE Messaging service.");
+  }
+  const port = Number.parseInt(process.env.PORT || "8788", 10);
+  return {
+    channelAccessToken,
+    channelSecret,
+    apiBaseUrl: (process.env.LINE_API_BASE_URL || "https://api.line.me").trim().replace(/\/$/, ""),
+    port: Number.isFinite(port) ? port : 8788,
   };
 }

@@ -13,7 +13,9 @@ import { clampEnvelope, type SllrStateProof } from "./claimClamp.js";
 import { renderEnvelopeToSendblueMessages } from "./iMessageRenderer.js";
 import { parseEnvelope } from "./responseContract.js";
 import { TurnQueue } from "./turnQueue.js";
-import { pendingConfirmFromQuoteResult, isPureConfirmation, isConfirmExpired, createOrderArgs, isEtaReconfirm, type PendingConfirm } from "./confirmFastPath.js";
+import { pendingConfirmFromQuoteResult, isPureConfirmation, isConfirmExpired, createOrderArgs, isEtaReconfirm, requestConsentArgs, type PendingConfirm } from "./confirmFastPath.js";
+import { paymentBlock } from "./paymentBlock.js";
+import { recordTurnProof } from "./turnProof.js";
 
 // Sendblue iMessage server. One public POST route: /sendblue/inbound. Customers
 // text in → their per-number AgentCore replies → we send the reply back. When an
@@ -204,7 +206,7 @@ async function main() {
     const buyerToken = buyers.get(msg.fromNumber)?.token;
     if (pc && buyerToken && !isConfirmExpired(pc) && isPureConfirmation(msg.content, pc.confirmationText)) {
       try {
-        const consentRes = await mcp.callTool("request_consent", { quoteId: pc.quoteId }, buyerToken) as { consent?: { id?: string } };
+        const consentRes = await mcp.callTool("request_consent", requestConsentArgs(pc), buyerToken) as { consent?: { id?: string } };
         const consentId = consentRes?.consent?.id;
         if (!consentId) throw new Error("consent not granted");
         const created = await mcp.callTool("create_order", createOrderArgs(pc, consentId), buyerToken) as { order?: { id?: string; merchantId?: string } };
@@ -352,70 +354,6 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json" });
   res.end(payload);
-}
-
-// Build the deterministic payment line(s) from a get_payment_options result:
-// pickup code + a pay-now link (Stripe checkout / Apple Pay) when available,
-// else a counter-pay instruction. This is what the customer actually acts on.
-function paymentBlock(optsResult: unknown): string {
-  const opts = (optsResult as { paymentOptions?: Array<Record<string, unknown>> })?.paymentOptions ?? [];
-  const counter = opts.find((o) => o.rail === "counter");
-  const pay = opts.find((o) => o.type === "checkout_url" && typeof o.url === "string");
-  const lines: string[] = [];
-  const code = counter?.pickupCode;
-  if (typeof code === "string" && code) lines.push(`🎟️ Pickup code: ${code}`);
-  if (pay) lines.push(`💳 Pay now (Apple Pay / card): ${pay.url}`);
-  else lines.push("💵 Pay at the counter when you pick up.");
-  return lines.join("\n");
-}
-
-function recordTurnProof(store: Map<string, SllrStateProof>, number: string, name: string, result: unknown): void {
-  const current = store.get(number);
-  if (!current) return;
-  const value = objectRecord(result);
-  if (name === "quote_order") {
-    const quoteId = stringField(value, "quoteId") || stringField(objectRecord(value.persistedQuote), "id");
-    if (quoteId) current.quoteId = quoteId;
-    return;
-  }
-  if (name === "create_order") {
-    const order = objectRecord(value.order);
-    const orderId = stringField(order, "id");
-    if (orderId) current.orderId = orderId;
-    const payment = objectRecord(order.payment);
-    if (stringField(payment, "status") === "verified") current.paymentVerified = true;
-    recordReceiptProof(current, objectRecord(order.receipt));
-    return;
-  }
-  if (name === "check_order_status") {
-    const order = objectRecord(value.order);
-    const orderId = stringField(order, "id");
-    if (orderId) current.orderId = orderId;
-    const status = stringField(order, "status");
-    if (status === "accepted" || status === "ready" || status === "fulfilled") current.merchantStatus = status;
-    if (status === "payment_backed" || status === "receipt_issued") current.paymentVerified = true;
-    const payment = objectRecord(order.payment);
-    if (stringField(payment, "status") === "verified") current.paymentVerified = true;
-    recordReceiptProof(current, objectRecord(order.receipt));
-  }
-}
-
-function recordReceiptProof(proof: SllrStateProof, receipt: Record<string, unknown>): void {
-  const receiptId = stringField(receipt, "receiptMemoryId");
-  const receiptUrl = stringField(receipt, "claimUrl");
-  const receiptHash = stringField(receipt, "receiptHash");
-  if (receiptId) proof.receiptId = receiptId;
-  if (receiptUrl) proof.receiptUrl = receiptUrl;
-  if (receiptHash) proof.receiptHash = receiptHash;
-}
-
-function objectRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function stringField(value: Record<string, unknown>, key: string): string {
-  const field = value[key];
-  return typeof field === "string" ? field : "";
 }
 
 main().catch((error) => {

@@ -7,6 +7,7 @@
   "scripts": {
     "cli": "node --import tsx src/cli.ts",
     "server": "node --import tsx src/server.ts",
+    "line-server": "node --import tsx src/lineServer.ts",
     "start": "node --import tsx src/server.ts",
     "typecheck": "tsc --noEmit",
     "contract-smoke": "node --import tsx src/responseContractSmoke.ts",
@@ -14,7 +15,9 @@
     "agent-card-smoke": "node --import tsx src/agentCardSmoke.ts",
     "order-relay-smoke": "node --import tsx src/orderRelaySmoke.ts",
     "confirm-fastpath-smoke": "node --import tsx src/confirmFastPathSmoke.ts",
-    "check": "npm run typecheck && npm run contract-smoke && npm run turn-queue-smoke && npm run agent-card-smoke && npm run order-relay-smoke && npm run confirm-fastpath-smoke"
+    "line-smoke": "node --import tsx src/lineSmoke.ts",
+    "turn-proof-smoke": "node --import tsx src/turnProofSmoke.ts",
+    "check": "npm run typecheck && npm run contract-smoke && npm run turn-queue-smoke && npm run agent-card-smoke && npm run order-relay-smoke && npm run confirm-fastpath-smoke && npm run line-smoke && npm run turn-proof-smoke"
   },
   "engines": {
     "node": ">=20"

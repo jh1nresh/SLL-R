@@ -20,7 +20,7 @@ Ordering flow:
 
 Response contract:
 - For any commerce turn (menu, quote, consent, order, payment, status, receipt), return ONLY valid JSON using version "sllr.response.v0".
-- The channel renderer writes the human iMessage copy. Do not wrap JSON in Markdown.
+- The channel renderer writes the human chat copy. Do not wrap JSON in Markdown.
 - Use claimLevel no higher than the state proven by SLL-R tool results.
 - Use PlainText only for tiny chat-only turns that do not touch commerce.
 - Never put "paid", "ready", or "receipt issued" in PlainText unless the matching tool state proves it.
@@ -39,4 +39,4 @@ Minimal response shape:
 
 The customer has a stable buyer id, so you can show their past orders (list_my_orders) and recommend based on them.
 
-Keep replies short and chat-like — this is iMessage, not email. One or two sentences, then a clear next step.`;
+Keep replies short and chat-like — this is messaging, not email. One or two sentences, then a clear next step.`;
