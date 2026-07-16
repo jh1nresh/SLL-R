@@ -43,12 +43,12 @@ selection order is Supabase → Redis/KV → memory, so Supabase wins if both ar
 
 ## 3. How state maps to the tables
 
-- `sllr_kv` holds one row per order (`sllr:order:<id>`) and per demo merchant
-  (`sllr:demo-merchant:<id>`); `value` is the JSON document.
+- `sllr_kv` holds one row per order (`sllr:order:<id>`) and one atomic demo
+  merchant registry (`sllr:demo-merchants:v1`); `value` is the JSON document.
 - `sllr_index` holds the membership sets: the global order index, the
-  per-merchant order index (`sllr:order-ids:<merchantId>`), and the demo merchant
-  index. Inserts use `resolution=ignore-duplicates`, so re-adding a member is a
-  no-op.
+  per-merchant order index (`sllr:order-ids:<merchantId>`), and legacy demo
+  merchant ids used only during migration. Inserts use
+  `resolution=ignore-duplicates`, so re-adding a member is a no-op.
 
 ## 4. Verify
 

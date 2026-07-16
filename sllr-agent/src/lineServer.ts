@@ -5,13 +5,14 @@ import { BuyerStore } from "./buyerStore.js";
 import { clampEnvelope, type SllrStateProof } from "./claimClamp.js";
 import { createOrderArgs, isConfirmExpired, isEtaReconfirm, isPureConfirmation, pendingConfirmFromQuoteResult, requestConsentArgs, type PendingConfirm } from "./confirmFastPath.js";
 import { renderEnvelopeToText } from "./iMessageRenderer.js";
-import { LineClient, LineEventDeduper, parseLineMessages, verifyLineSignature } from "./line.js";
+import { LineClient, LineEventDeduper, parseLineMessages, pushLineTextReliable, verifyLineSignature } from "./line.js";
 import { SllrMcp } from "./mcp.js";
 import { isTerminal, statusMessage, type WatchedOrder } from "./orderNotify.js";
 import { paymentBlock } from "./paymentBlock.js";
 import { parseEnvelope } from "./responseContract.js";
 import { TurnQueue } from "./turnQueue.js";
 import { recordTurnProof } from "./turnProof.js";
+import { RelayStore } from "./relayStore.js";
 
 async function main() {
   const config = loadConfig();
@@ -22,6 +23,7 @@ async function main() {
 
   const log = (message: string) => process.stdout.write(`${message}\n`);
   const buyers = new BuyerStore(process.env.SLLR_LINE_BUYER_STORE?.trim() || ".sllr-line-buyers.json");
+  const relayStore = new RelayStore(process.env.SLLR_LINE_RELAY_STORE?.trim() || ".sllr-line-relay.json");
   const turns = new TurnQueue();
   const turnProof = new Map<string, SllrStateProof>();
   const pendingOrder = new Map<string, { merchantId: string; orderId: string }>();
@@ -72,16 +74,20 @@ async function main() {
 
   async function pushReliable(userId: string, text: string): Promise<void> {
     try {
-      await line.pushText(userId, text);
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-      await line.pushText(userId, text);
+      await pushLineTextReliable(line, userId, text);
+    } catch (error) {
+      log(`[push] SEND FAILED to ${userId.slice(0, 8)}…: ${error instanceof Error ? error.message : error}`);
     }
   }
 
   function watchOrder(userId: string, orderId: string): void {
     if (watched.has(orderId)) return;
     watched.set(orderId, { userId, lastStatus: "", lastPayment: "", tries: 0 });
+    relayStore.addWatched(orderId, { phone: userId, sendblueNumber: "line" });
+    const stopWatching = () => {
+      watched.delete(orderId);
+      relayStore.removeWatched(orderId);
+    };
     const tick = async () => {
       const current = watched.get(orderId);
       if (!current) return;
@@ -94,7 +100,7 @@ async function main() {
           current.lastPayment = result.order.payment?.status ?? "";
           if (message) await pushReliable(current.userId, message);
           if (isTerminal(result.order.status)) {
-            watched.delete(orderId);
+            stopWatching();
             return;
           }
         }
@@ -102,9 +108,13 @@ async function main() {
         log(`[watch] ${error instanceof Error ? error.message : error}`);
       }
       if (current.tries < 240) setTimeout(tick, 5_000);
-      else watched.delete(orderId);
+      else stopWatching();
     };
     setTimeout(tick, 5_000);
+  }
+
+  for (const [orderId, ref] of Object.entries(relayStore.loadWatched())) {
+    watchOrder(ref.phone, orderId);
   }
 
   async function handleMessage(userId: string, text: string): Promise<void> {
@@ -229,19 +239,23 @@ async function main() {
 
 function readBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
-    let data = "";
+    const chunks: Buffer[] = [];
+    let byteLength = 0;
     let tooLarge = false;
     request.on("data", (chunk) => {
       if (tooLarge) return;
-      data += chunk;
-      if (data.length > 1_000_000) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      byteLength += buffer.length;
+      if (byteLength > 1_000_000) {
         tooLarge = true;
-        data = "";
+        chunks.length = 0;
+        return;
       }
+      chunks.push(buffer);
     });
     request.on("end", () => {
       if (tooLarge) reject(Object.assign(new Error("request body too large"), { status: 413 }));
-      else resolve(data);
+      else resolve(Buffer.concat(chunks, byteLength).toString("utf8"));
     });
     request.on("error", reject);
   });

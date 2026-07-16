@@ -379,8 +379,10 @@ its `products.json` feed — no merchant setup required. This powers the
 "60-second demo with your actual menu" outreach flow:
 
 ```bash
+export SLLR_DEMO_MERCHANT_SECRET="replace-with-your-configured-secret"
 curl -X POST http://localhost:3100/demo-merchants \
   -H "content-type: application/json" \
+  -H "x-sllr-demo-secret: $SLLR_DEMO_MERCHANT_SECRET" \
   -d '{
     "storeDomain": "panthercoffee.com",
     "name": "Panther Coffee",
@@ -392,10 +394,13 @@ curl -X POST http://localhost:3100/demo-merchants \
 
 The response includes the agent page, terminal page, and an example MCP
 prompt. The same flow is exposed as the `create_demo_merchant` MCP tool.
-Demo merchants get `counter` + `shopify` payment rails, live in memory, and
-reset on restart. Public registration is disabled unless
-`SLLR_DEMO_MERCHANT_SECRET` is configured; an existing demo merchant id cannot
-be replaced through this endpoint.
+Demo merchants get `counter` + `shopify` payment rails and persist through the
+configured SLL-R store; the default memory backend resets on restart. Public
+registration is disabled unless `SLLR_DEMO_MERCHANT_SECRET` is configured; an
+existing demo merchant id cannot be replaced through this endpoint. On
+localhost only, leaving the secret unconfigured permits the same request
+without the secret header. Non-local
+origins reject registration when no secret is configured.
 
 ## Example Shopify Adapter
 
@@ -530,11 +535,11 @@ curl -X POST http://localhost:3100/orders/ord_.../accept \
 ```bash
 curl -X POST http://localhost:3100/orders/ord_.../fulfill \
   -H "content-type: application/json" \
+  -H "x-sllr-merchant-payment-secret: $SLLR_MERCHANT_PAYMENT_VERIFY_SECRET" \
   -d '{
     "merchantId": "raposa-coffee",
     "actor": "raposa-staff",
-    "note": "Paid at counter and handed off.",
-    "demo": true
+    "note": "Paid at counter and handed off."
   }'
 ```
 
@@ -542,8 +547,7 @@ curl -X POST http://localhost:3100/orders/ord_.../fulfill \
 receipt memory, so they require the merchant verifier: configure
 `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` and pass it in
 `x-sllr-merchant-payment-secret` (the terminal pages read it from
-`localStorage.sllrStaffSecret`); `demo: true` is only accepted when no secret
-is configured.
+`localStorage.sllrStaffSecret`).
 
 Raposa promise flow:
 
@@ -560,12 +564,43 @@ curl -X POST http://localhost:3100/orders/ord_.../ready \
 ```bash
 curl -X POST http://localhost:3100/orders/ord_.../claim \
   -H "content-type: application/json" \
+  -H "x-sllr-merchant-payment-secret: $SLLR_MERCHANT_PAYMENT_VERIFY_SECRET" \
   -d '{
     "merchantId": "raposa-coffee",
     "actor": "raposa-staff",
-    "note": "Paid at counter and claimed.",
-    "demo": true
+    "note": "Paid at counter and claimed."
   }'
+```
+
+The merchant-scoped receipt endpoint uses the same verifier:
+
+```bash
+curl -X POST http://localhost:3100/merchants/raposa-coffee/receipt \
+  -H "content-type: application/json" \
+  -H "x-sllr-merchant-payment-secret: $SLLR_MERCHANT_PAYMENT_VERIFY_SECRET" \
+  -d '{
+    "orderId": "ord_...",
+    "actor": "raposa-staff",
+    "note": "Merchant fulfillment confirmed."
+  }'
+```
+
+For a no-secret localhost demo only, omit the verifier header and include
+`"demo": true` in the JSON body sent to any of those three endpoints. Demo
+mode is rejected when `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` is configured:
+
+```bash
+curl -X POST http://localhost:3100/orders/ord_.../fulfill \
+  -H "content-type: application/json" \
+  -d '{"merchantId":"raposa-coffee","actor":"local-demo","demo":true}'
+
+curl -X POST http://localhost:3100/orders/ord_.../claim \
+  -H "content-type: application/json" \
+  -d '{"merchantId":"raposa-coffee","actor":"local-demo","demo":true}'
+
+curl -X POST http://localhost:3100/merchants/raposa-coffee/receipt \
+  -H "content-type: application/json" \
+  -d '{"orderId":"ord_...","actor":"local-demo","demo":true}'
 ```
 
 ## AgentShack Listing

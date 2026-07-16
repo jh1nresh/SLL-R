@@ -601,9 +601,18 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
       const merchantOfferQuoteRoute = url.pathname.match(/^\/merchants\/([^/]+)\/offers\/([^/]+)\/quote$/);
       if (merchantOfferQuoteRoute && request.method === "POST") {
         const [, merchantId, encodedOfferId] = merchantOfferQuoteRoute;
+        let offerId: string;
+        try {
+          offerId = decodeURIComponent(encodedOfferId);
+        } catch (error) {
+          if (error instanceof URIError) {
+            return json(response, 400, { error: "offerId must be valid percent-encoded UTF-8." });
+          }
+          throw error;
+        }
         return json(response, 200, await quoteMerchantOffer(
           merchantId,
-          decodeURIComponent(encodedOfferId),
+          offerId,
           await bindBuyer(request, await body(request)),
         ));
       }

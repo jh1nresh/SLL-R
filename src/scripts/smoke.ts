@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHmac } from "node:crypto";
 import { createSllrServer } from "../server.js";
@@ -9,8 +10,22 @@ import { grantConsent } from "../core/consent.js";
 import { getLoop, loopIdForQuote, loopIdForOrder } from "../core/actionLoop.js";
 import { setItemAvailability } from "../core/availability.js";
 import { attachMerchantPayment, createMerchantOrder, issueMerchantReceipt } from "../core/merchantApi.js";
-import { attachPaymentProof } from "../core/orders.js";
+import { attachPaymentProof, getOrder } from "../core/orders.js";
 import { withIdempotentMutation } from "../core/mutations.js";
+import { consumeCapacityReservation, releaseCapacityReservation, reserveCapacity } from "../core/capacity.js";
+import { minorUnitsFromDecimal } from "../core/money.js";
+import { eligibleForReview } from "../core/verifiedReview.js";
+import { hydrateDemoMerchants, merchantForId, registerDemoMerchantProfile, resetDemoMerchantsForTest } from "../merchants/profiles.js";
+import type { MerchantProfile, SellerOrder } from "../types.js";
+
+function smokeMoneyBoundaries() {
+  assert.equal(minorUnitsFromDecimal("90071992547409.91", "USD"), Number.MAX_SAFE_INTEGER);
+  assert.equal(minorUnitsFromDecimal("90071992547409.92", "USD"), 0);
+  assert.equal(minorUnitsFromDecimal("9007199254740991", "TWD"), Number.MAX_SAFE_INTEGER);
+  assert.equal(minorUnitsFromDecimal("9007199254740992", "TWD"), 0);
+  assert.equal(minorUnitsFromDecimal("55.00", "TWD"), 55);
+  assert.equal(minorUnitsFromDecimal("55.01", "TWD"), 0);
+}
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -145,7 +160,9 @@ async function smokeMcp(origin: string) {
     throw new Error(`MCP GET should return 405 for the stateless server, got ${getStream.status}`);
   }
 
-  const toolsList = await mcpRequest(origin, "tools/list") as { tools?: Array<{ name?: string; inputSchema?: unknown }> };
+  const toolsList = await mcpRequest(origin, "tools/list") as {
+    tools?: Array<{ name?: string; inputSchema?: { properties?: Record<string, unknown> } }>;
+  };
   const toolNames = toolsList.tools?.map((tool) => tool.name) || [];
   for (const required of ["list_merchants", "get_menu", "list_offers", "quote_offer", "list_capacity_windows", "shop_for_me", "quote_order", "request_consent", "create_order", "create_fulfillment_batch", "list_fulfillment_batches", "get_fulfillment_batch", "get_payment_options", "attach_payment_proof", "check_order_status", "issue_receipt", "merchant_fulfill_order", "create_demo_merchant"]) {
     if (!toolNames.includes(required)) {
@@ -154,6 +171,10 @@ async function smokeMcp(origin: string) {
   }
   if (toolsList.tools?.some((tool) => !tool.inputSchema)) {
     throw new Error(`MCP tools/list returned a tool without inputSchema: ${JSON.stringify(toolsList)}`);
+  }
+  const shopForMeSchema = toolsList.tools?.find((tool) => tool.name === "shop_for_me")?.inputSchema;
+  if (!shopForMeSchema?.properties?.offerId || !shopForMeSchema.properties.pickupAt) {
+    throw new Error(`MCP shop_for_me schema omitted offerId or pickupAt: ${JSON.stringify(shopForMeSchema)}`);
   }
 
   const merchants = await mcpToolCall(origin, "list_merchants", {});
@@ -731,6 +752,20 @@ async function withFakeRedis<T>(run: (control: FakeRedisControl) => Promise<T>):
         if (modifier === "NX" && values.has(key)) result = null;
         else { values.set(key, value); result = "OK"; }
       }
+      else if (op === "EVAL") {
+        const [, , keyCount, evalKey, field, expected, next] = command as string[];
+        if (keyCount !== "1") {
+          response.writeHead(400);
+          return response.end(JSON.stringify({ error: "unsupported EVAL key count" }));
+        }
+        const currentRaw = values.get(evalKey);
+        const current = currentRaw ? JSON.parse(currentRaw) as Record<string, unknown> : null;
+        if (!current || current[field] !== expected) result = 0;
+        else {
+          values.set(evalKey, next);
+          result = 1;
+        }
+      }
       else if (op === "GET") { result = values.has(key) ? values.get(key) : null; }
       else if (op === "DEL") { result = values.delete(key) ? 1 : 0; }
       else if (op === "SADD") {
@@ -807,6 +842,17 @@ async function withFakeSupabase<T>(run: () => Promise<T>): Promise<T> {
         }
         return sendJson(201, prefer.includes("return=representation") ? changed : undefined);
       }
+      if (request.method === "PATCH" && url.pathname === "/rest/v1/sllr_kv") {
+        const k = eqValue("key");
+        const conditional = [...url.searchParams.keys()].find((name) => name.startsWith("value->>"));
+        const field = conditional?.slice("value->>".length) || "";
+        const expected = conditional ? eqValue(conditional) : "";
+        const current = kv.get(k) as Record<string, unknown> | undefined;
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as { value?: unknown };
+        if (!current || current[field] !== expected) return sendJson(200, []);
+        kv.set(k, payload.value);
+        return sendJson(200, [{ key: k }]);
+      }
       if (request.method === "DELETE" && url.pathname === "/rest/v1/sllr_kv") {
         kv.delete(eqValue("key"));
         return sendJson(204, undefined);
@@ -851,6 +897,75 @@ async function withFakeSupabase<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+function demoRegistryProfile(id: string, name: string): MerchantProfile {
+  return {
+    id,
+    name,
+    category: "test",
+    location: "Online",
+    fulfillment: ["shipping"],
+    paymentRails: ["shopify"],
+    humanApproval: { requiredAboveUsd: "100.00" },
+    catalog: [{ id: "test-item", name: "Test item", amountUsd: "1.00", fulfillment: ["shipping"] }],
+  };
+}
+
+async function smokeAtomicDemoMerchantRegistry(backend: string) {
+  const prefix = `demo-registry-${backend}`;
+  const legacyProfile = demoRegistryProfile(`${prefix}-legacy`, `${backend} Legacy Merchant`);
+  const store = sllrStore();
+  await store.setJson(`sllr:demo-merchant:${legacyProfile.id}`, legacyProfile);
+  await store.addToIndex("sllr:demo-merchant-ids", legacyProfile.id);
+
+  resetDemoMerchantsForTest();
+  await hydrateDemoMerchants();
+  if (merchantForId(legacyProfile.id)?.name !== legacyProfile.name) {
+    throw new Error(`${backend} demo registry did not migrate the legacy profile.`);
+  }
+
+  const duplicateProfile = demoRegistryProfile(`${prefix}-duplicate`, `${backend} Duplicate Merchant`);
+  const duplicateRace = await Promise.allSettled([
+    registerDemoMerchantProfile(duplicateProfile),
+    registerDemoMerchantProfile(duplicateProfile),
+  ]);
+  const duplicateWinnerCount = duplicateRace.filter((result) => result.status === "fulfilled").length;
+  const duplicateLoser = duplicateRace.find((result) => result.status === "rejected");
+  if (duplicateWinnerCount !== 1 || (duplicateLoser?.reason as { status?: number } | undefined)?.status !== 409) {
+    throw new Error(`${backend} concurrent duplicate registration did not have one durable winner: ${JSON.stringify(duplicateRace)}`);
+  }
+
+  const prefilledProfiles = Array.from({ length: 21 }, (_, index) => (
+    demoRegistryProfile(`${prefix}-prefill-${index}`, `${backend} Prefill ${index}`)
+  ));
+  for (const profile of prefilledProfiles) await registerDemoMerchantProfile(profile);
+
+  const finalCandidates = [
+    demoRegistryProfile(`${prefix}-final-a`, `${backend} Final A`),
+    demoRegistryProfile(`${prefix}-final-b`, `${backend} Final B`),
+  ];
+  const finalRace = await Promise.allSettled(finalCandidates.map((profile) => registerDemoMerchantProfile(profile)));
+  const finalWinnerCount = finalRace.filter((result) => result.status === "fulfilled").length;
+  const finalLoser = finalRace.find((result) => result.status === "rejected");
+  if (finalWinnerCount !== 1 || (finalLoser?.reason as { status?: number } | undefined)?.status !== 409) {
+    throw new Error(`${backend} demo registry exceeded or failed to fill its final slot: ${JSON.stringify(finalRace)}`);
+  }
+
+  resetDemoMerchantsForTest();
+  await hydrateDemoMerchants();
+  const expectedProfiles = [legacyProfile, duplicateProfile, ...prefilledProfiles];
+  if (expectedProfiles.some((profile) => merchantForId(profile.id)?.name !== profile.name)) {
+    throw new Error(`${backend} demo registry lost a committed profile after hydration.`);
+  }
+  if (finalCandidates.filter((profile) => merchantForId(profile.id)).length !== 1) {
+    throw new Error(`${backend} demo registry did not persist exactly one final-slot winner.`);
+  }
+
+  await assert.rejects(
+    registerDemoMerchantProfile(demoRegistryProfile(`${prefix}-overflow`, `${backend} Overflow`)),
+    (error: unknown) => (error as { status?: number }).status === 409 && /limit reached/.test(String((error as Error).message)),
+  );
+}
+
 async function smokeStoreBackend() {
   await withFakeSupabase(async () => {
     if (storeBackendName() !== "supabase") {
@@ -871,6 +986,15 @@ async function smokeStoreBackend() {
       || (await store.getJson<{ owner?: string }>("sllr:test:claim"))?.owner !== "first") {
       throw new Error("Supabase conditional insert did not preserve the first writer.");
     }
+    await store.setJson("sllr:test:transition", { status: "held" });
+    const supabaseTransitions = await Promise.all([
+      store.setJsonIfFieldEquals("sllr:test:transition", "status", "held", { status: "released" }),
+      store.setJsonIfFieldEquals("sllr:test:transition", "status", "held", { status: "consumed" }),
+    ]);
+    const supabaseTerminal = await store.getJson<{ status?: string }>("sllr:test:transition");
+    if (supabaseTransitions.filter(Boolean).length !== 1 || !["released", "consumed"].includes(supabaseTerminal?.status || "")) {
+      throw new Error(`Supabase conditional transition was not atomic: ${JSON.stringify({ supabaseTransitions, supabaseTerminal })}`);
+    }
     await store.deleteJson("sllr:test:claim");
     if (await store.getJson("sllr:test:claim") !== null) {
       throw new Error("Supabase JSON delete did not remove the key.");
@@ -882,8 +1006,9 @@ async function smokeStoreBackend() {
     if (members.length !== 2 || !members.includes("ord_supa") || !members.includes("ord_supa_2")) {
       throw new Error(`Supabase index insert/select failed: ${JSON.stringify(members)}`);
     }
+    await smokeAtomicDemoMerchantRegistry("supabase");
   });
-  await withFakeRedis(async () => {
+  await withFakeRedis(async (control) => {
     if (storeBackendName() !== "redis_rest") {
       throw new Error(`Store should select redis_rest backend when KV env is set, got ${storeBackendName()}`);
     }
@@ -901,6 +1026,15 @@ async function smokeStoreBackend() {
       || (await store.getJson<{ owner?: string }>("sllr:test:claim"))?.owner !== "first") {
       throw new Error("Redis conditional insert did not preserve the first writer.");
     }
+    await store.setJson("sllr:test:transition", { status: "held" });
+    const redisTransitions = await Promise.all([
+      store.setJsonIfFieldEquals("sllr:test:transition", "status", "held", { status: "released" }),
+      store.setJsonIfFieldEquals("sllr:test:transition", "status", "held", { status: "consumed" }),
+    ]);
+    const redisTerminal = await store.getJson<{ status?: string }>("sllr:test:transition");
+    if (redisTransitions.filter(Boolean).length !== 1 || !["released", "consumed"].includes(redisTerminal?.status || "")) {
+      throw new Error(`Redis conditional transition was not atomic: ${JSON.stringify({ redisTransitions, redisTerminal })}`);
+    }
     await store.deleteJson("sllr:test:claim");
     if (await store.getJson("sllr:test:claim") !== null) {
       throw new Error("Redis JSON delete did not remove the key.");
@@ -912,10 +1046,15 @@ async function smokeStoreBackend() {
     if (members.length !== 2 || !members.includes("ord_redis") || !members.includes("ord_redis_2")) {
       throw new Error(`Redis-backed index (SADD/SMEMBERS) failed: ${JSON.stringify(members)}`);
     }
+
+    await smokeAtomicDemoMerchantRegistry("redis");
   });
   if (storeBackendName() !== "memory") {
     throw new Error("Store should fall back to memory backend after KV env is cleared.");
   }
+  await smokeAtomicDemoMerchantRegistry("memory");
+  resetDemoMerchantsForTest();
+  resetStoreForTest();
 }
 
 async function smokeCommerceLevels(origin: string) {
@@ -929,7 +1068,14 @@ async function smokeCommerceLevels(origin: string) {
       offers?: Array<{
         id?: string;
         title?: string;
-        amountUsd?: string;
+        amount?: { amountMinor?: number; currency?: string };
+        lineItems?: Array<{
+          unitAmount?: { amountMinor?: number; currency?: string };
+          subtotal?: { amountMinor?: number; currency?: string };
+          unitAmountUsd?: unknown;
+          subtotalUsd?: unknown;
+        }>;
+        amountUsd?: unknown;
         perBuyerLimit?: number | null;
         redemptionWindow?: { mode?: string };
         terms?: string[];
@@ -940,13 +1086,26 @@ async function smokeCommerceLevels(origin: string) {
     if (
       !espressoOffer
       || espressoOffer.title !== "Espresso"
-      || espressoOffer.amountUsd !== "4.50"
+      || espressoOffer.amount?.amountMinor !== 450
+      || espressoOffer.amount.currency !== "USD"
+      || espressoOffer.lineItems?.[0]?.unitAmount?.amountMinor !== 450
+      || espressoOffer.lineItems[0].subtotal?.amountMinor !== 450
+      || "amountUsd" in espressoOffer
+      || "unitAmountUsd" in espressoOffer.lineItems[0]
+      || "subtotalUsd" in espressoOffer.lineItems[0]
       || espressoOffer.perBuyerLimit !== null
       || espressoOffer.redemptionWindow?.mode !== "quote_bound"
       || !espressoOffer.terms?.some((term) => term.includes("fulfillment"))
       || espressoOffer.source?.verificationStatus !== "configured"
     ) {
       throw new Error(`Level 1 fixed offer was not exposed: ${JSON.stringify(offers)}`);
+    }
+    const twdOffers = await getJson(origin, "/merchants/louisa-coffee/offers") as {
+      offers?: Array<{ id?: string; amount?: { amountMinor?: number; currency?: string }; amountUsd?: unknown }>;
+    };
+    const americanoOffer = twdOffers.offers?.find((offer) => offer.id === "catalog:americano");
+    if (!americanoOffer || americanoOffer.amount?.amountMinor !== 55 || americanoOffer.amount.currency !== "TWD" || "amountUsd" in americanoOffer) {
+      throw new Error(`TWD offer did not use currency-neutral Money: ${JSON.stringify(twdOffers)}`);
     }
     const anonymousScheduledOrder = await postJsonFailure(origin, "/merchants/raposa-coffee/orders", {
       userIntent: "espresso",
@@ -959,9 +1118,72 @@ async function smokeCommerceLevels(origin: string) {
       throw new Error(`Anonymous callers must not hold scheduled capacity: ${JSON.stringify(anonymousScheduledOrder)}`);
     }
 
+    const anonymousPickup = await postJson(origin, "/merchants/raposa-coffee/orders", {
+      userIntent: "espresso now",
+      itemId: "espresso",
+      paymentMode: "counter",
+    }) as { order?: { id?: string; buyerId?: string | null; capacityReservation?: { id?: string; status?: string } } };
+    if (!anonymousPickup.order?.id || anonymousPickup.order.buyerId !== null || anonymousPickup.order.capacityReservation?.status !== "held") {
+      throw new Error(`Anonymous pickup order did not reserve capacity: ${JSON.stringify(anonymousPickup)}`);
+    }
+    const anonymousRejected = await postJson(origin, `/orders/${anonymousPickup.order.id}/reject`, {
+      merchantId: "raposa-coffee",
+      actor: "capacity-smoke",
+      demo: true,
+    }) as { order?: { capacityReservation?: { id?: string; status?: string } } };
+    const anonymousReservationId = anonymousRejected.order?.capacityReservation?.id;
+    if (!anonymousReservationId || anonymousRejected.order?.capacityReservation?.status !== "released") {
+      throw new Error(`Rejected anonymous pickup order did not release capacity: ${JSON.stringify(anonymousRejected)}`);
+    }
+    const releasedRecord = await sllrStore().getJson<Record<string, unknown>>(`sllr:capacity-reservation:${anonymousReservationId}`);
+    const rejectedRecord = await sllrStore().getJson<SellerOrder>(`sllr:order:${anonymousPickup.order.id}`);
+    if (!releasedRecord || !rejectedRecord?.capacityReservation) throw new Error("Rejected capacity records were missing.");
+    const retryAt = new Date().toISOString();
+    await sllrStore().setJson(`sllr:capacity-reservation:${anonymousReservationId}`, { ...releasedRecord, status: "held", updatedAt: retryAt });
+    await sllrStore().setJson(`sllr:order:${anonymousPickup.order.id}`, {
+      ...rejectedRecord,
+      capacityReservation: { ...rejectedRecord.capacityReservation, status: "held", updatedAt: retryAt },
+    });
+    const rejectedReplay = await postJson(origin, `/orders/${anonymousPickup.order.id}/reject`, {
+      merchantId: "raposa-coffee",
+      actor: "capacity-smoke",
+      demo: true,
+    }) as { order?: { capacityReservation?: { status?: string } } };
+    if (rejectedReplay.order?.capacityReservation?.status !== "released") {
+      throw new Error(`Terminal reject retry did not reconcile capacity: ${JSON.stringify(rejectedReplay)}`);
+    }
+
+    const espressoItem = merchantForId("raposa-coffee")?.catalog.find((item) => item.id === "espresso");
+    if (!espressoItem) throw new Error("Capacity race smoke could not find Raposa espresso.");
+    const raceReservation = await reserveCapacity({
+      merchantId: "raposa-coffee",
+      item: espressoItem,
+      quantity: 1,
+      desiredAt: new Date(Date.now() + 3 * 24 * 60 * 60_000),
+      exactWindow: true,
+      orderId: "ord_capacity_race_smoke",
+    });
+    const raceResults = await Promise.all([
+      releaseCapacityReservation(raceReservation.id),
+      consumeCapacityReservation(raceReservation.id),
+    ]);
+    const raceFinal = await sllrStore().getJson<{ status?: string }>(`sllr:capacity-reservation:${raceReservation.id}`);
+    if (
+      !raceFinal
+      || !["released", "consumed"].includes(raceFinal.status || "")
+      || raceResults.some((result) => result?.status !== raceFinal.status)
+    ) {
+      throw new Error(`Release/consume race overwrote its terminal state: ${JSON.stringify({ raceResults, raceFinal })}`);
+    }
+
     const buyer = await postJson(origin, "/buyer/session", { label: "L1-L3 smoke buyer" }) as { token?: string };
     if (!buyer.token) throw new Error(`Level 1 buyer session failed: ${JSON.stringify(buyer)}`);
     const authorization = { authorization: `Bearer ${buyer.token}` };
+    const malformedOfferId = await postJsonFailure(origin, "/merchants/raposa-coffee/offers/%E0%A4%A/quote", {});
+    if (malformedOfferId.status !== 400 || !String(malformedOfferId.json.error || "").includes("percent-encoded")) {
+      throw new Error(`Malformed offer id should return 400: ${JSON.stringify(malformedOfferId)}`);
+    }
+
     const quote = await postJson(origin, "/merchants/raposa-coffee/offers/catalog%3Aespresso/quote", {
       pickupAt,
       maxSpendUsd: "5.00",
@@ -1089,6 +1311,15 @@ async function smokeCommerceLevels(origin: string) {
       demo: true,
       idempotencyKey: "l2-second-payment",
     });
+    const secondStored = await sllrStore().getJson<SellerOrder>(`sllr:order:${secondOrderId}`);
+    if (!secondStored) throw new Error("Level 2 multi-line child order was missing from the store.");
+    await sllrStore().setJson(`sllr:order:${secondOrderId}`, {
+      ...secondStored,
+      lineItems: [
+        secondStored.item,
+        { id: "cold-brew", name: "Cold brew", quantity: 1, amountUsd: "5.50", subtotalUsd: "5.50" },
+      ],
+    });
     const batchPayload = {
       orderIds: [first.order.id, secondOrderId],
       label: "Espresso 15-minute production run",
@@ -1096,13 +1327,16 @@ async function smokeCommerceLevels(origin: string) {
       idempotencyKey: "l2-batch-create",
     };
     const batch = await postJson(origin, "/merchants/raposa-coffee/batches", batchPayload) as {
-      batch?: { id?: string; orderIds?: string[]; pickupWindow?: { startsAt?: string }; totals?: { orders?: number } };
+      batch?: { id?: string; orderIds?: string[]; pickupWindow?: { startsAt?: string }; totals?: { orders?: number; quantity?: number; amountUsd?: string }; items?: Array<{ itemId?: string }> };
     };
     const batchReplay = await postJson(origin, "/merchants/raposa-coffee/batches", batchPayload) as { batch?: { id?: string } };
     if (
       !batch.batch?.id
       || batch.batch.id !== batchReplay.batch?.id
       || batch.batch.totals?.orders !== 2
+      || batch.batch.totals.quantity !== 3
+      || batch.batch.totals.amountUsd !== "14.50"
+      || !batch.batch.items?.some((item) => item.itemId === "cold-brew")
       || batch.batch.pickupWindow?.startsAt !== pickupAt
       || batch.batch.orderIds?.length !== 2
     ) {
@@ -1132,9 +1366,33 @@ async function smokeCommerceLevels(origin: string) {
       note: "Fulfilled L1-L3 smoke order.",
       demo: true,
       idempotencyKey: "l1-l3-fulfillment",
-    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string } } };
-    if (fulfilled.proofLevel !== "receipt_memory_issued" || !fulfilled.order?.receipt?.receiptHash) {
+    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string }; capacityReservation?: { id?: string; status?: string } } };
+    if (fulfilled.proofLevel !== "receipt_memory_issued" || !fulfilled.order?.receipt?.receiptHash || fulfilled.order.capacityReservation?.status !== "consumed") {
       throw new Error(`Fulfillment did not issue final receipt memory: ${JSON.stringify(fulfilled)}`);
+    }
+    const terminalReservationId = fulfilled.order.capacityReservation?.id;
+    const terminalOrder = await sllrStore().getJson<SellerOrder>(`sllr:order:${first.order.id}`);
+    const terminalReservation = terminalReservationId
+      ? await sllrStore().getJson<Record<string, unknown>>(`sllr:capacity-reservation:${terminalReservationId}`)
+      : null;
+    if (!terminalOrder?.capacityReservation || !terminalReservation || !terminalReservationId) {
+      throw new Error("Fulfilled capacity records were missing for retry reconciliation.");
+    }
+    const orphanedAt = new Date().toISOString();
+    await sllrStore().setJson(`sllr:capacity-reservation:${terminalReservationId}`, { ...terminalReservation, status: "held", updatedAt: orphanedAt });
+    await sllrStore().setJson(`sllr:order:${first.order.id}`, {
+      ...terminalOrder,
+      capacityReservation: { ...terminalOrder.capacityReservation, status: "held", updatedAt: orphanedAt },
+    });
+    const fulfilledReplay = await postJson(origin, "/merchants/raposa-coffee/receipt", {
+      orderId: first.order.id,
+      actor: "raposa-staff",
+      note: "Reconcile prior terminal fulfillment.",
+      demo: true,
+      idempotencyKey: "l1-l3-fulfillment-reconcile",
+    }) as { order?: { capacityReservation?: { status?: string } } };
+    if (fulfilledReplay.order?.capacityReservation?.status !== "consumed") {
+      throw new Error(`Terminal fulfillment retry did not reconcile capacity: ${JSON.stringify(fulfilledReplay)}`);
     }
   } finally {
     if (previousVerifierSecret === undefined) delete process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
@@ -1298,6 +1556,18 @@ async function smokeIdempotentMutationRestart() {
     if (directPaid.proofLevel !== "payment_backed" || directPaid.receipt !== null || directPaid.payment.paymentId !== directPayment.paymentId) {
       throw new Error(`Direct payment did not remain payment-backed: ${JSON.stringify(directPaid)}`);
     }
+    const verifiedProofConflict = await attachPaymentProof({ ...directPayment, paymentId: "restart-direct-stripe-payment-conflict" })
+      .then(() => null)
+      .catch((error) => error as Error & { code?: string; status?: number });
+    if (!verifiedProofConflict || verifiedProofConflict.status !== 409 || verifiedProofConflict.code !== "payment_proof_conflict") {
+      throw new Error(`Verified order should reject a different payment proof: ${JSON.stringify(verifiedProofConflict)}`);
+    }
+    const verifiedMerchantConflict = await attachPaymentProof({ ...directPayment, merchantId: "raposa-shop" })
+      .then(() => null)
+      .catch((error) => error as Error & { status?: number });
+    if (!verifiedMerchantConflict || verifiedMerchantConflict.status !== 409 || !verifiedMerchantConflict.message.includes("does not match order merchant")) {
+      throw new Error(`Verified replay should validate merchant before returning: ${JSON.stringify(verifiedMerchantConflict)}`);
+    }
     resetStoreForTest();
     const directReplay = await attachPaymentProof(directPayment);
     if (directReplay.proofLevel !== "payment_backed" || directReplay.receipt !== null || directReplay.payment.paymentId !== directPayment.paymentId) {
@@ -1308,6 +1578,23 @@ async function smokeIdempotentMutationRestart() {
       .catch((error) => error as Error & { code?: string });
     if (!directConflict || directConflict.code !== "idempotency_conflict") {
       throw new Error(`Direct payment adapter should reject changed replay data after restart: ${JSON.stringify(directConflict)}`);
+    }
+    await issueMerchantReceipt("solyd", {}, {
+      orderId: directOrderId,
+      actor: "solyd-replay-smoke",
+      note: "Fulfilled before a late payment webhook replay.",
+      demo: true,
+      idempotencyKey: "restart-direct-receipt",
+    });
+    const finalSameProof = await attachPaymentProof(directPayment, { actionKey: "same-proof-after-receipt" });
+    if (finalSameProof.status !== "receipt_issued" || !finalSameProof.receipt?.receiptHash) {
+      throw new Error(`Same payment proof should replay after receipt issuance: ${JSON.stringify(finalSameProof)}`);
+    }
+    const finalProofConflict = await attachPaymentProof({ ...directPayment, paymentId: "late-conflicting-payment" })
+      .then(() => null)
+      .catch((error) => error as Error & { code?: string; status?: number });
+    if (!finalProofConflict || finalProofConflict.status !== 409 || finalProofConflict.code !== "payment_proof_conflict") {
+      throw new Error(`Receipt-issued order should reject a different payment proof: ${JSON.stringify(finalProofConflict)}`);
     }
   });
 }
@@ -1403,6 +1690,22 @@ async function smokeVerifiedReview(origin: string) {
     method: "POST", headers: { "content-type": "application/json", ...auth }, body: JSON.stringify({ feedback: { rating: 5 } }),
   });
   if (paymentOnly.status !== 409) throw new Error(`review after payment but before fulfillment should be 409, got ${paymentOnly.status}`);
+  const paymentBackedOrder = await getOrder(orderId);
+  if (!paymentBackedOrder) throw new Error("Payment-backed review order disappeared.");
+  const forgedReceiptOrder: SellerOrder = {
+    ...paymentBackedOrder,
+    lifecycle: { ...paymentBackedOrder.lifecycle, receipt: "issued" },
+    receipt: {
+      status: "submitted",
+      receiptMemoryId: "forged-receipt-memory",
+      receiptHash: "forged-receipt-hash",
+      claimUrl: "https://example.invalid/forged",
+      cnftStatus: "pending",
+    },
+  };
+  if (eligibleForReview(forgedReceiptOrder)) {
+    throw new Error("A final-looking receipt without terminal fulfillment must not unlock a verified review.");
+  }
   await postJson(origin, "/merchants/solyd/receipt", {
     orderId,
     actor: "solyd-fulfillment",
@@ -1414,7 +1717,12 @@ async function smokeVerifiedReview(origin: string) {
     feedback: { rating: 5, wouldRepeat: true, note: "fast" },
     agentDecision: { userIntent: "case under $100", whyRecommended: "in budget + fast", alternativesRejected: ["pricier case"] },
   }, auth) as { review?: { verifiedBy?: string[]; agentUsable?: boolean; feedback?: { rating?: number }; agentDecision?: { whyRecommended?: string } } };
-  if (!reviewed.review?.verifiedBy?.includes("stripe_payment") || !reviewed.review.verifiedBy.includes("user_feedback")) {
+  if (
+    !reviewed.review?.verifiedBy?.includes("stripe_payment")
+    || !reviewed.review.verifiedBy.includes("receipt_memory")
+    || !reviewed.review.verifiedBy.includes("user_feedback")
+    || reviewed.review.verifiedBy.length === 0
+  ) {
     throw new Error(`verified review missing proofs: ${JSON.stringify(reviewed.review)}`);
   }
   if (reviewed.review.agentUsable !== true || reviewed.review.feedback?.rating !== 5 || reviewed.review.agentDecision?.whyRecommended !== "in budget + fast") {
@@ -2585,6 +2893,7 @@ async function smokePersonalShop(origin: string) {
 }
 
 async function main() {
+  smokeMoneyBoundaries();
   const server = createSllrServer();
   server.listen(0);
   await once(server, "listening");
@@ -2711,7 +3020,14 @@ async function main() {
 
     const openapi = await getJson(origin, "/openapi.json") as {
       openapi?: string;
-      paths?: Record<string, unknown>;
+      paths?: Record<string, {
+        get?: { security?: Array<Record<string, unknown>>; responses?: Record<string, { description?: string }> };
+        post?: { security?: Array<Record<string, unknown>>; responses?: Record<string, { description?: string }> };
+      }>;
+      components?: {
+        securitySchemes?: Record<string, { type?: string; in?: string; name?: string }>;
+        schemas?: Record<string, unknown>;
+      };
     };
     if (
       openapi.openapi !== "3.1.0"
@@ -2734,6 +3050,41 @@ async function main() {
       || !openapi.paths?.["/.well-known/solana-sllr-plugin.md"]
     ) {
       throw new Error(`OpenAPI schema did not expose required agent tools: ${JSON.stringify(openapi)}`);
+    }
+    const batchList = openapi.paths["/merchants/{merchantId}/batches"]?.get;
+    const batchGet = openapi.paths["/merchants/{merchantId}/batches/{batchId}"]?.get;
+    const optionalBuyerOperations = [
+      openapi.paths["/merchants/{merchantId}/offers/{offerId}/quote"]?.post,
+      openapi.paths["/merchants/{merchantId}/quote"]?.post,
+      openapi.paths["/merchants/{merchantId}/orders"]?.post,
+    ];
+    if (
+      openapi.components?.securitySchemes?.MerchantVerifier?.type !== "apiKey"
+      || openapi.components.securitySchemes.MerchantVerifier.in !== "header"
+      || openapi.components.securitySchemes.MerchantVerifier.name !== "x-sllr-merchant-payment-secret"
+      || openapi.components.securitySchemes.MerchantDemo?.in !== "query"
+      || !batchList?.security?.some((entry) => "MerchantVerifier" in entry)
+      || !batchList.security.some((entry) => "MerchantDemo" in entry)
+      || !batchGet?.security?.some((entry) => "MerchantVerifier" in entry)
+      || !batchGet.security.some((entry) => "MerchantDemo" in entry)
+      || !batchList.responses?.["401"]
+      || !batchGet.responses?.["401"]
+    ) {
+      throw new Error(`OpenAPI merchant batch authorization was incomplete: ${JSON.stringify({ batchList, batchGet, schemes: openapi.components?.securitySchemes })}`);
+    }
+    if (optionalBuyerOperations.some((operation) => (
+      !operation?.security?.some((entry) => "BuyerBearer" in entry)
+      || !operation.security.some((entry) => Object.keys(entry).length === 0)
+    ))) {
+      throw new Error(`OpenAPI merchant quote/order operations did not document optional buyer bearer auth: ${JSON.stringify(optionalBuyerOperations)}`);
+    }
+    const offerSchemaText = JSON.stringify(openapi.components?.schemas?.MerchantOffer || {});
+    if (!offerSchemaText.includes("unitAmount") || !offerSchemaText.includes("subtotal") || offerSchemaText.includes("unitAmountUsd") || offerSchemaText.includes("subtotalUsd")) {
+      throw new Error(`OpenAPI MerchantOffer schema was not currency-neutral: ${offerSchemaText}`);
+    }
+    const baseDemoPayment = openapi.paths["/base-plugin/coffee/record-demo-payment"]?.get?.responses?.["200"]?.description || "";
+    if (!baseDemoPayment.includes("payment proof") || baseDemoPayment.includes("Receipt memory")) {
+      throw new Error(`Base demo payment OpenAPI response overclaimed receipt memory: ${baseDemoPayment}`);
     }
 
     const baseMcpPlugin = await fetch(`${origin}/.well-known/base-mcp-plugin.md`).then((response) => response.text());

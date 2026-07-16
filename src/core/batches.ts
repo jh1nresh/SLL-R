@@ -40,13 +40,14 @@ function summarizeItems(orders: SellerOrder[]) {
 
 async function hydrateBatch(stored: StoredBatch): Promise<FulfillmentBatch> {
   const orders = (await Promise.all(stored.orderIds.map(getOrder))).filter((order): order is SellerOrder => order !== null);
-  const amountCents = orders.reduce((total, order) => total + centsFromUsd(order.item.subtotalUsd), 0);
+  const lineItems = orders.flatMap((order) => order.lineItems?.length ? order.lineItems : [order.item]);
+  const amountCents = lineItems.reduce((total, item) => total + centsFromUsd(item.subtotalUsd), 0);
   return {
     ...stored,
     status: batchStatus(orders),
     totals: {
       orders: orders.length,
-      quantity: orders.reduce((total, order) => total + order.item.quantity, 0),
+      quantity: lineItems.reduce((total, item) => total + item.quantity, 0),
       amountUsd: formatUsd(amountCents),
     },
     items: summarizeItems(orders),

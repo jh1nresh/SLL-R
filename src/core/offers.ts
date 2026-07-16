@@ -1,6 +1,6 @@
 import { merchantForId } from "../merchants/profiles.js";
 import type { MerchantOffer } from "../types.js";
-import { centsFromUsd } from "./money.js";
+import { minorUnitsFromDecimal } from "./money.js";
 import { productionClassFor } from "./capacity.js";
 import { quoteMerchantOrder } from "./merchantApi.js";
 
@@ -16,6 +16,8 @@ function offerForItem(merchantId: string, itemId: string): MerchantOffer {
   const merchant = requireMerchant(merchantId);
   const item = merchant.catalog.find((candidate) => candidate.id === itemId);
   if (!item) throw Object.assign(new Error(`Unknown offer: ${OFFER_PREFIX}${itemId}`), { status: 404 });
+  const currency = merchant.currency || "USD";
+  const amount = { amountMinor: minorUnitsFromDecimal(item.amountUsd, currency), currency };
   return {
     id: `${OFFER_PREFIX}${item.id}`,
     merchantId,
@@ -26,11 +28,10 @@ function offerForItem(merchantId: string, itemId: string): MerchantOffer {
       itemId: item.id,
       name: item.name,
       quantity: 1,
-      unitAmountUsd: item.amountUsd,
-      subtotalUsd: item.amountUsd,
+      unitAmount: amount,
+      subtotal: amount,
     }],
-    amount: { amountMinor: centsFromUsd(item.amountUsd), currency: "USD" },
-    amountUsd: item.amountUsd,
+    amount,
     fulfillment: item.fulfillment,
     productionClass: productionClassFor(item),
     status: "active",

@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { CatalogItem, MerchantProfile } from "../types.js";
-import { sllrStore, storeBackendName } from "../core/store.js";
+import { sllrStore, type SllrStore } from "../core/store.js";
 
 const nounCoffeeInStoreMenu = [
   {
@@ -502,6 +503,7 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
     // Taiwan demo: counter pay + LINE Pay prepay-in-flow. Prices are TWD
     // (the amount field is a plain decimal; LINE Pay charges TWD whole units).
     paymentRails: ["counter", "line_pay"],
+    currency: "TWD",
     humanApproval: { requiredAboveUsd: "1000.00" },
     catalog: [
       { id: "americano", name: "美式咖啡 Americano", amountUsd: "55.00", fulfillment: ["pickup"], productionClass: "espresso", prepMinutes: 4, inventory: 50, tags: ["coffee", "americano", "espresso", "fast"] },
@@ -532,26 +534,65 @@ export const merchantProfiles: Record<string, MerchantProfile> = {
 const MAX_DEMO_MERCHANTS = 24;
 const DEMO_KEY_PREFIX = "sllr:demo-merchant:";
 const DEMO_INDEX = "sllr:demo-merchant-ids";
+const DEMO_REGISTRY_KEY = "sllr:demo-merchants:v1";
 const demoMerchantProfiles = new Map<string, MerchantProfile>();
+
+type DemoMerchantRegistry = {
+  version: 1;
+  revision: string;
+  profiles: Record<string, MerchantProfile>;
+};
 
 function demoKey(merchantId: string) {
   return `${DEMO_KEY_PREFIX}${merchantId}`;
 }
 
+function requireDemoRegistry(value: unknown): DemoMerchantRegistry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw Object.assign(new Error("Demo merchant registry is invalid."), { status: 500 });
+  }
+  const registry = value as Partial<DemoMerchantRegistry>;
+  if (
+    registry.version !== 1
+    || typeof registry.revision !== "string"
+    || !registry.revision
+    || !registry.profiles
+    || typeof registry.profiles !== "object"
+    || Array.isArray(registry.profiles)
+    || Object.keys(registry.profiles).length > MAX_DEMO_MERCHANTS
+  ) {
+    throw Object.assign(new Error("Demo merchant registry is invalid."), { status: 500 });
+  }
+  return registry as DemoMerchantRegistry;
+}
+
+async function legacyDemoRegistry(store: SllrStore): Promise<DemoMerchantRegistry> {
+  const ids = await store.indexMembers(DEMO_INDEX);
+  const loaded = await Promise.all(ids.slice(0, MAX_DEMO_MERCHANTS).map((id) => store.getJson<MerchantProfile>(demoKey(id))));
+  const profiles = Object.fromEntries(loaded.filter((profile): profile is MerchantProfile => Boolean(profile)).map((profile) => [profile.id, profile]));
+  return { version: 1, revision: randomUUID(), profiles };
+}
+
+async function loadDemoRegistry(store: SllrStore): Promise<DemoMerchantRegistry> {
+  const stored = await store.getJson<unknown>(DEMO_REGISTRY_KEY);
+  if (stored !== null) return requireDemoRegistry(stored);
+
+  const legacy = await legacyDemoRegistry(store);
+  if (await store.setJsonIfAbsent(DEMO_REGISTRY_KEY, legacy)) return legacy;
+  const winner = await store.getJson<unknown>(DEMO_REGISTRY_KEY);
+  if (winner === null) {
+    throw Object.assign(new Error("Demo merchant registry initialization did not persist."), { status: 503 });
+  }
+  return requireDemoRegistry(winner);
+}
+
 // Load persisted demo merchants into the in-process cache. Call once per
 // request before any merchantForId lookup so a fresh serverless instance sees
-// demo merchants created by an earlier request on another instance. On the
-// memory backend the in-process Map is already authoritative (the store lives
-// in this same process), so hydration is skipped and adds no per-request cost.
+// demo merchants created by an earlier request on another instance.
 export async function hydrateDemoMerchants() {
-  if (storeBackendName() === "memory") return;
   const store = sllrStore();
-  const ids = await store.indexMembers(DEMO_INDEX);
-  if (ids.length === 0) return;
-  const profiles = await Promise.all(ids.map((id) => store.getJson<MerchantProfile>(demoKey(id))));
-  for (const profile of profiles) {
-    if (!profile) continue;
-    if (!demoMerchantProfiles.has(profile.id) && demoMerchantProfiles.size >= MAX_DEMO_MERCHANTS) break;
+  const registry = await loadDemoRegistry(store);
+  for (const profile of Object.values(registry.profiles)) {
     demoMerchantProfiles.set(profile.id, profile);
   }
 }
@@ -563,17 +604,30 @@ export async function registerDemoMerchantProfile(profile: MerchantProfile) {
   if (merchantProfiles[profile.id]) {
     throw Object.assign(new Error(`Merchant id ${profile.id} is reserved.`), { status: 409 });
   }
-  if (demoMerchantProfiles.has(profile.id)) {
-    throw Object.assign(new Error(`Demo merchant id ${profile.id} already exists and cannot be replaced.`), { status: 409 });
-  }
-  if (!demoMerchantProfiles.has(profile.id) && demoMerchantProfiles.size >= MAX_DEMO_MERCHANTS) {
-    throw Object.assign(new Error(`Demo merchant limit reached (${MAX_DEMO_MERCHANTS}). Use configured merchant onboarding for additional stores.`), { status: 409 });
-  }
-  demoMerchantProfiles.set(profile.id, profile);
   const store = sllrStore();
-  await store.setJson(demoKey(profile.id), profile);
-  await store.addToIndex(DEMO_INDEX, profile.id);
-  return profile;
+  for (let attempt = 0; attempt < MAX_DEMO_MERCHANTS + 8; attempt += 1) {
+    const current = await loadDemoRegistry(store);
+    if (current.profiles[profile.id]) {
+      throw Object.assign(new Error(`Demo merchant id ${profile.id} already exists and cannot be replaced.`), { status: 409 });
+    }
+    if (Object.keys(current.profiles).length >= MAX_DEMO_MERCHANTS) {
+      throw Object.assign(new Error(`Demo merchant limit reached (${MAX_DEMO_MERCHANTS}). Use configured merchant onboarding for additional stores.`), { status: 409 });
+    }
+    const updated: DemoMerchantRegistry = {
+      version: 1,
+      revision: randomUUID(),
+      profiles: { ...current.profiles, [profile.id]: profile },
+    };
+    if (await store.setJsonIfFieldEquals(DEMO_REGISTRY_KEY, "revision", current.revision, updated)) {
+      demoMerchantProfiles.set(profile.id, profile);
+      return profile;
+    }
+  }
+  throw Object.assign(new Error("Demo merchant registry was busy. Retry registration."), { status: 503 });
+}
+
+export function resetDemoMerchantsForTest() {
+  demoMerchantProfiles.clear();
 }
 
 export function allMerchantProfiles(): MerchantProfile[] {

@@ -37,7 +37,7 @@ export function sllrMcpManifest(origin: string) {
         name: "list_offers",
         method: "GET",
         path: "/merchants/{merchantId}/offers",
-        description: "List Level 1 fixed merchant-backed offers that can enter the normal quote and consent flow.",
+        description: "List Level 1 fixed merchant-backed offers. Prices use amount.amountMinor + currency and currency-neutral line-item Money fields before entering quote and consent.",
       },
       {
         name: "quote_offer",

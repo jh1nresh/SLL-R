@@ -33,6 +33,7 @@ For Solana Pay URL demos:
 SLLR_SOLANA_PAY_RECIPIENT=<Solana wallet you control>
 SLLR_SOLANA_PAY_SPL_TOKEN=<optional SPL mint>
 SLLR_SOLANA_PAY_VERIFY_SECRET=<random server-side verifier secret>
+SLLR_MERCHANT_PAYMENT_VERIFY_SECRET=<merchant fulfillment verifier secret>
 ```
 
 For Helio checkout handoff demos:
@@ -119,7 +120,7 @@ Buy me Raposa coffee beans under $20 this week using Solana Pay.
      }'
    ```
 
-6. Attach Helio webhook proof:
+6. Alternatively, attach Helio webhook proof:
 
    ```bash
    curl -X POST "$SLLR_URL/webhooks/helio" \
@@ -133,6 +134,26 @@ Buy me Raposa coffee beans under $20 this week using Solana Pay.
        "reference": "<REFERENCE_FROM_PREPARE_PAYMENT>"
      }'
    ```
+
+7. Record merchant fulfillment and issue final receipt memory:
+
+   ```bash
+   curl -X POST "$SLLR_URL/merchants/solyd/receipt" \
+     -H "content-type: application/json" \
+     -H "x-sllr-merchant-payment-secret: $SLLR_MERCHANT_PAYMENT_VERIFY_SECRET" \
+     -d '{
+       "orderId": "<ORDER_ID>",
+       "actor": "solyd-fulfillment",
+       "note": "Merchant confirmed shipment handoff."
+     }'
+   ```
+
+   After step 5 or 6, the order must first show `payment_backed` with no final
+   receipt. After this fulfillment request, expect `status: receipt_issued`,
+   `proofLevel: receipt_memory_issued`, and a non-null `order.receipt` containing
+   the final SLL-R receipt-memory identifiers and claim URL. Pickup merchants may
+   instead mark the order ready and call `POST /orders/<ORDER_ID>/claim` with the
+   same verifier header after customer handoff.
 
 ## Production Notes
 

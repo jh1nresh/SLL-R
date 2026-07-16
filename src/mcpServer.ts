@@ -133,6 +133,8 @@ const tools: ToolDefinition[] = [
         deadlineMinutes: quoteProperties.deadlineMinutes,
         deliverByDays: quoteProperties.deliverByDays,
         quantity: quoteProperties.quantity,
+        offerId: quoteProperties.offerId,
+        pickupAt: quoteProperties.pickupAt,
         merchantIds: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string" }, description: "Optional merchant ids to compare. Otherwise SLL-R uses nearby or configured merchants." },
         category: { type: "string", description: "Optional merchant category filter, for example cafe." },
         lat: { type: "number", minimum: -90, maximum: 90, description: "Optional buyer latitude. Supply with lng." },
@@ -697,7 +699,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "create_demo_merchant",
-    description: "Ingest a public Shopify storefront's products.json into a runtime demo merchant so it can be quoted and ordered immediately. Demo merchants get counter + Shopify checkout rails and reset on server restart. Use this to demo SLL-R against a real store's actual catalog.",
+    description: "Ingest a public Shopify storefront's products.json into a runtime demo merchant so it can be quoted and ordered immediately. Demo merchants get counter + Shopify checkout rails and persist when SLL-R uses a durable store. Use this to demo SLL-R against a real store's actual catalog.",
     inputSchema: {
       type: "object",
       required: ["storeDomain"],

@@ -106,7 +106,9 @@ async function activePickupOrders(merchantId: string, productionClass: string) {
   const merchantOrders = await ordersForMerchant(merchantId);
   return merchantOrders.filter((order) => (
     order.promise.productionClass === productionClass
-    && order.capacityReservation === null
+    // Scheduled pickups already occupy their target capacity window and must
+    // not inflate the queue for an order placed right now.
+    && order.promise.scheduledPickup !== true
     && !["rejected", "claimed", "fulfilled", "receipt_issued"].includes(order.status)
   ));
 }
@@ -128,9 +130,7 @@ export async function estimatedPickupWaitMinutes(merchantId: string, item: Catal
     const probeAt = addMinutes(desiredReadyAt, offset * CAPACITY_WINDOW_MINUTES);
     const window = await capacityWindowAt(merchantId, productionClass, probeAt);
     if (window.available >= quantity) {
-      return offset === 0
-        ? baseWait
-        : Math.max(baseWait, Math.ceil((new Date(window.startsAt).getTime() - now.getTime()) / 60_000));
+      return baseWait + offset * CAPACITY_WINDOW_MINUTES;
     }
   }
   return baseWait + 32 * CAPACITY_WINDOW_MINUTES;
@@ -151,6 +151,7 @@ async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input
       capacityWindowId: null,
       capacityWindowStartsAt: null,
       capacityWindowEndsAt: null,
+      scheduledPickup: false,
     };
   }
 
@@ -173,6 +174,7 @@ async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input
     capacityWindowId: null,
     capacityWindowStartsAt: null,
     capacityWindowEndsAt: null,
+    scheduledPickup: Boolean(input.pickupAt),
   };
 }
 
@@ -204,7 +206,7 @@ export async function createOrder(input: OrderRequest) {
   const orderId = `ord_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const promise = await pickupPromise(merchant, catalogItem, input, nowDate, quote.item.quantity);
   let capacityReservation: SellerOrder["capacityReservation"] = null;
-  if (input.buyerId && catalogItem.fulfillment.includes("pickup") && promise.promisedReadyAt) {
+  if (catalogItem.fulfillment.includes("pickup") && promise.promisedReadyAt) {
     const quotedReadyAt = new Date(promise.promisedReadyAt);
     const scheduledPickup = input.pickupAt ? parsePickupAt(input.pickupAt, nowDate) : null;
     capacityReservation = await reserveCapacity({
@@ -331,6 +333,10 @@ export async function rejectOrder(orderId: string, input: MerchantActionRequest)
     throw Object.assign(new Error("Orders with payment, fulfillment, or receipt proof cannot be rejected."), { status: 409 });
   }
 
+  if (order.status === "rejected") {
+    return reconcileCapacityReservation(order, "released");
+  }
+
   const updated: SellerOrder = {
     ...order,
     status: "rejected",
@@ -338,12 +344,7 @@ export async function rejectOrder(orderId: string, input: MerchantActionRequest)
     updatedAt: new Date().toISOString(),
   };
   await saveOrder(updated);
-  if (updated.capacityReservation) {
-    await releaseCapacityReservation(updated.capacityReservation.id);
-    updated.capacityReservation = { ...updated.capacityReservation, status: "released", updatedAt: new Date().toISOString() };
-    await saveOrder(updated);
-  }
-  return updated;
+  return reconcileCapacityReservation(updated, "released");
 }
 
 type OrderMutationOptions = {
@@ -352,30 +353,53 @@ type OrderMutationOptions = {
   actionKey?: unknown;
 };
 
+async function transitionCapacityReservation(order: SellerOrder, target: "released" | "consumed") {
+  if (!order.capacityReservation) return order;
+  const transitioned = target === "released"
+    ? await releaseCapacityReservation(order.capacityReservation.id)
+    : await consumeCapacityReservation(order.capacityReservation.id);
+  if (!transitioned) return order;
+  return {
+    ...order,
+    capacityReservation: {
+      ...order.capacityReservation,
+      status: transitioned.status,
+      updatedAt: transitioned.updatedAt,
+    },
+  } satisfies SellerOrder;
+}
+
+async function reconcileCapacityReservation(order: SellerOrder, target: "released" | "consumed") {
+  const reconciled = await transitionCapacityReservation(order, target);
+  if (
+    reconciled.capacityReservation?.status !== order.capacityReservation?.status
+    || reconciled.capacityReservation?.updatedAt !== order.capacityReservation?.updatedAt
+  ) {
+    await saveOrder(reconciled);
+  }
+  return reconciled;
+}
+
 async function fulfillOrderOnce(orderId: string, input: MerchantActionRequest) {
   const order = await requireOrderForMerchant(orderId, input);
   if (order.status === "rejected") {
     throw Object.assign(new Error("Rejected orders cannot be fulfilled."), { status: 409 });
   }
-  if (order.status === "receipt_issued") return order;
+  if (order.status === "receipt_issued") return reconcileCapacityReservation(order, "consumed");
 
-  const fulfilled: SellerOrder = {
+  let fulfilled: SellerOrder = {
     ...order,
     status: "fulfilled",
     proofLevel: "fulfilled",
     terminal: terminalUpdate(input, "fulfilled"),
     updatedAt: new Date().toISOString(),
   };
+  fulfilled = await transitionCapacityReservation(fulfilled, "consumed");
   fulfilled.receipt = await issueSllrReceipt(fulfilled);
   fulfilled.status = "receipt_issued";
   fulfilled.proofLevel = "receipt_memory_issued";
   fulfilled.updatedAt = new Date().toISOString();
   await saveOrder(fulfilled);
-  if (fulfilled.capacityReservation) {
-    await consumeCapacityReservation(fulfilled.capacityReservation.id);
-    fulfilled.capacityReservation = { ...fulfilled.capacityReservation, status: "consumed", updatedAt: new Date().toISOString() };
-    await saveOrder(fulfilled);
-  }
   return fulfilled;
 }
 
@@ -435,13 +459,13 @@ export async function claimOrder(orderId: string, input: MerchantActionRequest) 
   if (order.status === "rejected") {
     throw Object.assign(new Error("Rejected orders cannot be claimed."), { status: 409 });
   }
-  if (order.status === "receipt_issued") return order;
+  if (order.status === "receipt_issued") return reconcileCapacityReservation(order, "consumed");
   if (order.status !== "ready") {
     throw Object.assign(new Error("Only ready pickup orders can be claimed."), { status: 409 });
   }
 
   const claimedAt = new Date().toISOString();
-  const claimed: SellerOrder = {
+  let claimed: SellerOrder = {
     ...order,
     status: "claimed",
     proofLevel: "fulfilled",
@@ -453,30 +477,30 @@ export async function claimOrder(orderId: string, input: MerchantActionRequest) 
     },
     updatedAt: claimedAt,
   };
+  claimed = await transitionCapacityReservation(claimed, "consumed");
   claimed.receipt = await issueSllrReceipt(claimed);
   claimed.status = "receipt_issued";
   claimed.proofLevel = "receipt_memory_issued";
   claimed.updatedAt = new Date().toISOString();
   await saveOrder(claimed);
-  if (claimed.capacityReservation) {
-    await consumeCapacityReservation(claimed.capacityReservation.id);
-    claimed.capacityReservation = { ...claimed.capacityReservation, status: "consumed", updatedAt: new Date().toISOString() };
-    await saveOrder(claimed);
-  }
   return claimed;
 }
 
 async function attachPaymentProofOnce(input: PaymentWebhook) {
   const order = await getOrder(input.orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${input.orderId}`), { status: 404 });
+  if (order.merchantId !== input.merchantId) {
+    throw Object.assign(new Error(`Payment merchant ${input.merchantId} does not match order merchant ${order.merchantId}.`), { status: 409 });
+  }
   // Idempotency: payment webhooks can be delivered or replayed more than once.
   // Payment proof is intentionally not fulfillment proof and cannot issue the
   // final receipt memory by itself.
   if (order.status === "receipt_issued" || order.payment.status === "verified") {
-    return order;
-  }
-  if (order.merchantId !== input.merchantId) {
-    throw Object.assign(new Error(`Payment merchant ${input.merchantId} does not match order merchant ${order.merchantId}.`), { status: 409 });
+    if (order.payment.provider === input.provider && order.payment.paymentId === input.paymentId) return order;
+    throw Object.assign(new Error("Incoming payment proof conflicts with the proof already stored for this order."), {
+      status: 409,
+      code: "payment_proof_conflict",
+    });
   }
   if (centsFromUsd(input.amountUsd) < centsFromUsd(order.item.subtotalUsd)) {
     throw Object.assign(new Error(`Payment $${input.amountUsd} is below order subtotal $${order.item.subtotalUsd}.`), { status: 409 });

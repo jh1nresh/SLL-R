@@ -251,10 +251,23 @@ export async function reserveCapacity(input: {
 
 export async function releaseCapacityReservation(reservationId: string) {
   const reservation = await sllrStore().getJson<StoredCapacityReservation>(RESERVATION_KEY(reservationId));
-  if (!reservation || reservation.status !== "held") return reservation;
-  await deleteOwnedSeats(reservation);
+  if (!reservation) return reservation;
+  if (reservation.status === "released") {
+    await deleteOwnedSeats(reservation);
+    return reservation;
+  }
+  if (reservation.status !== "held") return reservation;
   const updated = { ...reservation, status: "released" as const, updatedAt: new Date().toISOString() };
-  await sllrStore().setJson(RESERVATION_KEY(reservationId), updated);
+  const transitioned = await sllrStore().setJsonIfFieldEquals(
+    RESERVATION_KEY(reservationId),
+    "status",
+    "held",
+    updated,
+  );
+  if (!transitioned) {
+    return sllrStore().getJson<StoredCapacityReservation>(RESERVATION_KEY(reservationId));
+  }
+  await deleteOwnedSeats(updated);
   return updated;
 }
 
@@ -262,6 +275,13 @@ export async function consumeCapacityReservation(reservationId: string) {
   const reservation = await sllrStore().getJson<StoredCapacityReservation>(RESERVATION_KEY(reservationId));
   if (!reservation || reservation.status !== "held") return reservation;
   const updated = { ...reservation, status: "consumed" as const, updatedAt: new Date().toISOString() };
-  await sllrStore().setJson(RESERVATION_KEY(reservationId), updated);
-  return updated;
+  const transitioned = await sllrStore().setJsonIfFieldEquals(
+    RESERVATION_KEY(reservationId),
+    "status",
+    "held",
+    updated,
+  );
+  return transitioned
+    ? updated
+    : sllrStore().getJson<StoredCapacityReservation>(RESERVATION_KEY(reservationId));
 }

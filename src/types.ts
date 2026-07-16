@@ -61,6 +61,7 @@ export type MerchantProfile = {
   geo?: { lat: number; lng: number };
   fulfillment: FulfillmentMode[];
   paymentRails: PaymentRail[];
+  currency?: Money["currency"];
   humanApproval: {
     requiredAboveUsd: string;
   };
@@ -152,11 +153,10 @@ export type MerchantOffer = {
     itemId: string;
     name: string;
     quantity: number;
-    unitAmountUsd: string;
-    subtotalUsd: string;
+    unitAmount: Money;
+    subtotal: Money;
   }>;
   amount: Money;
-  amountUsd: string;
   fulfillment: FulfillmentMode[];
   productionClass: ProductionClass;
   status: "active";
@@ -231,6 +231,7 @@ export type SellerOrder = {
     capacityWindowId: string | null;
     capacityWindowStartsAt: string | null;
     capacityWindowEndsAt: string | null;
+    scheduledPickup?: boolean;
   };
   capacityReservation: CapacityReservation | null;
   payment: {
