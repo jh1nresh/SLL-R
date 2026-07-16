@@ -51,7 +51,7 @@ const merchantUseCases: Record<string, {
     requiredSetup: [
       "Confirm products, variants, prices, inventory, and shipping windows.",
       "Choose checkout rail: Shopify, MoonPay Commerce, Stripe, or manual checkout link.",
-      "Provide webhook access only when ready for payment-backed receipts.",
+      "Provide webhook access only when ready for verified payment state before fulfillment-backed receipts.",
     ],
     optionalSetup: ["Shopify catalog adapter", "MoonPay Commerce webhook", "post-purchase review unlock"],
   },

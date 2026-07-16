@@ -9,6 +9,16 @@ import { isItemAvailable } from "./availability.js";
 import { sllrStore } from "./store.js";
 import { buyerOrdersIndex } from "./buyer.js";
 import { mutationResultForOrder, withIdempotentMutation } from "./mutations.js";
+import {
+  CAPACITY_BY_PRODUCTION_CLASS,
+  CAPACITY_WINDOW_MINUTES,
+  capacityWindowAt,
+  consumeCapacityReservation,
+  parsePickupAt,
+  productionClassFor,
+  releaseCapacityReservation,
+  reserveCapacity,
+} from "./capacity.js";
 
 const ORDER_KEY_PREFIX = "sllr:order:";
 const ORDER_INDEX = "sllr:order-ids";
@@ -23,12 +33,36 @@ function merchantOrderIndex(merchantId: string) {
 }
 
 async function loadOrdersByIds(ids: string[]): Promise<SellerOrder[]> {
-  const store = sllrStore();
-  const loaded = await Promise.all(ids.map((id) => store.getJson<SellerOrder>(orderKey(id))));
+  const loaded = await Promise.all(ids.map(loadOrder));
   return loaded.filter((order): order is SellerOrder => order !== null);
 }
 
+function syncLifecycle(order: SellerOrder): SellerOrder {
+  const normalized: SellerOrder = {
+    ...order,
+    offerId: order.offerId || null,
+    batchId: order.batchId || null,
+    lineItems: order.lineItems?.length ? order.lineItems : [order.item],
+    lifecycle: {
+      order: order.status === "rejected" ? "rejected" : order.receipt ? "completed" : "open",
+      payment: order.payment.status,
+      fulfillment: order.terminal.status,
+      receipt: order.receipt ? "issued" : "none",
+    },
+    promise: {
+      ...order.promise,
+      capacityWindowId: order.promise.capacityWindowId || null,
+      capacityWindowStartsAt: order.promise.capacityWindowStartsAt || null,
+      capacityWindowEndsAt: order.promise.capacityWindowEndsAt || null,
+    },
+    capacityReservation: order.capacityReservation || null,
+  };
+  Object.assign(order, normalized);
+  return order;
+}
+
 async function saveOrder(order: SellerOrder) {
+  syncLifecycle(order);
   const store = sllrStore();
   await store.setJson(orderKey(order.id), order);
   // Per-merchant index keeps the hot path (pickup-queue scan on create) and
@@ -42,7 +76,10 @@ async function saveOrder(order: SellerOrder) {
 }
 
 async function loadOrder(orderId: string) {
-  return sllrStore().getJson<SellerOrder>(orderKey(orderId));
+  const order = await sllrStore().getJson<SellerOrder>(orderKey(orderId));
+  if (!order) return null;
+  const membership = await sllrStore().getJson<{ batchId?: string }>(`sllr:fulfillment-batch-membership:${orderId}`);
+  return { ...syncLifecycle(order), batchId: membership?.batchId || order.batchId || null };
 }
 
 async function ordersForMerchant(merchantId: string): Promise<SellerOrder[]> {
@@ -61,22 +98,6 @@ export async function listOrdersForBuyer(buyerId: string, limit?: number): Promi
   return (await loadOrdersByIds(boundedIds)).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
-const capacityByClass = {
-  espresso: 8,
-  cold: 12,
-  pastry: 20,
-  general: 10,
-} as const;
-
-function productionClassFor(item: CatalogItem): keyof typeof capacityByClass {
-  if (item.productionClass) return item.productionClass;
-  const tags = new Set((item.tags || []).map((tag) => tag.toLowerCase()));
-  if (tags.has("pastry")) return "pastry";
-  if (tags.has("cold brew") || tags.has("cold")) return "cold";
-  if (tags.has("coffee") || tags.has("latte") || tags.has("espresso")) return "espresso";
-  return "general";
-}
-
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60_000);
 }
@@ -85,6 +106,9 @@ async function activePickupOrders(merchantId: string, productionClass: string) {
   const merchantOrders = await ordersForMerchant(merchantId);
   return merchantOrders.filter((order) => (
     order.promise.productionClass === productionClass
+    // Scheduled pickups already occupy their target capacity window and must
+    // not inflate the queue for an order placed right now.
+    && order.promise.scheduledPickup !== true
     && !["rejected", "claimed", "fulfilled", "receipt_issued"].includes(order.status)
   ));
 }
@@ -93,16 +117,26 @@ async function activePickupOrders(merchantId: string, productionClass: string) {
 // by quotes and order promises, so a quote can never show "~7 min" while the
 // created order silently computes 52 (the trust bug the pilot audit caught).
 // null for non-pickup items.
-export async function estimatedPickupWaitMinutes(merchantId: string, item: CatalogItem): Promise<number | null> {
+export async function estimatedPickupWaitMinutes(merchantId: string, item: CatalogItem, quantity = 1): Promise<number | null> {
   if (!item.fulfillment.includes("pickup")) return null;
   const productionClass = productionClassFor(item);
   const activeAhead = (await activePickupOrders(merchantId, productionClass)).length;
-  const capacity = capacityByClass[productionClass];
+  const capacity = CAPACITY_BY_PRODUCTION_CLASS[productionClass];
   const prepMinutes = Math.max(item.prepMinutes || 5, 1);
-  return prepMinutes + Math.floor(activeAhead / capacity) * 15;
+  const baseWait = prepMinutes + Math.floor(activeAhead / capacity) * CAPACITY_WINDOW_MINUTES;
+  const now = new Date();
+  const desiredReadyAt = addMinutes(now, baseWait);
+  for (let offset = 0; offset < 32; offset += 1) {
+    const probeAt = addMinutes(desiredReadyAt, offset * CAPACITY_WINDOW_MINUTES);
+    const window = await capacityWindowAt(merchantId, productionClass, probeAt);
+    if (window.available >= quantity) {
+      return baseWait + offset * CAPACITY_WINDOW_MINUTES;
+    }
+  }
+  return baseWait + 32 * CAPACITY_WINDOW_MINUTES;
 }
 
-async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: OrderRequest, now: Date): Promise<SellerOrder["promise"]> {
+async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: OrderRequest, now: Date, quantity: number): Promise<SellerOrder["promise"]> {
   if (!item.fulfillment.includes("pickup")) {
     return {
       status: "not_applicable",
@@ -114,12 +148,16 @@ async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input
       readyAt: null,
       claimedAt: null,
       delayMinutes: null,
+      capacityWindowId: null,
+      capacityWindowStartsAt: null,
+      capacityWindowEndsAt: null,
+      scheduledPickup: false,
     };
   }
 
   const productionClass = productionClassFor(item);
-  const capacityWindowMinutes = 15;
-  const estimatedWaitMinutes = (await estimatedPickupWaitMinutes(merchant.id, item))!;
+  const capacityWindowMinutes = CAPACITY_WINDOW_MINUTES;
+  const estimatedWaitMinutes = (await estimatedPickupWaitMinutes(merchant.id, item, quantity))!;
   const promisedReadyAt = addMinutes(now, estimatedWaitMinutes);
   const requestedReadyAt = input.deadlineMinutes ? addMinutes(now, input.deadlineMinutes) : null;
 
@@ -133,6 +171,10 @@ async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input
     readyAt: null,
     claimedAt: null,
     delayMinutes: null,
+    capacityWindowId: null,
+    capacityWindowStartsAt: null,
+    capacityWindowEndsAt: null,
+    scheduledPickup: Boolean(input.pickupAt),
   };
 }
 
@@ -151,21 +193,68 @@ export async function createOrder(input: OrderRequest) {
   const now = nowDate.toISOString();
   const catalogItem = merchant.catalog.find((item) => item.id === quote.item?.id);
   if (!catalogItem) throw Object.assign(new Error(`Catalog item not found: ${quote.item.id}`), { status: 409 });
+  if (input.offerId && input.offerId !== `catalog:${catalogItem.id}`) {
+    throw Object.assign(new Error(`Offer ${input.offerId} does not match item ${catalogItem.id}. Request a fresh offer quote.`), {
+      status: 409,
+      code: "offer_item_mismatch",
+    });
+  }
   if (!(await isItemAvailable(merchant.id, catalogItem.id))) {
     throw Object.assign(new Error(`${catalogItem.name} is currently unavailable (86'd) at ${merchant.name}.`), { status: 409 });
   }
   const paymentMode = input.paymentMode || (catalogItem.fulfillment.includes("shipping") ? "checkout" : "counter");
+  const orderId = `ord_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const promise = await pickupPromise(merchant, catalogItem, input, nowDate, quote.item.quantity);
+  let capacityReservation: SellerOrder["capacityReservation"] = null;
+  if (catalogItem.fulfillment.includes("pickup") && promise.promisedReadyAt) {
+    const quotedReadyAt = new Date(promise.promisedReadyAt);
+    const scheduledPickup = input.pickupAt ? parsePickupAt(input.pickupAt, nowDate) : null;
+    capacityReservation = await reserveCapacity({
+      merchantId: merchant.id,
+      item: catalogItem,
+      quantity: quote.item.quantity,
+      desiredAt: scheduledPickup || new Date(promise.promisedReadyAt),
+      exactWindow: scheduledPickup !== null,
+      orderId,
+    });
+    promise.capacityWindowId = capacityReservation.windowId;
+    promise.capacityWindowStartsAt = capacityReservation.startsAt;
+    promise.capacityWindowEndsAt = capacityReservation.endsAt;
+    const reservedStart = new Date(capacityReservation.startsAt);
+    const reservedEnd = new Date(capacityReservation.endsAt);
+    promise.promisedReadyAt = scheduledPickup?.toISOString()
+      || (quotedReadyAt >= reservedStart && quotedReadyAt < reservedEnd
+        ? quotedReadyAt.toISOString()
+        : capacityReservation.startsAt);
+    promise.estimatedWaitMinutes = Math.max(0, Math.ceil((new Date(promise.promisedReadyAt).getTime() - nowDate.getTime()) / 60_000));
+    if (scheduledPickup) {
+      promise.requestedReadyAt = scheduledPickup.toISOString();
+      promise.status = "on_time";
+    } else if (promise.requestedReadyAt && new Date(promise.promisedReadyAt) > new Date(promise.requestedReadyAt)) {
+      promise.status = "delayed_offer";
+    }
+  }
   const order: SellerOrder = {
-    id: `ord_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+    id: orderId,
     merchantId: merchant.id,
     merchantName: merchant.name,
     agentId: input.agentId || "buy-r-demo",
     customerLabel: input.customerLabel || input.agentId || "buyer agent user",
     buyerId: input.buyerId || null,
+    offerId: input.offerId || null,
+    batchId: null,
+    lifecycle: {
+      order: "open",
+      payment: "required",
+      fulfillment: "requested",
+      receipt: "none",
+    },
     status: "pending_payment",
     proofLevel: "order_intent_only",
     item: quote.item,
-    promise: await pickupPromise(merchant, catalogItem, input, nowDate),
+    lineItems: [quote.item],
+    promise,
+    capacityReservation,
     payment: {
       mode: paymentMode,
       status: "required",
@@ -182,7 +271,13 @@ export async function createOrder(input: OrderRequest) {
     createdAt: now,
     updatedAt: now,
   };
-  await saveOrder(order);
+  try {
+    await saveOrder(order);
+  } catch (error) {
+    await sllrStore().deleteJson(orderKey(order.id));
+    if (capacityReservation) await releaseCapacityReservation(capacityReservation.id);
+    throw error;
+  }
   return { order, quote };
 }
 
@@ -238,6 +333,10 @@ export async function rejectOrder(orderId: string, input: MerchantActionRequest)
     throw Object.assign(new Error("Orders with payment, fulfillment, or receipt proof cannot be rejected."), { status: 409 });
   }
 
+  if (order.status === "rejected") {
+    return reconcileCapacityReservation(order, "released");
+  }
+
   const updated: SellerOrder = {
     ...order,
     status: "rejected",
@@ -245,7 +344,7 @@ export async function rejectOrder(orderId: string, input: MerchantActionRequest)
     updatedAt: new Date().toISOString(),
   };
   await saveOrder(updated);
-  return updated;
+  return reconcileCapacityReservation(updated, "released");
 }
 
 type OrderMutationOptions = {
@@ -254,20 +353,48 @@ type OrderMutationOptions = {
   actionKey?: unknown;
 };
 
+async function transitionCapacityReservation(order: SellerOrder, target: "released" | "consumed") {
+  if (!order.capacityReservation) return order;
+  const transitioned = target === "released"
+    ? await releaseCapacityReservation(order.capacityReservation.id)
+    : await consumeCapacityReservation(order.capacityReservation.id);
+  if (!transitioned) return order;
+  return {
+    ...order,
+    capacityReservation: {
+      ...order.capacityReservation,
+      status: transitioned.status,
+      updatedAt: transitioned.updatedAt,
+    },
+  } satisfies SellerOrder;
+}
+
+async function reconcileCapacityReservation(order: SellerOrder, target: "released" | "consumed") {
+  const reconciled = await transitionCapacityReservation(order, target);
+  if (
+    reconciled.capacityReservation?.status !== order.capacityReservation?.status
+    || reconciled.capacityReservation?.updatedAt !== order.capacityReservation?.updatedAt
+  ) {
+    await saveOrder(reconciled);
+  }
+  return reconciled;
+}
+
 async function fulfillOrderOnce(orderId: string, input: MerchantActionRequest) {
   const order = await requireOrderForMerchant(orderId, input);
   if (order.status === "rejected") {
     throw Object.assign(new Error("Rejected orders cannot be fulfilled."), { status: 409 });
   }
-  if (order.status === "receipt_issued") return order;
+  if (order.status === "receipt_issued") return reconcileCapacityReservation(order, "consumed");
 
-  const fulfilled: SellerOrder = {
+  let fulfilled: SellerOrder = {
     ...order,
     status: "fulfilled",
     proofLevel: "fulfilled",
     terminal: terminalUpdate(input, "fulfilled"),
     updatedAt: new Date().toISOString(),
   };
+  fulfilled = await transitionCapacityReservation(fulfilled, "consumed");
   fulfilled.receipt = await issueSllrReceipt(fulfilled);
   fulfilled.status = "receipt_issued";
   fulfilled.proofLevel = "receipt_memory_issued";
@@ -332,13 +459,13 @@ export async function claimOrder(orderId: string, input: MerchantActionRequest) 
   if (order.status === "rejected") {
     throw Object.assign(new Error("Rejected orders cannot be claimed."), { status: 409 });
   }
-  if (order.status === "receipt_issued") return order;
+  if (order.status === "receipt_issued") return reconcileCapacityReservation(order, "consumed");
   if (order.status !== "ready") {
     throw Object.assign(new Error("Only ready pickup orders can be claimed."), { status: 409 });
   }
 
   const claimedAt = new Date().toISOString();
-  const claimed: SellerOrder = {
+  let claimed: SellerOrder = {
     ...order,
     status: "claimed",
     proofLevel: "fulfilled",
@@ -350,6 +477,7 @@ export async function claimOrder(orderId: string, input: MerchantActionRequest) 
     },
     updatedAt: claimedAt,
   };
+  claimed = await transitionCapacityReservation(claimed, "consumed");
   claimed.receipt = await issueSllrReceipt(claimed);
   claimed.status = "receipt_issued";
   claimed.proofLevel = "receipt_memory_issued";
@@ -361,14 +489,18 @@ export async function claimOrder(orderId: string, input: MerchantActionRequest) 
 async function attachPaymentProofOnce(input: PaymentWebhook) {
   const order = await getOrder(input.orderId);
   if (!order) throw Object.assign(new Error(`Unknown order: ${input.orderId}`), { status: 404 });
-  // Idempotency: payment webhooks can be delivered or replayed more than once
-  // (Stripe/Shopify both retry). Once proof is verified and the receipt issued,
-  // return the settled order rather than re-issuing.
-  if (order.status === "receipt_issued" || order.payment.status === "verified") {
-    return order;
-  }
   if (order.merchantId !== input.merchantId) {
     throw Object.assign(new Error(`Payment merchant ${input.merchantId} does not match order merchant ${order.merchantId}.`), { status: 409 });
+  }
+  // Idempotency: payment webhooks can be delivered or replayed more than once.
+  // Payment proof is intentionally not fulfillment proof and cannot issue the
+  // final receipt memory by itself.
+  if (order.status === "receipt_issued" || order.payment.status === "verified") {
+    if (order.payment.provider === input.provider && order.payment.paymentId === input.paymentId) return order;
+    throw Object.assign(new Error("Incoming payment proof conflicts with the proof already stored for this order."), {
+      status: 409,
+      code: "payment_proof_conflict",
+    });
   }
   if (centsFromUsd(input.amountUsd) < centsFromUsd(order.item.subtotalUsd)) {
     throw Object.assign(new Error(`Payment $${input.amountUsd} is below order subtotal $${order.item.subtotalUsd}.`), { status: 409 });
@@ -386,16 +518,12 @@ async function attachPaymentProofOnce(input: PaymentWebhook) {
     },
     updatedAt: new Date().toISOString(),
   };
-  updated.receipt = await issueSllrReceipt(updated);
-  updated.status = "receipt_issued";
-  updated.proofLevel = "receipt_memory_issued";
-  updated.updatedAt = new Date().toISOString();
   await saveOrder(updated);
-  // Action-loop: payment proof + receipt are first-class loop events (best-effort).
+  // Payment remains a non-terminal loop event until merchant fulfillment.
   const loopId = await loopIdForOrderResolved(updated.id);
   await recordLoopSafe(loopId, { buyerId: updated.buyerId, merchantId: updated.merchantId }, {
-    eventType: "payment", actor: "payment_provider", stateAfter: "receipt_issued", claimLevel: "paid",
-    receiptRef: input.paymentId, ids: { orderId: updated.id, paymentReceiptId: input.paymentId, receiptId: updated.receipt?.receiptHash ?? null },
+    eventType: "payment", actor: "payment_provider", stateAfter: "payment_backed", claimLevel: "paid",
+    receiptRef: input.paymentId, ids: { orderId: updated.id, paymentReceiptId: input.paymentId },
   });
   return updated;
 }

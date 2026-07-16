@@ -6,6 +6,9 @@ const jsonContent = {
   },
 };
 
+const optionalBuyerSecurity = [{ BuyerBearer: [] }, {}];
+const merchantReadSecurity = [{ MerchantVerifier: [] }, { MerchantDemo: [] }];
+
 function jsonResponse(description = "JSON response") {
   return {
     description,
@@ -267,11 +270,92 @@ export function sllrOpenApi(origin: string) {
           responses: { "200": jsonResponse("Merchant menu"), ...errorResponses() },
         },
       },
+      "/merchants/{merchantId}/offers": {
+        get: {
+          tags: ["Merchant Runtime"],
+          operationId: "listMerchantOffers",
+          summary: "List Level 1 fixed catalog offers.",
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          responses: {
+            "200": {
+              description: "Merchant offers",
+              content: { "application/json": { schema: { $ref: "#/components/schemas/MerchantOffersResponse" } } },
+            },
+            ...errorResponses(),
+          },
+        },
+      },
+      "/merchants/{merchantId}/offers/{offerId}/quote": {
+        post: {
+          tags: ["Merchant Runtime"],
+          operationId: "quoteMerchantOffer",
+          summary: "Quote a Level 1 fixed offer and optional scheduled pickup window.",
+          security: optionalBuyerSecurity,
+          parameters: [
+            { $ref: "#/components/parameters/MerchantId" },
+            { name: "offerId", in: "path", required: true, schema: { type: "string" } },
+          ],
+          requestBody: {
+            required: false,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/OfferQuoteRequestBody" } } },
+          },
+          responses: { "200": jsonResponse("Offer quote"), ...errorResponses() },
+        },
+      },
+      "/merchants/{merchantId}/capacity": {
+        get: {
+          tags: ["Merchant Runtime"],
+          operationId: "listMerchantCapacityWindows",
+          summary: "List Level 3 atomic pickup-capacity windows.",
+          parameters: [
+            { $ref: "#/components/parameters/MerchantId" },
+            { name: "productionClass", in: "query", required: true, schema: { type: "string", enum: ["espresso", "cold", "pastry", "general"] } },
+            { name: "from", in: "query", required: false, schema: { type: "string", format: "date-time" } },
+            { name: "count", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 32 } },
+          ],
+          responses: { "200": jsonResponse("Capacity windows"), ...errorResponses() },
+        },
+      },
+      "/merchants/{merchantId}/batches": {
+        get: {
+          tags: ["Merchant Runtime"],
+          operationId: "listFulfillmentBatches",
+          summary: "List Level 2 merchant fulfillment batches. Merchant authorization required.",
+          security: merchantReadSecurity,
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          responses: { "200": jsonResponse("Fulfillment batches"), "401": jsonResponse("Missing or invalid merchant authorization"), ...errorResponses() },
+        },
+        post: {
+          tags: ["Merchant Runtime"],
+          operationId: "createFulfillmentBatch",
+          summary: "Group independently paid, same-window orders into one Level 2 fulfillment batch. Merchant authorization required.",
+          parameters: [{ $ref: "#/components/parameters/MerchantId" }],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/FulfillmentBatchBody" } } },
+          },
+          responses: { "201": jsonResponse("Created fulfillment batch"), ...errorResponses() },
+        },
+      },
+      "/merchants/{merchantId}/batches/{batchId}": {
+        get: {
+          tags: ["Merchant Runtime"],
+          operationId: "getFulfillmentBatch",
+          summary: "Read a Level 2 fulfillment batch. Merchant authorization required.",
+          security: merchantReadSecurity,
+          parameters: [
+            { $ref: "#/components/parameters/MerchantId" },
+            { name: "batchId", in: "path", required: true, schema: { type: "string" } },
+          ],
+          responses: { "200": jsonResponse("Fulfillment batch"), "401": jsonResponse("Missing or invalid merchant authorization"), ...errorResponses() },
+        },
+      },
       "/merchants/{merchantId}/quote": {
         post: {
           tags: ["Merchant Runtime"],
           operationId: "quoteMerchantOrder",
           summary: "Quote a merchant-scoped buyer intent.",
+          security: optionalBuyerSecurity,
           parameters: [{ $ref: "#/components/parameters/MerchantId" }],
           requestBody: {
             required: true,
@@ -304,6 +388,7 @@ export function sllrOpenApi(origin: string) {
           tags: ["Merchant Runtime"],
           operationId: "createMerchantOrder",
           summary: "Create a merchant-scoped order.",
+          security: optionalBuyerSecurity,
           parameters: [{ $ref: "#/components/parameters/MerchantId" }],
           requestBody: {
             required: true,
@@ -320,7 +405,7 @@ export function sllrOpenApi(origin: string) {
         post: {
           tags: ["Merchant Runtime"],
           operationId: "attachMerchantPayment",
-          summary: "Attach verified or demo payment proof to an order.",
+          summary: "Attach payment proof without issuing final receipt memory.",
           parameters: [{ $ref: "#/components/parameters/MerchantId" }],
           requestBody: {
             required: true,
@@ -414,7 +499,7 @@ export function sllrOpenApi(origin: string) {
         post: {
           tags: ["Shopify"],
           operationId: "shopifyOrdersPaidWebhook",
-          summary: "Accept a verified Shopify paid-order webhook and issue receipt memory.",
+          summary: "Accept a verified Shopify paid-order webhook as payment proof without issuing final receipt memory.",
           requestBody: {
             required: true,
             content: {
@@ -521,7 +606,7 @@ export function sllrOpenApi(origin: string) {
         get: {
           tags: ["Base MCP"],
           operationId: "recordBaseCoffeeDemoPayment",
-          summary: "Record a Base MCP payment request or transaction id for demo receipt memory.",
+          summary: "Record a Base MCP payment request or transaction id as demo payment proof.",
           parameters: [
             { $ref: "#/components/parameters/OrderId" },
             {
@@ -537,7 +622,7 @@ export function sllrOpenApi(origin: string) {
               schema: { type: "string" },
             },
           ],
-          responses: { "200": jsonResponse("Receipt memory result"), ...errorResponses() },
+          responses: { "200": jsonResponse("Demo payment proof result"), ...errorResponses() },
         },
       },
       "/base-plugin/coffee/status": {
@@ -570,7 +655,7 @@ export function sllrOpenApi(origin: string) {
         post: {
           tags: ["Solana"],
           operationId: "verifySolanaPayPayment",
-          summary: "Verify or record Solana Pay proof for receipt memory.",
+          summary: "Verify or record Solana Pay payment proof without issuing final receipt memory.",
           requestBody: {
             required: true,
             content: {
@@ -590,6 +675,18 @@ export function sllrOpenApi(origin: string) {
           scheme: "bearer",
           bearerFormat: "SLL-R buyer token",
           description: "Token returned by POST /buyer/session.",
+        },
+        MerchantVerifier: {
+          type: "apiKey",
+          in: "header",
+          name: "x-sllr-merchant-payment-secret",
+          description: "Merchant verifier secret or per-merchant operator token.",
+        },
+        MerchantDemo: {
+          type: "apiKey",
+          in: "query",
+          name: "demo",
+          description: "Local-only demo=true authorization. Rejected when merchant verifier enforcement is configured.",
         },
       },
       parameters: {
@@ -640,6 +737,52 @@ export function sllrOpenApi(origin: string) {
         },
       },
       schemas: {
+        Money: {
+          type: "object",
+          required: ["amountMinor", "currency"],
+          properties: {
+            amountMinor: { type: "integer", minimum: 0, description: "Amount in the currency's smallest unit." },
+            currency: { type: "string", enum: ["USD", "TWD"] },
+          },
+        },
+        MerchantOffer: {
+          type: "object",
+          required: ["id", "merchantId", "level", "kind", "title", "lineItems", "amount", "fulfillment", "status"],
+          properties: {
+            id: { type: "string" },
+            merchantId: { type: "string" },
+            level: { type: "integer", const: 1 },
+            kind: { type: "string", const: "instant_offer" },
+            title: { type: "string" },
+            lineItems: {
+              type: "array",
+              items: {
+                type: "object",
+                required: ["itemId", "name", "quantity", "unitAmount", "subtotal"],
+                properties: {
+                  itemId: { type: "string" },
+                  name: { type: "string" },
+                  quantity: { type: "integer", minimum: 1 },
+                  unitAmount: { $ref: "#/components/schemas/Money" },
+                  subtotal: { $ref: "#/components/schemas/Money" },
+                },
+              },
+            },
+            amount: { $ref: "#/components/schemas/Money", description: "Authoritative total offer amount." },
+            fulfillment: { type: "array", items: { type: "string", enum: ["pickup", "shipping"] } },
+            status: { type: "string", const: "active" },
+          },
+        },
+        MerchantOffersResponse: {
+          type: "object",
+          required: ["product", "merchant", "offers", "next"],
+          properties: {
+            product: { type: "string" },
+            merchant: { type: "object" },
+            offers: { type: "array", items: { $ref: "#/components/schemas/MerchantOffer" } },
+            next: { type: "string" },
+          },
+        },
         QuoteRequestBody: {
           type: "object",
           required: ["userIntent"],
@@ -650,7 +793,33 @@ export function sllrOpenApi(origin: string) {
             deadlineMinutes: { type: "integer", minimum: 1 },
             deliverByDays: { type: "integer", minimum: 1 },
             quantity: { type: "integer", minimum: 1 },
+            offerId: { type: "string", description: "Fixed offer id returned by listMerchantOffers." },
+            pickupAt: { type: "string", format: "date-time", description: "Exact scheduled pickup time bound into quote consent." },
           },
+        },
+        OfferQuoteRequestBody: {
+          type: "object",
+          properties: {
+            quantity: { type: "integer", minimum: 1 },
+            maxSpendUsd: { type: "string" },
+            deadlineMinutes: { type: "integer", minimum: 1 },
+            pickupAt: { type: "string", format: "date-time", description: "Exact scheduled pickup time bound into quote consent." },
+          },
+        },
+        FulfillmentBatchBody: {
+          allOf: [
+            { $ref: "#/components/schemas/IdempotencyFields" },
+            {
+              type: "object",
+              required: ["orderIds"],
+              properties: {
+                orderIds: { type: "array", minItems: 2, maxItems: 50, uniqueItems: true, items: { type: "string" } },
+                label: { type: "string", maxLength: 100 },
+                verificationToken: { type: "string" },
+                demo: { type: "boolean" },
+              },
+            },
+          ],
         },
         PersonalShopRequestBody: {
           type: "object",
@@ -788,7 +957,7 @@ export function aiPluginManifest(origin: string) {
     name_for_human: "SLL-R",
     name_for_model: "sllr_agent_commerce",
     description_for_human: "Seller-side agent runtime for merchant quote, order, payment proof, and receipt memory.",
-    description_for_model: "Use SLL-R to discover merchants, quote orders, create orders, prepare Base USDC payment calldata, and read receipt memory. Always ask the user before initiating any payment action.",
+    description_for_model: "Use SLL-R to discover merchant offers, quote orders, read pickup capacity, create independently authorized orders, prepare payment, track fulfillment, and read final receipt memory. Always ask the user before payment; never treat payment as fulfillment.",
     auth: { type: "none" },
     api: {
       type: "openapi",

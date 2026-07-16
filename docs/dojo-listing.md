@@ -29,8 +29,8 @@ become reachable by buyer agents.
 ## Promise
 
 SLL-R gives a merchant an installable seller operating agent. Buyer agents can
-call SLL-R to discover capabilities, request quotes, create orders, and receive
-verified receipt memory after payment or fulfillment proof.
+call SLL-R to discover capabilities, request quotes, create orders, attach
+payment proof, and receive verified receipt memory after fulfillment proof.
 
 ## Why AgentShack
 
@@ -83,7 +83,7 @@ webhook signatures plus Query Order responses.
 - An AgentShack worker can read the manifest and understand how to call SLL-R.
 - A merchant can install a static catalog profile without editing core runtime
   code.
-- A buyer agent can run quote -> order -> payment proof -> receipt memory.
+- A buyer agent can run quote -> order -> payment proof -> merchant fulfillment -> receipt memory.
 - Stubbed adapters are clearly marked and do not pretend to be live
   integrations.
 - Binance Pay receipts only upgrade after SLL-R confirms the order through Query

@@ -24,7 +24,9 @@ const CONSENT_KEY = (id: string) => `sllr:consent:${id}`;
 // The exact phrase a channel can require for explicit confirmation.
 export function expectedConfirmation(quote: StoredQuote): string {
   const unitPrice = formatUsd(centsFromUsd(quote.amountUsd) / quote.quantity);
-  return `CONFIRM ${quote.quantity} x ${quote.itemName} at ${quote.merchantName}, $${unitPrice} each, $${quote.amountUsd} total`;
+  const pickup = quote.pickupAt ? `, pickup ${quote.pickupAt}` : "";
+  const offer = quote.offerId ? `, offer ${quote.offerId}` : "";
+  return `CONFIRM ${quote.quantity} x ${quote.itemName} at ${quote.merchantName}, $${unitPrice} each, $${quote.amountUsd} total${offer}${pickup}`;
 }
 
 function normalize(s: string): string {

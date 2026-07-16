@@ -5,7 +5,8 @@ Use this runbook to record a Base Agent Quest demo for SLL-R.
 ## Goal
 
 Show a buyer agent ordering Noun Coffee through SLL-R, preparing a Base USDC
-transaction, and turning payment proof into SLL-R receipt memory.
+transaction, attaching payment proof, and issuing SLL-R receipt memory only
+after merchant fulfillment.
 
 ## Required Setup
 
@@ -40,7 +41,8 @@ Buy me Dalat Highlands coffee beans from Noun Coffee under $40.
 Use SLL-R to quote and create the order. Then prepare a Base USDC payment.
 Before payment, show me the merchant, item, amount, recipient, and calldata summary.
 Only call send_calls after I approve.
-After approval, record the payment proof in SLL-R and show the receipt memory.
+After approval, record the payment proof in SLL-R. Then record merchant fulfillment
+and show the final receipt memory.
 ```
 
 ## Assistant Flow
@@ -96,7 +98,10 @@ After approval, record the payment proof in SLL-R and show the receipt memory.
    GET <SLLR_URL>/base-plugin/coffee/record-demo-payment?orderId=<ORDER_ID>&paymentId=<TX_OR_REQUEST_ID>
    ```
 
-8. Show receipt memory:
+8. Confirm the order is `payment_backed`, then record merchant fulfillment through
+   the authenticated merchant receipt/fulfillment tool.
+
+9. Show final receipt memory:
 
    ```text
    GET <SLLR_URL>/base-plugin/coffee/status?orderId=<ORDER_ID>
@@ -109,8 +114,8 @@ Keep the video under 3 minutes:
 1. Natural language request.
 2. Quote/order response.
 3. Base MCP approval screen.
-4. Receipt memory response.
+4. Payment-backed state, merchant fulfillment, and final receipt memory response.
 
 Production note: `record-demo-payment` is a demo proof endpoint. Production must
-verify the Base transaction hash, amount, recipient, and token before issuing
-receipt memory.
+verify the Base transaction hash, amount, recipient, and token. Final receipt
+memory still requires merchant fulfillment or customer claim.

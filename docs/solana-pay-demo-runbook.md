@@ -12,8 +12,8 @@ GET /solana-pay/merchants
 
 ## Goal
 
-Show a buyer agent creating an order, preparing Solana payment, and turning
-payment proof into SLL-R receipt memory.
+Show a buyer agent creating an order, preparing Solana payment, attaching
+payment proof, and receiving SLL-R receipt memory after merchant fulfillment.
 
 ```text
 agent intent
@@ -21,6 +21,7 @@ agent intent
 -> SLL-R order
 -> Solana Pay URL or Helio checkout handoff
 -> payment proof
+-> merchant fulfillment or customer claim
 -> SLL-R receipt memory
 ```
 
@@ -32,6 +33,7 @@ For Solana Pay URL demos:
 SLLR_SOLANA_PAY_RECIPIENT=<Solana wallet you control>
 SLLR_SOLANA_PAY_SPL_TOKEN=<optional SPL mint>
 SLLR_SOLANA_PAY_VERIFY_SECRET=<random server-side verifier secret>
+SLLR_MERCHANT_PAYMENT_VERIFY_SECRET=<merchant fulfillment verifier secret>
 ```
 
 For Helio checkout handoff demos:
@@ -51,7 +53,8 @@ endpoint as production payment verification.
 Buy me a SOLYD black MagSafe iPhone 16 case under $100.
 Use SLL-R to quote, create the order, prepare Solana Pay, and show the merchant,
 item, amount, Solana recipient, and reference before payment.
-After payment proof is attached, show the SLL-R receipt memory.
+After payment proof is attached, show the payment-backed state. Then record
+merchant fulfillment and show the final SLL-R receipt memory.
 ```
 
 For Raposa beans:
@@ -117,7 +120,7 @@ Buy me Raposa coffee beans under $20 this week using Solana Pay.
      }'
    ```
 
-6. Attach Helio webhook proof:
+6. Alternatively, attach Helio webhook proof:
 
    ```bash
    curl -X POST "$SLLR_URL/webhooks/helio" \
@@ -131,6 +134,26 @@ Buy me Raposa coffee beans under $20 this week using Solana Pay.
        "reference": "<REFERENCE_FROM_PREPARE_PAYMENT>"
      }'
    ```
+
+7. Record merchant fulfillment and issue final receipt memory:
+
+   ```bash
+   curl -X POST "$SLLR_URL/merchants/solyd/receipt" \
+     -H "content-type: application/json" \
+     -H "x-sllr-merchant-payment-secret: $SLLR_MERCHANT_PAYMENT_VERIFY_SECRET" \
+     -d '{
+       "orderId": "<ORDER_ID>",
+       "actor": "solyd-fulfillment",
+       "note": "Merchant confirmed shipment handoff."
+     }'
+   ```
+
+   After step 5 or 6, the order must first show `payment_backed` with no final
+   receipt. After this fulfillment request, expect `status: receipt_issued`,
+   `proofLevel: receipt_memory_issued`, and a non-null `order.receipt` containing
+   the final SLL-R receipt-memory identifiers and claim URL. Pickup merchants may
+   instead mark the order ready and call `POST /orders/<ORDER_ID>/claim` with the
+   same verifier header after customer handoff.
 
 ## Production Notes
 

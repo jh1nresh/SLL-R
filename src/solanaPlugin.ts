@@ -5,7 +5,8 @@ SLL-R is the merchant order runtime. Solana Pay is one payment adapter.
 
 Use this plugin when an agent needs to quote a merchant order, create the order,
 prepare a Solana Pay URL or Helio checkout handoff, then attach verified payment
-proof before receipt memory.
+proof. Merchant fulfillment or customer claim is still required before final
+receipt memory.
 
 **SLL-R API:** ${origin}
 **Payment rail:** Solana Pay / Helio
@@ -61,7 +62,7 @@ POST ${origin}/solana-pay/verify-payment
 \`\`\`
 
 Production verification must validate reference, token, recipient, amount, and
-signature or webhook source before issuing receipt memory.
+signature or webhook source. Payment proof alone must not issue final receipt memory.
 
 ## Safety Rules
 

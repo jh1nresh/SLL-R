@@ -9,7 +9,8 @@ import { centsFromUsd } from "./money.js";
 import { recordLoopSafe, loopIdForQuote, loopIdForOrder } from "./actionLoop.js";
 import { actionKeyFrom, mutationResultForOrder, withIdempotentMutation } from "./mutations.js";
 import { isItemAvailable } from "./availability.js";
-import type { MerchantProfile, OrderRequest, PaymentRail, QuoteRequest } from "../types.js";
+import type { CapacityWindowSnapshot, MerchantProfile, OrderRequest, PaymentRail, ProductionClass, QuoteRequest } from "../types.js";
+import { CAPACITY_BY_PRODUCTION_CLASS, capacityWindowAt, listCapacityWindows, parsePickupAt, productionClassFor } from "./capacity.js";
 
 function requireMerchant(merchantId: string) {
   const merchant = merchantForId(merchantId);
@@ -84,7 +85,10 @@ export function merchantCapabilityPacket(merchant: MerchantProfile) {
     capabilities: {
       catalog_search: true,
       live_quote: true,
+      fixed_offers: true,
       create_order: true,
+      scheduled_pickup_capacity: merchant.fulfillment.includes("pickup"),
+      fulfillment_batches: merchant.fulfillment.includes("pickup"),
       stripe_checkout: rails.includes("stripe"),
       line_pay: rails.includes("line_pay"),
       counter_pay: rails.includes("counter"),
@@ -99,7 +103,6 @@ export function merchantCapabilityPacket(merchant: MerchantProfile) {
     unsupported: [
       "live delivery ETA",
       "inventory guarantee",
-      "reservation booking",
       ...(rails.includes("stripe") ? [] : ["card checkout"]),
     ],
   };
@@ -113,6 +116,8 @@ export function getMerchant(merchantId: string) {
     ...merchantCapabilityPacket(merchant),
     links: {
       menu: `/merchants/${merchant.id}/menu`,
+      offers: `/merchants/${merchant.id}/offers`,
+      capacity: `/merchants/${merchant.id}/capacity`,
       quote: `/merchants/${merchant.id}/quote`,
       orders: `/merchants/${merchant.id}/orders`,
       payment: `/merchants/${merchant.id}/payment`,
@@ -131,6 +136,27 @@ export function getMerchantMenu(merchantId: string) {
   };
 }
 
+export async function getMerchantCapacity(merchantId: string, payload: Record<string, unknown>) {
+  const merchant = requireMerchant(merchantId);
+  const productionClass = (typeof payload.productionClass === "string" ? payload.productionClass : "general") as ProductionClass;
+  if (!(["espresso", "cold", "pastry", "general"] as string[]).includes(productionClass)) {
+    throw Object.assign(new Error("productionClass must be espresso, cold, pastry, or general."), { status: 400 });
+  }
+  const from = typeof payload.from === "string" && payload.from
+    ? new Date(payload.from)
+    : new Date();
+  if (!Number.isFinite(from.getTime())) throw Object.assign(new Error("from must be a valid ISO date-time."), { status: 400 });
+  const count = payload.count === undefined ? 8 : Number(payload.count);
+  if (!Number.isInteger(count) || count < 1 || count > 32) {
+    throw Object.assign(new Error("count must be an integer between 1 and 32."), { status: 400 });
+  }
+  return {
+    product: "SLL-R Level 3 capacity windows",
+    merchant: { id: merchant.id, name: merchant.name },
+    windows: await listCapacityWindows(merchant.id, productionClass, from, count),
+  };
+}
+
 // Legacy anonymous channels can keep quote→order flows working. Buyer-authenticated
 // agents always require quote-bound consent; the env flag additionally enforces it
 // for anonymous channels.
@@ -140,22 +166,64 @@ function consentRequired(): boolean {
 
 // The queue-aware wait for the quoted item — same formula the order promise
 // uses, so the quote can never undersell the real wait (pilot trust bug).
-async function queueAwareEta(merchant: MerchantProfile, itemId: string | undefined): Promise<number | null> {
+async function queueAwareEta(merchant: MerchantProfile, itemId: string | undefined, quantity = 1): Promise<number | null> {
   const item = itemId ? merchant.catalog.find((i) => i.id === itemId) : undefined;
-  return item ? estimatedPickupWaitMinutes(merchant.id, item) : null;
+  return item ? estimatedPickupWaitMinutes(merchant.id, item, quantity) : null;
 }
 
 export async function quoteMerchantOrder(merchantId: string, payload: Record<string, unknown>) {
   const merchant = requireMerchant(merchantId);
   const quote = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
+  const requestedOfferId = typeof payload.offerId === "string" ? payload.offerId : null;
+  if (requestedOfferId && quote.item && requestedOfferId !== `catalog:${quote.item.id}`) {
+    throw Object.assign(new Error(`Offer ${requestedOfferId} does not match item ${quote.item.id}. Request a fresh offer quote.`), {
+      status: 409,
+      code: "offer_item_mismatch",
+    });
+  }
   if (quote.feasible && quote.item && !(await isItemAvailable(merchant.id, quote.item.id))) {
     quote.feasible = false;
     quote.decision = "negotiate_or_ask_user";
     quote.reasons = [`${quote.item.name} is currently unavailable at ${merchant.name}.`];
   }
+  const quotedCatalogItem = quote.item ? merchant.catalog.find((item) => item.id === quote.item?.id) : null;
+  if (
+    quote.feasible
+    && quote.item
+    && quotedCatalogItem?.fulfillment.includes("pickup")
+    && quote.item.quantity > CAPACITY_BY_PRODUCTION_CLASS[productionClassFor(quotedCatalogItem)]
+  ) {
+    const limit = CAPACITY_BY_PRODUCTION_CLASS[productionClassFor(quotedCatalogItem)];
+    quote.feasible = false;
+    quote.decision = "negotiate_or_ask_user";
+    quote.reasons = [`A single pickup window supports at most ${limit} units of ${quote.item.name}.`];
+  }
+  let pickupAt: string | null = null;
+  let capacityWindow: CapacityWindowSnapshot | null = null;
+  if (quote.feasible && quote.item && payload.pickupAt !== undefined) {
+    const requested = parsePickupAt(payload.pickupAt);
+    pickupAt = requested.toISOString();
+    const catalogItem = quotedCatalogItem;
+    if (!catalogItem || !catalogItem.fulfillment.includes("pickup")) {
+      quote.feasible = false;
+      quote.decision = "negotiate_or_ask_user";
+      quote.reasons = [`${quote.item.name} cannot be scheduled for pickup.`];
+    } else {
+      capacityWindow = await capacityWindowAt(merchant.id, productionClassFor(catalogItem), requested);
+      if (capacityWindow.available < quote.item.quantity) {
+        quote.feasible = false;
+        quote.decision = "negotiate_or_ask_user";
+        quote.reasons = [`The ${capacityWindow.startsAt} pickup window has only ${capacityWindow.available} units available.`];
+      }
+    }
+  }
   // Honest ETA: replace the prep-only estimate with the queue-aware wait so the
   // quote and the created order's promise always come from one formula.
-  let etaMinutes = quote.feasible && quote.item ? await queueAwareEta(merchant, quote.item.id) : null;
+  let etaMinutes = quote.feasible && quote.item
+    ? pickupAt
+      ? Math.max(0, Math.ceil((new Date(pickupAt).getTime() - Date.now()) / 60_000))
+      : await queueAwareEta(merchant, quote.item.id, quote.item.quantity)
+    : null;
   if (etaMinutes !== null) quote.estimate.readyInMinutes = etaMinutes;
   if (quote.feasible && quote.item && !(await isItemAvailable(merchant.id, quote.item.id))) {
     quote.feasible = false;
@@ -166,7 +234,13 @@ export async function quoteMerchantOrder(merchantId: string, payload: Record<str
   // Persist feasible quotes so consent + the order can bind to a quoteId.
   const buyerId = typeof payload.buyerId === "string" ? payload.buyerId : null;
   const intent = typeof payload.userIntent === "string" ? payload.userIntent : "";
-  const stored = await persistQuote(merchantId, quote, buyerId, intent, etaMinutes);
+  const offerId = requestedOfferId;
+  const stored = await persistQuote(merchantId, quote, buyerId, intent, {
+    etaMinutes,
+    offerId,
+    pickupAt,
+    capacityWindow,
+  });
   if (stored) {
     await recordLoopSafe(loopIdForQuote(stored.id), { buyerId, merchantId, intent }, {
       eventType: "quote", actor: "sllr", stateAfter: "quote_created", claimLevel: "quote_only",
@@ -181,6 +255,7 @@ export async function quoteMerchantOrder(merchantId: string, payload: Record<str
         quoteId: stored.id,
         amountUsd: stored.amountUsd,
         etaMinutes: stored.etaMinutes,
+        capacityWindow: stored.capacityWindow,
         expiresAt: stored.expiresAt,
         confirmationText: expectedConfirmation(stored),
         // Echo the order-relevant request params so a client can turn a pure
@@ -192,6 +267,8 @@ export async function quoteMerchantOrder(merchantId: string, payload: Record<str
           ...(typeof payload.maxSpendUsd === "string" ? { maxSpendUsd: payload.maxSpendUsd } : {}),
           ...(typeof payload.deliverByDays === "number" ? { deliverByDays: payload.deliverByDays } : {}),
           ...(typeof payload.quantity === "number" ? { quantity: payload.quantity } : {}),
+          ...(offerId ? { offerId } : {}),
+          ...(pickupAt ? { pickupAt } : {}),
         },
       }
       : {}),
@@ -230,6 +307,13 @@ async function createMerchantOrderOnce(merchantId: string, payload: Record<strin
   const seedIntent = typeof payload.userIntent === "string" ? payload.userIntent : "";
   const payloadQuoteId = String(payload.quoteId || "");
   const seed = { buyerId: seedBuyerId, merchantId, intent: seedIntent };
+  if ((payload.offerId !== undefined || payload.pickupAt !== undefined) && seedBuyerId === null) {
+    throw Object.assign(new Error("A buyer session is required to purchase an offer or hold a scheduled pickup window."), {
+      status: 401,
+      code: "buyer_session_required",
+      requiredNextStep: "create_buyer_session",
+    });
+  }
   // Opt-in policy gate: no quote-bound consent → no order. Blocks are first-class
   // loop events (the spec's policy_block_receipt).
   if (consentRequired() || seedBuyerId !== null) {
@@ -250,6 +334,8 @@ async function createMerchantOrderOnce(merchantId: string, payload: Record<strin
     // The order must remain the exact merchant, item, quantity, and amount the
     // buyer confirmed. Price-only comparison is insufficient for same-price items.
     const fresh = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
+    const payloadPickupAt = payload.pickupAt === undefined ? null : parsePickupAt(payload.pickupAt).toISOString();
+    const payloadOfferId = typeof payload.offerId === "string" ? payload.offerId : null;
     if (
       !fresh.feasible
       || !fresh.item
@@ -257,6 +343,8 @@ async function createMerchantOrderOnce(merchantId: string, payload: Record<strin
       || fresh.item.id !== boundQuote.itemId
       || fresh.item.quantity !== boundQuote.quantity
       || centsFromUsd(fresh.item.subtotalUsd) !== centsFromUsd(consent.amountUsd)
+      || (boundQuote.offerId ?? null) !== payloadOfferId
+      || (boundQuote.pickupAt ?? null) !== payloadPickupAt
     ) {
       await recordLoopSafe(loopIdForQuote(payloadQuoteId), seed, {
         eventType: "policy_block", actor: "client_agent",
@@ -273,7 +361,7 @@ async function createMerchantOrderOnce(merchantId: string, payload: Record<strin
   if (process.env.SLLR_ETA_RECONFIRM === "true" && payload.acceptDelay !== true) {
     const merchant = requireMerchant(merchantId);
     const probe = quoteOrder(bodyWithMerchant(merchantId, payload) as QuoteRequest);
-    const waitNow = probe.feasible && probe.item ? await queueAwareEta(merchant, probe.item.id) : null;
+    const waitNow = probe.feasible && probe.item ? await queueAwareEta(merchant, probe.item.id, probe.item.quantity) : null;
     if (waitNow !== null) {
       const deadline = typeof payload.deadlineMinutes === "number" ? payload.deadlineMinutes : null;
       const quotedEta = payloadQuoteId ? (await getQuote(payloadQuoteId))?.etaMinutes ?? null : null;
@@ -304,7 +392,7 @@ async function createMerchantOrderOnce(merchantId: string, payload: Record<strin
     order: result.order,
     // "SLL-R asks": a hint the buyer's channel can surface to offer recurring.
     suggestRecurring: recurringSuggestion(result.order),
-    next: "Attach payment or fulfillment proof to issue SLL-R receipt memory.",
+    next: "Attach payment proof, then record merchant fulfillment before issuing final receipt memory.",
   };
 }
 
@@ -367,6 +455,7 @@ export async function attachMerchantPayment(merchantId: string, headers: Record<
     status: updated.status,
     proofLevel: updated.proofLevel,
     order: updated,
+    next: "Payment is verified. Merchant fulfillment or customer claim is still required for final receipt memory.",
     ...(mutation ? { mutation } : {}),
   };
 }

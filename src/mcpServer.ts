@@ -2,6 +2,7 @@ import {
   attachMerchantPayment,
   createMerchantOrder,
   getMerchant,
+  getMerchantCapacity,
   getMerchantMenu,
   issueMerchantReceipt,
   listMerchantOrders,
@@ -22,6 +23,8 @@ import { nearbyMerchants } from "./core/nearby.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { createDemoMerchant } from "./adapters/shopifyCatalog.js";
 import { shopForBuyer } from "./core/personalShop.js";
+import { listMerchantOffers, quoteMerchantOffer } from "./core/offers.js";
+import { createFulfillmentBatch, getFulfillmentBatch, listFulfillmentBatches } from "./core/batches.js";
 
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
@@ -31,7 +34,7 @@ const SERVER_INSTRUCTIONS = [
   "Never submit or record a payment without explicit user approval.",
   "Before asking the user to approve payment, show merchant, item, amount, payment rail, and recipient or checkout URL.",
   "Most merchants accept non-crypto rails first: counter pay at pickup or Shopify checkout handoff. Crypto rails (base_usdc, solana_pay, helio) are optional adapters.",
-  "Receipt memory must only be issued after payment proof or merchant fulfillment proof, never from order intent alone.",
+  "Payment proof is not fulfillment proof. Final receipt memory must only be issued after merchant fulfillment or customer claim.",
   "attach_payment_proof with demo=true is local-demo proof only. Production requires the merchant verifier secret.",
 ].join("\n");
 
@@ -64,6 +67,8 @@ const quoteProperties = {
   deadlineMinutes: { type: "number", description: "Pickup deadline in minutes for pickup merchants." },
   deliverByDays: { type: "number", description: "Shipping deadline in days for shipping merchants." },
   quantity: { type: "number", description: "Item quantity. Defaults to 1." },
+  offerId: { type: "string", description: "Optional fixed offer id from list_offers. It must match the selected catalog item." },
+  pickupAt: { type: "string", format: "date-time", description: "Optional exact scheduled pickup time. SLL-R binds it into quote consent and reserves the matching capacity window at order creation." },
 } as const;
 
 const idempotencyProperties = {
@@ -107,6 +112,16 @@ const tools: ToolDefinition[] = [
     handler: (args) => getMerchantMenu(requireString(args, "merchantId")),
   },
   {
+    name: "list_offers",
+    description: "List Level 1 fixed merchant offers. Each offer pins one real catalog item and can be quoted without the agent inventing a SKU or price.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId"],
+      properties: { merchantId: quoteProperties.merchantId },
+    },
+    handler: (args) => listMerchantOffers(requireString(args, "merchantId")),
+  },
+  {
     name: "shop_for_me",
     description: "Personal-agent entry point: compare several merchants against the buyer's intent, budget, location, and pickup or shipping deadline. Returns persisted merchant-backed quotes only; it never creates consent, orders, payments, fulfillment, or receipts. Requires a buyer session.",
     inputSchema: {
@@ -118,6 +133,8 @@ const tools: ToolDefinition[] = [
         deadlineMinutes: quoteProperties.deadlineMinutes,
         deliverByDays: quoteProperties.deliverByDays,
         quantity: quoteProperties.quantity,
+        offerId: quoteProperties.offerId,
+        pickupAt: quoteProperties.pickupAt,
         merchantIds: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string" }, description: "Optional merchant ids to compare. Otherwise SLL-R uses nearby or configured merchants." },
         category: { type: "string", description: "Optional merchant category filter, for example cafe." },
         lat: { type: "number", minimum: -90, maximum: 90, description: "Optional buyer latitude. Supply with lng." },
@@ -146,6 +163,27 @@ const tools: ToolDefinition[] = [
       quoteMerchantOrder(requireString(args, "merchantId"), buyerId ? { ...args, buyerId } : args),
   },
   {
+    name: "quote_offer",
+    description: "Quote a Level 1 fixed offer, optionally for an exact pickupAt window. Returns quote-bound confirmation text; it never creates an order.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "offerId"],
+      properties: {
+        merchantId: quoteProperties.merchantId,
+        offerId: { type: "string", description: "Offer id from list_offers." },
+        quantity: quoteProperties.quantity,
+        maxSpendUsd: quoteProperties.maxSpendUsd,
+        deadlineMinutes: quoteProperties.deadlineMinutes,
+        pickupAt: quoteProperties.pickupAt,
+      },
+    },
+    handler: (args, _origin, buyerId) => quoteMerchantOffer(
+      requireString(args, "merchantId"),
+      requireString(args, "offerId"),
+      buyerId ? { ...args, buyerId } : args,
+    ),
+  },
+  {
     name: "recommend_order",
     description: "Recommend what to order under live constraints — time, budget, and taste tags — over the merchant's live menu/availability. Returns picks (fastest first, with ETA + price) AND the rejected alternatives with reasons (sold out / too slow / over budget / wrong tag). Use for 'what can I get in N minutes' asks. No hallucinated items or ETAs.",
     inputSchema: {
@@ -170,7 +208,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "create_verified_review",
-    description: "Create a verified review for a completed order — only allowed once the order carries proof (payment / merchant-ready / pickup-claim). Records the agent's decision + promised-vs-actual ETA + the buyer's feedback; feeds taste memory + merchant ETA reliability. Requires a buyer session.",
+    description: "Create a verified review for a completed order — only allowed after merchant fulfillment or customer claim produced final receipt memory. Records the agent's decision + promised-vs-actual ETA + the buyer's feedback. Requires a buyer session.",
     inputSchema: {
       type: "object",
       required: ["orderId"],
@@ -427,6 +465,79 @@ const tools: ToolDefinition[] = [
     },
   },
   {
+    name: "list_capacity_windows",
+    description: "List Level 3 atomic pickup-capacity windows for one merchant and production class before quoting a scheduled order.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "productionClass"],
+      properties: {
+        merchantId: quoteProperties.merchantId,
+        productionClass: { type: "string", enum: ["espresso", "cold", "pastry", "general"] },
+        from: { type: "string", format: "date-time" },
+        count: { type: "integer", minimum: 1, maximum: 32 },
+      },
+    },
+    handler: (args) => getMerchantCapacity(requireString(args, "merchantId"), args),
+  },
+  {
+    name: "create_fulfillment_batch",
+    description: "Create a Level 2 merchant fulfillment batch from 2-50 independent orders. Every buyer keeps separate quote, consent, and payment identity. Orders must share one pickup window. Merchant authorization required.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "orderIds"],
+      properties: {
+        merchantId: quoteProperties.merchantId,
+        orderIds: { type: "array", minItems: 2, maxItems: 50, uniqueItems: true, items: { type: "string" } },
+        label: { type: "string", maxLength: 100 },
+        verificationToken: { type: "string", description: "Merchant verifier secret or per-merchant token." },
+        demo: { type: "boolean", description: "Local demo authorization only when no verifier secret is configured." },
+        ...idempotencyProperties,
+      },
+    },
+    handler: async (args) => {
+      const merchantId = requireString(args, "merchantId");
+      await requireMerchantAuth({}, args, merchantId);
+      return createFulfillmentBatch(merchantId, args);
+    },
+  },
+  {
+    name: "list_fulfillment_batches",
+    description: "List Level 2 fulfillment batches for a merchant while preserving each child order's independent consent, payment, and receipt state. Merchant authorization required.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId"],
+      properties: {
+        merchantId: quoteProperties.merchantId,
+        verificationToken: { type: "string" },
+        demo: { type: "boolean" },
+      },
+    },
+    handler: async (args) => {
+      const merchantId = requireString(args, "merchantId");
+      await requireMerchantAuth({}, args, merchantId);
+      return listFulfillmentBatches(merchantId);
+    },
+  },
+  {
+    name: "get_fulfillment_batch",
+    description: "Read the current aggregate state of a Level 2 fulfillment batch while preserving each child order's payment and fulfillment state. Merchant authorization required.",
+    inputSchema: {
+      type: "object",
+      required: ["merchantId", "batchId"],
+      properties: {
+        merchantId: quoteProperties.merchantId,
+        batchId: { type: "string" },
+        verificationToken: { type: "string" },
+        demo: { type: "boolean" },
+      },
+    },
+    handler: async (args) => {
+      const merchantId = requireString(args, "merchantId");
+      await requireMerchantAuth({}, args, merchantId);
+      return getFulfillmentBatch(requireString(args, "batchId"), merchantId);
+    },
+  },
+  {
     name: "merchant_mark_ready",
     description: "Agent POS: mark an accepted order ready for pickup (-> ready). Requires the merchant verifier secret (verificationToken) or demo:true.",
     inputSchema: {
@@ -565,7 +676,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "attach_payment_proof",
-    description: "Attach payment proof to an order. Production callers must supply the merchant verifier secret as verificationToken; demo=true is accepted only for local demos without a configured secret. Never call this without explicit user approval.",
+    description: "Attach payment proof to an order. This moves the payment state only; final receipt memory still requires merchant fulfillment or customer claim. Never call this without explicit user approval.",
     inputSchema: {
       type: "object",
       required: ["merchantId", "orderId", "provider", "paymentId"],
@@ -588,7 +699,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "create_demo_merchant",
-    description: "Ingest a public Shopify storefront's products.json into a runtime demo merchant so it can be quoted and ordered immediately. Demo merchants get counter + Shopify checkout rails and reset on server restart. Use this to demo SLL-R against a real store's actual catalog.",
+    description: "Ingest a public Shopify storefront's products.json into a runtime demo merchant so it can be quoted and ordered immediately. Demo merchants get counter + Shopify checkout rails and persist when SLL-R uses a durable store. Use this to demo SLL-R against a real store's actual catalog.",
     inputSchema: {
       type: "object",
       required: ["storeDomain"],
@@ -606,7 +717,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "issue_receipt",
-    description: "Issue receipt memory for an order after merchant fulfillment proof. This is a merchant-side action gated by the merchant verifier secret: when the server has SLLR_MERCHANT_PAYMENT_VERIFY_SECRET configured, the caller must supply it as verificationToken; demo=true is only accepted when no secret is configured. Buyer agents should obtain receipts by paying (attach_payment_proof), which issues receipt memory automatically. Never issue receipt memory from order intent alone.",
+    description: "Issue final receipt memory after merchant fulfillment proof. This is a merchant-side action gated by the verifier secret or per-merchant token. Payment proof alone never issues the final receipt.",
     inputSchema: {
       type: "object",
       required: ["merchantId", "orderId"],

@@ -12,7 +12,7 @@ export function sllrMcpManifest(origin: string) {
     safety: {
       paymentApproval: "Always show payment rail, merchant, amount, recipient or checkout URL, and proof requirements before asking the user to approve payment.",
       noAutonomousPayment: true,
-      proofBeforeReceipt: "Receipt memory must only be issued after payment proof or merchant fulfillment proof.",
+      proofBeforeReceipt: "Final receipt memory requires merchant fulfillment or customer claim. Payment proof alone only moves the order to payment_backed.",
     },
     tools: [
       {
@@ -34,6 +34,24 @@ export function sllrMcpManifest(origin: string) {
         description: "Read normalized catalog and menu sections for a merchant.",
       },
       {
+        name: "list_offers",
+        method: "GET",
+        path: "/merchants/{merchantId}/offers",
+        description: "List Level 1 fixed merchant-backed offers. Prices use amount.amountMinor + currency and currency-neutral line-item Money fields before entering quote and consent.",
+      },
+      {
+        name: "quote_offer",
+        method: "POST",
+        path: "/merchants/{merchantId}/offers/{offerId}/quote",
+        description: "Quote one exact Level 1 offer, optionally against a requested pickup time.",
+      },
+      {
+        name: "list_capacity_windows",
+        method: "GET",
+        path: "/merchants/{merchantId}/capacity",
+        description: "Read Level 3 pickup capacity by 15-minute production window. Availability is held only by buyer-authenticated, consent-bound order creation.",
+      },
+      {
         name: "shop_for_me",
         method: "POST",
         path: "/buyer/shop",
@@ -47,6 +65,8 @@ export function sllrMcpManifest(origin: string) {
             deadlineMinutes: { type: "number" },
             deliverByDays: { type: "number" },
             quantity: { type: "number" },
+            offerId: { type: "string" },
+            pickupAt: { type: "string", format: "date-time" },
             merchantIds: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string" } },
             category: { type: "string" },
             lat: { type: "number" },
@@ -108,6 +128,8 @@ export function sllrMcpManifest(origin: string) {
             agentId: { type: "string" },
             customerLabel: { type: "string" },
             paymentMode: { type: "string", enum: ["counter", "checkout", "crypto"] },
+            offerId: { type: "string" },
+            pickupAt: { type: "string", format: "date-time" },
           },
         },
       },
@@ -116,6 +138,24 @@ export function sllrMcpManifest(origin: string) {
         method: "GET",
         path: "/merchants/{merchantId}/orders",
         description: "List SLL-R orders for a merchant, optionally filtered by status.",
+      },
+      {
+        name: "create_fulfillment_batch",
+        method: "POST",
+        path: "/merchants/{merchantId}/batches",
+        description: "Group independently paid, same-window orders into one Level 2 merchant fulfillment batch. Each child retains its own consent, payment, and receipt identity.",
+      },
+      {
+        name: "list_fulfillment_batches",
+        method: "GET",
+        path: "/merchants/{merchantId}/batches",
+        description: "List Level 2 fulfillment batches for an authorized merchant operator.",
+      },
+      {
+        name: "get_fulfillment_batch",
+        method: "GET",
+        path: "/merchants/{merchantId}/batches/{batchId}",
+        description: "Read one Level 2 batch and its independently settled child orders.",
       },
       {
         name: "get_payment_options",
@@ -135,13 +175,13 @@ export function sllrMcpManifest(origin: string) {
         name: "attach_payment_proof",
         method: "POST",
         path: "/merchants/{merchantId}/payment",
-        description: "Attach verified or demo payment proof to an order. Production callers must use a configured verifier secret or webhook signature path.",
+        description: "Attach verified or demo payment proof to an order. This never proves fulfillment or issues final receipt memory.",
       },
       {
         name: "issue_receipt",
         method: "POST",
         path: "/merchants/{merchantId}/receipt",
-        description: "Issue receipt memory for an order after payment or fulfillment proof. Requires the merchant verifier secret (x-sllr-merchant-payment-secret header or verificationToken); demo=true is only accepted when no secret is configured.",
+        description: "Record merchant fulfillment and issue final receipt memory. Requires the merchant verifier secret (x-sllr-merchant-payment-secret header or verificationToken); demo=true is only accepted when no secret is configured.",
       },
       {
         name: "check_order_status",

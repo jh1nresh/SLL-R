@@ -16,6 +16,8 @@ export interface SllrStore {
   getJson<T>(key: string): Promise<T | null>;
   setJson(key: string, value: unknown): Promise<void>;
   setJsonIfAbsent(key: string, value: unknown): Promise<boolean>;
+  setJsonIfFieldEquals(key: string, field: string, expected: string, value: unknown): Promise<boolean>;
+  deleteJson(key: string): Promise<void>;
   addToIndex(indexKey: string, member: string): Promise<void>;
   indexMembers(indexKey: string): Promise<string[]>;
 }
@@ -37,6 +39,19 @@ class MemoryStore implements SllrStore {
     if (this.values.has(key)) return false;
     this.values.set(key, JSON.stringify(value));
     return true;
+  }
+
+  async setJsonIfFieldEquals(key: string, field: string, expected: string, value: unknown): Promise<boolean> {
+    const raw = this.values.get(key);
+    if (raw === undefined) return false;
+    const current = JSON.parse(raw) as Record<string, unknown>;
+    if (current[field] !== expected) return false;
+    this.values.set(key, JSON.stringify(value));
+    return true;
+  }
+
+  async deleteJson(key: string): Promise<void> {
+    this.values.delete(key);
   }
 
   async addToIndex(indexKey: string, member: string): Promise<void> {
@@ -99,6 +114,22 @@ class RedisRestStore implements SllrStore {
 
   async setJsonIfAbsent(key: string, value: unknown): Promise<boolean> {
     return (await this.command<string | null>(["SET", key, JSON.stringify(value), "NX"])) === "OK";
+  }
+
+  async setJsonIfFieldEquals(key: string, field: string, expected: string, value: unknown): Promise<boolean> {
+    const script = [
+      "local raw = redis.call('GET', KEYS[1])",
+      "if not raw then return 0 end",
+      "local decoded = cjson.decode(raw)",
+      "if decoded[ARGV[1]] ~= ARGV[2] then return 0 end",
+      "redis.call('SET', KEYS[1], ARGV[3])",
+      "return 1",
+    ].join("\n");
+    return (await this.command<number>(["EVAL", script, "1", key, field, expected, JSON.stringify(value)])) === 1;
+  }
+
+  async deleteJson(key: string): Promise<void> {
+    await this.command(["DEL", key]);
   }
 
   async addToIndex(indexKey: string, member: string): Promise<void> {
@@ -189,6 +220,28 @@ class SupabaseStore implements SllrStore {
       body: JSON.stringify([{ key, value }]),
     });
     return (rows || []).some((row) => row.key === key);
+  }
+
+  async setJsonIfFieldEquals(key: string, field: string, expected: string, value: unknown): Promise<boolean> {
+    if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(field)) {
+      throw Object.assign(new Error("SLL-R store conditional field is invalid."), { status: 500 });
+    }
+    const rows = await this.request<Array<{ key: string }>>(
+      `/sllr_kv?key=eq.${encodeURIComponent(key)}&value->>${field}=eq.${encodeURIComponent(expected)}&select=key`,
+      {
+        method: "PATCH",
+        prefer: "return=representation",
+        body: JSON.stringify({ value }),
+      },
+    );
+    return (rows || []).some((row) => row.key === key);
+  }
+
+  async deleteJson(key: string): Promise<void> {
+    await this.request(`/sllr_kv?key=eq.${encodeURIComponent(key)}`, {
+      method: "DELETE",
+      prefer: "return=minimal",
+    });
   }
 
   async addToIndex(indexKey: string, member: string): Promise<void> {

@@ -118,7 +118,7 @@ SLL-R is a first-class AgentShack listing because every completed run creates a
 receipt-worthy outcome:
 
 ```text
-order + merchant acceptance + fulfillment/payment proof + receipt hash
+order + merchant acceptance + payment state + fulfillment proof + receipt hash
 ```
 
 That receipt can later feed:

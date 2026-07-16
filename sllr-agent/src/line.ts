@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { LineConfig } from "./config.js";
 
 export type LineInboundMessage = {
@@ -64,25 +64,71 @@ export class LineEventDeduper {
   }
 }
 
+export class LinePushError extends Error {
+  constructor(message: string, readonly retryable: boolean, readonly status?: number) {
+    super(message);
+    this.name = "LinePushError";
+  }
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+}
+
+function isRetryablePushError(error: unknown): boolean {
+  return error instanceof LinePushError ? error.retryable : isTimeoutError(error);
+}
+
 export class LineClient {
   constructor(private readonly config: LineConfig) {}
 
-  async pushText(userId: string, text: string): Promise<void> {
-    const response = await fetch(`${this.config.apiBaseUrl}/v2/bot/message/push`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.config.channelAccessToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        to: userId,
-        messages: [{ type: "text", text: text.slice(0, 5000) }],
-      }),
-      signal: AbortSignal.timeout(8_000),
-    });
+  async pushText(userId: string, text: string, retryKey = randomUUID()): Promise<void> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.config.apiBaseUrl}/v2/bot/message/push`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.config.channelAccessToken}`,
+          "content-type": "application/json",
+          "x-line-retry-key": retryKey,
+        },
+        body: JSON.stringify({
+          to: userId,
+          messages: [{ type: "text", text: text.slice(0, 5000) }],
+        }),
+        signal: AbortSignal.timeout(8_000),
+      });
+    } catch (error) {
+      const timedOut = isTimeoutError(error);
+      throw new LinePushError(
+        `LINE push ${timedOut ? "timed out" : "failed"}: ${error instanceof Error ? error.message : error}`,
+        true,
+      );
+    }
+    if (response.status === 409) return;
     if (!response.ok) {
       const payload = await response.text().catch(() => "");
-      throw new Error(`LINE push failed (${response.status}): ${payload.slice(0, 300) || "unknown error"}`);
+      throw new LinePushError(
+        `LINE push failed (${response.status}): ${payload.slice(0, 300) || "unknown error"}`,
+        response.status >= 500,
+        response.status,
+      );
     }
+  }
+}
+
+export async function pushLineTextReliable(
+  client: Pick<LineClient, "pushText">,
+  userId: string,
+  text: string,
+  sleep: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+): Promise<void> {
+  const retryKey = randomUUID();
+  try {
+    await client.pushText(userId, text, retryKey);
+  } catch (error) {
+    if (!isRetryablePushError(error)) throw error;
+    await sleep(2_000);
+    await client.pushText(userId, text, retryKey);
   }
 }

@@ -63,6 +63,12 @@ export function quoteOrder(input: QuoteRequest): QuoteResult {
   if (input.deadlineMinutes && !selected.fulfillment.includes("pickup")) {
     reasons.push(`${selected.name} is not available for pickup.`);
   }
+  if (input.pickupAt && !selected.fulfillment.includes("pickup")) {
+    reasons.push(`${selected.name} cannot be scheduled for pickup.`);
+  }
+  if (input.pickupAt && input.deliverByDays) {
+    reasons.push("Choose scheduled pickup or shipping, not both.");
+  }
   if (input.deliverByDays && !selected.fulfillment.includes("shipping")) {
     reasons.push(`${selected.name} is not available for shipping.`);
   }

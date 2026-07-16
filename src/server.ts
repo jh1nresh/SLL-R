@@ -19,7 +19,7 @@ import { actionKeyFrom } from "./core/mutations.js";
 import { getUnavailableItems, setItemAvailability } from "./core/availability.js";
 import { nearbyMerchants } from "./core/nearby.js";
 import { issueMerchantToken, requireMerchantAuth } from "./core/merchantAuth.js";
-import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantMenu, grantMerchantConsent, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder, requirePaymentVerifier } from "./core/merchantApi.js";
+import { attachMerchantPayment, createMerchantOrder, getMerchant, getMerchantCapacity, getMerchantMenu, grantMerchantConsent, issueMerchantReceipt, listMerchantOrders, listMerchants, quoteMerchantOrder, requirePaymentVerifier } from "./core/merchantApi.js";
 import { merchantPaymentOptions } from "./core/paymentOptions.js";
 import { recommendFromMenu } from "./core/menuRecommend.js";
 import { createVerifiedReview, listMerchantReviews, getMerchantReliability } from "./core/verifiedReview.js";
@@ -44,6 +44,8 @@ import { cancelSubscription, confirmRun, createSubscription, declineRun, listPen
 import { linePayConfirm } from "./adapters/linePay.js";
 import { createDemoMerchant, listDemoMerchants } from "./adapters/shopifyCatalog.js";
 import { shopForBuyer } from "./core/personalShop.js";
+import { listMerchantOffers, quoteMerchantOffer } from "./core/offers.js";
+import { createFulfillmentBatch, getFulfillmentBatch, listFulfillmentBatches } from "./core/batches.js";
 
 function json(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -317,6 +319,9 @@ function rootDiscovery(origin: string) {
       standaloneAgentMessage: `${origin}/agent/{merchantId}/message`,
       merchantTerminal: `${origin}/terminal/{merchantId}`,
       menu: `${origin}/merchants/{merchantId}/menu`,
+      offers: `${origin}/merchants/{merchantId}/offers`,
+      capacity: `${origin}/merchants/{merchantId}/capacity`,
+      batches: `${origin}/merchants/{merchantId}/batches`,
       quote: `${origin}/merchants/{merchantId}/quote`,
       orders: `${origin}/merchants/{merchantId}/orders`,
       payment: `${origin}/merchants/{merchantId}/payment`,
@@ -593,6 +598,30 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, 200, await shopifyCartHandoff(merchantId, await body(request), originFrom(request)));
         }
       }
+      const merchantOfferQuoteRoute = url.pathname.match(/^\/merchants\/([^/]+)\/offers\/([^/]+)\/quote$/);
+      if (merchantOfferQuoteRoute && request.method === "POST") {
+        const [, merchantId, encodedOfferId] = merchantOfferQuoteRoute;
+        let offerId: string;
+        try {
+          offerId = decodeURIComponent(encodedOfferId);
+        } catch (error) {
+          if (error instanceof URIError) {
+            return json(response, 400, { error: "offerId must be valid percent-encoded UTF-8." });
+          }
+          throw error;
+        }
+        return json(response, 200, await quoteMerchantOffer(
+          merchantId,
+          offerId,
+          await bindBuyer(request, await body(request)),
+        ));
+      }
+      const merchantBatchRoute = url.pathname.match(/^\/merchants\/([^/]+)\/batches\/([^/]+)$/);
+      if (merchantBatchRoute && request.method === "GET") {
+        const [, merchantId, batchId] = merchantBatchRoute;
+        await requireMerchantAuth(request.headers, { demo: url.searchParams.get("demo") === "true" }, merchantId);
+        return json(response, 200, await getFulfillmentBatch(batchId, merchantId));
+      }
       const merchantRoute = url.pathname.match(/^\/merchants\/([^/]+)(?:\/([^/]+))?$/);
       if (merchantRoute) {
         const [, merchantId, action] = merchantRoute;
@@ -619,6 +648,21 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         }
         if (request.method === "GET" && action === "menu") {
           return json(response, 200, getMerchantMenu(merchantId));
+        }
+        if (request.method === "GET" && action === "offers") {
+          return json(response, 200, listMerchantOffers(merchantId));
+        }
+        if (request.method === "GET" && action === "capacity") {
+          return json(response, 200, await getMerchantCapacity(merchantId, Object.fromEntries(url.searchParams.entries())));
+        }
+        if (request.method === "GET" && action === "batches") {
+          await requireMerchantAuth(request.headers, { demo: url.searchParams.get("demo") === "true" }, merchantId);
+          return json(response, 200, await listFulfillmentBatches(merchantId));
+        }
+        if (request.method === "POST" && action === "batches") {
+          const payload = await body(request);
+          await requireMerchantAuth(request.headers, payload, merchantId);
+          return json(response, 201, await createFulfillmentBatch(merchantId, payload));
         }
         if (request.method === "POST" && action === "quote") {
           return json(response, 200, await quoteMerchantOrder(merchantId, await bindBuyer(request, await body(request))));
@@ -775,7 +819,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           status: order.status,
           proofLevel: order.proofLevel,
           order,
-          warning: "Demo endpoint records payment proof from a provided transaction or request id. Production must verify the Base transaction before issuing receipt memory.",
+          warning: "Demo endpoint records payment proof from a provided transaction or request id. Final receipt memory still requires merchant fulfillment.",
         });
       }
       if (request.method === "POST" && url.pathname === "/quote") {
@@ -788,7 +832,7 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           status: result.order.status,
           quote: result.quote,
           order: result.order,
-          next: "Attach payment or fulfillment proof to issue SLL-R receipt memory.",
+          next: "Attach payment proof, then record merchant fulfillment before issuing final receipt memory.",
         });
       }
       if (request.method === "GET" && url.pathname === "/orders") {

@@ -8,6 +8,8 @@ dist/
 .sllr-buyers.json.tmp
 .sllr-line-buyers.json
 .sllr-line-buyers.json.tmp
+.sllr-line-relay.json
+.sllr-line-relay.json.tmp
 # local per-merchant Agent Card store
 .sllr-agent-cards.json
 .sllr-agent-cards.json.tmp

@@ -6,14 +6,14 @@ import type { SellerOrder } from "../types.js";
 
 // Verified Review / Outcome Layer (spec: local-commerce-os-for-agents §5). Not
 // Yelp text-first — it is verified decision → action → outcome memory: a review
-// only exists if the order carries real proof (payment / merchant-ready / claim),
+// only exists after merchant fulfillment or pickup claim produced final receipt,
 // and it records the agent's decision + promised-vs-actual ETA + the buyer's
 // feedback. It feeds taste memory, merchant ETA reliability, and future ranking.
 //
 // Invariant: no verified review without a proof. agentUsable is always true —
 // these are written for the next agent to consume, not for human browsing.
 
-export type ReviewVerifiedBy = "stripe_payment" | "merchant_ready" | "pickup_claim" | "user_feedback";
+export type ReviewVerifiedBy = "stripe_payment" | "merchant_ready" | "pickup_claim" | "receipt_memory" | "user_feedback";
 
 export type AgentDecision = {
   userIntent?: string;
@@ -57,13 +57,16 @@ export function reviewProofs(order: SellerOrder, hasFeedback: boolean): ReviewVe
   if (order.payment.status === "verified") proofs.push("stripe_payment");
   if (order.promise.readyAt || order.status === "ready" || order.status === "fulfilled") proofs.push("merchant_ready");
   if (order.promise.claimedAt || order.status === "claimed" || order.status === "fulfilled") proofs.push("pickup_claim");
+  if (order.lifecycle.receipt === "issued" && order.receipt) proofs.push("receipt_memory");
   if (hasFeedback) proofs.push("user_feedback");
   return proofs;
 }
 
-// Eligible iff the order carries a non-user proof (payment or merchant/claim).
+// A payment proves funds moved, not that the buyer received the product.
 export function eligibleForReview(order: SellerOrder): boolean {
-  return reviewProofs(order, false).length > 0;
+  const terminalFulfillment = order.terminal.status === "claimed" || order.terminal.status === "fulfilled";
+  const finalReceipt = Boolean(order.receipt?.receiptHash && order.receipt.receiptMemoryId);
+  return order.lifecycle.receipt === "issued" && terminalFulfillment && finalReceipt;
 }
 
 function minutesBetween(fromIso: string, toIso: string): number {
@@ -80,10 +83,14 @@ export async function createVerifiedReview(orderId: string, input: CreateReviewI
   }
   // Invariant: no verified review without a proof.
   if (!eligibleForReview(order)) {
-    throw Object.assign(new Error("Order has no payment/fulfillment proof yet — not eligible for a verified review."), { status: 409, requiredNextStep: "pay_or_fulfill" });
+    throw Object.assign(new Error("Order has no completed fulfillment receipt yet — not eligible for a verified review."), { status: 409, requiredNextStep: "fulfill_or_claim" });
   }
   const feedback = input.feedback ?? {};
   const hasFeedback = Object.keys(feedback).length > 0;
+  const verifiedBy = reviewProofs(order, hasFeedback);
+  if (verifiedBy.length === 0) {
+    throw Object.assign(new Error("Order has no fulfillment or final-receipt proof for a verified review."), { status: 409 });
+  }
 
   const etaPromisedMinutes = order.promise.estimatedWaitMinutes
     ?? (order.promise.promisedReadyAt ? minutesBetween(order.createdAt, order.promise.promisedReadyAt) : null);
@@ -96,7 +103,7 @@ export async function createVerifiedReview(orderId: string, input: CreateReviewI
     orderId: order.id,
     merchantId: order.merchantId,
     buyerId: order.buyerId,
-    verifiedBy: reviewProofs(order, hasFeedback),
+    verifiedBy,
     items: [`${order.item.name}${order.item.quantity > 1 ? ` x${order.item.quantity}` : ""}`],
     agentDecision: input.agentDecision ?? {},
     etaPromisedMinutes,

@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHmac } from "node:crypto";
 import { createSllrServer } from "../server.js";
@@ -9,8 +10,22 @@ import { grantConsent } from "../core/consent.js";
 import { getLoop, loopIdForQuote, loopIdForOrder } from "../core/actionLoop.js";
 import { setItemAvailability } from "../core/availability.js";
 import { attachMerchantPayment, createMerchantOrder, issueMerchantReceipt } from "../core/merchantApi.js";
-import { attachPaymentProof } from "../core/orders.js";
+import { attachPaymentProof, getOrder } from "../core/orders.js";
 import { withIdempotentMutation } from "../core/mutations.js";
+import { consumeCapacityReservation, releaseCapacityReservation, reserveCapacity } from "../core/capacity.js";
+import { minorUnitsFromDecimal } from "../core/money.js";
+import { eligibleForReview } from "../core/verifiedReview.js";
+import { hydrateDemoMerchants, merchantForId, registerDemoMerchantProfile, resetDemoMerchantsForTest } from "../merchants/profiles.js";
+import type { MerchantProfile, SellerOrder } from "../types.js";
+
+function smokeMoneyBoundaries() {
+  assert.equal(minorUnitsFromDecimal("90071992547409.91", "USD"), Number.MAX_SAFE_INTEGER);
+  assert.equal(minorUnitsFromDecimal("90071992547409.92", "USD"), 0);
+  assert.equal(minorUnitsFromDecimal("9007199254740991", "TWD"), Number.MAX_SAFE_INTEGER);
+  assert.equal(minorUnitsFromDecimal("9007199254740992", "TWD"), 0);
+  assert.equal(minorUnitsFromDecimal("55.00", "TWD"), 55);
+  assert.equal(minorUnitsFromDecimal("55.01", "TWD"), 0);
+}
 
 async function postJson(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
@@ -50,10 +65,10 @@ async function getText(origin: string, path: string) {
   return { response, text };
 }
 
-async function postJsonFailure(origin: string, path: string, payload: unknown) {
+async function postJsonFailure(origin: string, path: string, payload: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`${origin}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(payload),
   });
   const json = await response.json() as Record<string, unknown>;
@@ -145,15 +160,21 @@ async function smokeMcp(origin: string) {
     throw new Error(`MCP GET should return 405 for the stateless server, got ${getStream.status}`);
   }
 
-  const toolsList = await mcpRequest(origin, "tools/list") as { tools?: Array<{ name?: string; inputSchema?: unknown }> };
+  const toolsList = await mcpRequest(origin, "tools/list") as {
+    tools?: Array<{ name?: string; inputSchema?: { properties?: Record<string, unknown> } }>;
+  };
   const toolNames = toolsList.tools?.map((tool) => tool.name) || [];
-  for (const required of ["list_merchants", "get_menu", "shop_for_me", "quote_order", "request_consent", "create_order", "get_payment_options", "attach_payment_proof", "check_order_status", "issue_receipt", "merchant_fulfill_order", "create_demo_merchant"]) {
+  for (const required of ["list_merchants", "get_menu", "list_offers", "quote_offer", "list_capacity_windows", "shop_for_me", "quote_order", "request_consent", "create_order", "create_fulfillment_batch", "list_fulfillment_batches", "get_fulfillment_batch", "get_payment_options", "attach_payment_proof", "check_order_status", "issue_receipt", "merchant_fulfill_order", "create_demo_merchant"]) {
     if (!toolNames.includes(required)) {
       throw new Error(`MCP tools/list is missing ${required}: ${JSON.stringify(toolNames)}`);
     }
   }
   if (toolsList.tools?.some((tool) => !tool.inputSchema)) {
     throw new Error(`MCP tools/list returned a tool without inputSchema: ${JSON.stringify(toolsList)}`);
+  }
+  const shopForMeSchema = toolsList.tools?.find((tool) => tool.name === "shop_for_me")?.inputSchema;
+  if (!shopForMeSchema?.properties?.offerId || !shopForMeSchema.properties.pickupAt) {
+    throw new Error(`MCP shop_for_me schema omitted offerId or pickupAt: ${JSON.stringify(shopForMeSchema)}`);
   }
 
   const merchants = await mcpToolCall(origin, "list_merchants", {});
@@ -266,16 +287,19 @@ async function smokeMcp(origin: string) {
       demo: true,
       idempotencyKey: "mcp-smoke-payment-1",
     });
-    const demoProofContent = demoProof.structuredContent as { proofLevel?: string; order?: { payment?: { paymentId?: string }; receipt?: { receiptHash?: string } }; mutation?: { terminal?: boolean; receiptRef?: string } } | undefined;
-    const replayContent = demoProofReplay.structuredContent as { order?: { receipt?: { receiptHash?: string } } } | undefined;
+    const demoProofContent = demoProof.structuredContent as { proofLevel?: string; order?: { payment?: { paymentId?: string }; receipt?: null }; mutation?: { terminal?: boolean; receiptRef?: string } } | undefined;
+    const replayContent = demoProofReplay.structuredContent as { proofLevel?: string; order?: { payment?: { paymentId?: string }; receipt?: null } } | undefined;
     if (
       demoProof.isError
       || demoProofReplay.isError
-      || demoProofContent?.proofLevel !== "receipt_memory_issued"
+      || demoProofContent?.proofLevel !== "payment_backed"
+      || replayContent?.proofLevel !== "payment_backed"
       || demoProofContent.order?.payment?.paymentId !== "mcp_counter_demo"
-      || !demoProofContent.order?.receipt?.receiptHash
-      || demoProofContent.order.receipt.receiptHash !== replayContent?.order?.receipt?.receiptHash
-      || demoProofContent.mutation?.terminal !== true
+      || replayContent.order?.payment?.paymentId !== "mcp_counter_demo"
+      || demoProofContent.order?.receipt !== null
+      || replayContent.order?.receipt !== null
+      || demoProofContent.mutation?.terminal !== false
+      || demoProofContent.mutation.receiptRef !== undefined
     ) {
       throw new Error(`MCP attach_payment_proof demo path failed: ${JSON.stringify(demoProof)}`);
     }
@@ -683,7 +707,7 @@ async function smokeDemoMerchants(origin: string) {
 }
 
 // Minimal in-process Upstash / Vercel KV REST server to exercise the
-// RedisRestStore command encoding (GET/SET/SADD/SMEMBERS) end to end.
+// RedisRestStore command encoding (GET/SET/DEL/SADD/SMEMBERS) end to end.
 type FakeRedisControl = {
   failNextUnconditionalSet: () => void;
   unconditionalSetAttempts: () => number;
@@ -728,7 +752,22 @@ async function withFakeRedis<T>(run: (control: FakeRedisControl) => Promise<T>):
         if (modifier === "NX" && values.has(key)) result = null;
         else { values.set(key, value); result = "OK"; }
       }
+      else if (op === "EVAL") {
+        const [, , keyCount, evalKey, field, expected, next] = command as string[];
+        if (keyCount !== "1") {
+          response.writeHead(400);
+          return response.end(JSON.stringify({ error: "unsupported EVAL key count" }));
+        }
+        const currentRaw = values.get(evalKey);
+        const current = currentRaw ? JSON.parse(currentRaw) as Record<string, unknown> : null;
+        if (!current || current[field] !== expected) result = 0;
+        else {
+          values.set(evalKey, next);
+          result = 1;
+        }
+      }
       else if (op === "GET") { result = values.has(key) ? values.get(key) : null; }
+      else if (op === "DEL") { result = values.delete(key) ? 1 : 0; }
       else if (op === "SADD") {
         const set = sets.get(key) ?? new Set<string>();
         set.add(value);
@@ -803,6 +842,21 @@ async function withFakeSupabase<T>(run: () => Promise<T>): Promise<T> {
         }
         return sendJson(201, prefer.includes("return=representation") ? changed : undefined);
       }
+      if (request.method === "PATCH" && url.pathname === "/rest/v1/sllr_kv") {
+        const k = eqValue("key");
+        const conditional = [...url.searchParams.keys()].find((name) => name.startsWith("value->>"));
+        const field = conditional?.slice("value->>".length) || "";
+        const expected = conditional ? eqValue(conditional) : "";
+        const current = kv.get(k) as Record<string, unknown> | undefined;
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as { value?: unknown };
+        if (!current || current[field] !== expected) return sendJson(200, []);
+        kv.set(k, payload.value);
+        return sendJson(200, [{ key: k }]);
+      }
+      if (request.method === "DELETE" && url.pathname === "/rest/v1/sllr_kv") {
+        kv.delete(eqValue("key"));
+        return sendJson(204, undefined);
+      }
       if (request.method === "GET" && url.pathname === "/rest/v1/sllr_index") {
         const members = [...(index.get(eqValue("index_key")) ?? [])];
         return sendJson(200, members.map((member) => ({ member })));
@@ -843,6 +897,75 @@ async function withFakeSupabase<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+function demoRegistryProfile(id: string, name: string): MerchantProfile {
+  return {
+    id,
+    name,
+    category: "test",
+    location: "Online",
+    fulfillment: ["shipping"],
+    paymentRails: ["shopify"],
+    humanApproval: { requiredAboveUsd: "100.00" },
+    catalog: [{ id: "test-item", name: "Test item", amountUsd: "1.00", fulfillment: ["shipping"] }],
+  };
+}
+
+async function smokeAtomicDemoMerchantRegistry(backend: string) {
+  const prefix = `demo-registry-${backend}`;
+  const legacyProfile = demoRegistryProfile(`${prefix}-legacy`, `${backend} Legacy Merchant`);
+  const store = sllrStore();
+  await store.setJson(`sllr:demo-merchant:${legacyProfile.id}`, legacyProfile);
+  await store.addToIndex("sllr:demo-merchant-ids", legacyProfile.id);
+
+  resetDemoMerchantsForTest();
+  await hydrateDemoMerchants();
+  if (merchantForId(legacyProfile.id)?.name !== legacyProfile.name) {
+    throw new Error(`${backend} demo registry did not migrate the legacy profile.`);
+  }
+
+  const duplicateProfile = demoRegistryProfile(`${prefix}-duplicate`, `${backend} Duplicate Merchant`);
+  const duplicateRace = await Promise.allSettled([
+    registerDemoMerchantProfile(duplicateProfile),
+    registerDemoMerchantProfile(duplicateProfile),
+  ]);
+  const duplicateWinnerCount = duplicateRace.filter((result) => result.status === "fulfilled").length;
+  const duplicateLoser = duplicateRace.find((result) => result.status === "rejected");
+  if (duplicateWinnerCount !== 1 || (duplicateLoser?.reason as { status?: number } | undefined)?.status !== 409) {
+    throw new Error(`${backend} concurrent duplicate registration did not have one durable winner: ${JSON.stringify(duplicateRace)}`);
+  }
+
+  const prefilledProfiles = Array.from({ length: 21 }, (_, index) => (
+    demoRegistryProfile(`${prefix}-prefill-${index}`, `${backend} Prefill ${index}`)
+  ));
+  for (const profile of prefilledProfiles) await registerDemoMerchantProfile(profile);
+
+  const finalCandidates = [
+    demoRegistryProfile(`${prefix}-final-a`, `${backend} Final A`),
+    demoRegistryProfile(`${prefix}-final-b`, `${backend} Final B`),
+  ];
+  const finalRace = await Promise.allSettled(finalCandidates.map((profile) => registerDemoMerchantProfile(profile)));
+  const finalWinnerCount = finalRace.filter((result) => result.status === "fulfilled").length;
+  const finalLoser = finalRace.find((result) => result.status === "rejected");
+  if (finalWinnerCount !== 1 || (finalLoser?.reason as { status?: number } | undefined)?.status !== 409) {
+    throw new Error(`${backend} demo registry exceeded or failed to fill its final slot: ${JSON.stringify(finalRace)}`);
+  }
+
+  resetDemoMerchantsForTest();
+  await hydrateDemoMerchants();
+  const expectedProfiles = [legacyProfile, duplicateProfile, ...prefilledProfiles];
+  if (expectedProfiles.some((profile) => merchantForId(profile.id)?.name !== profile.name)) {
+    throw new Error(`${backend} demo registry lost a committed profile after hydration.`);
+  }
+  if (finalCandidates.filter((profile) => merchantForId(profile.id)).length !== 1) {
+    throw new Error(`${backend} demo registry did not persist exactly one final-slot winner.`);
+  }
+
+  await assert.rejects(
+    registerDemoMerchantProfile(demoRegistryProfile(`${prefix}-overflow`, `${backend} Overflow`)),
+    (error: unknown) => (error as { status?: number }).status === 409 && /limit reached/.test(String((error as Error).message)),
+  );
+}
+
 async function smokeStoreBackend() {
   await withFakeSupabase(async () => {
     if (storeBackendName() !== "supabase") {
@@ -863,6 +986,19 @@ async function smokeStoreBackend() {
       || (await store.getJson<{ owner?: string }>("sllr:test:claim"))?.owner !== "first") {
       throw new Error("Supabase conditional insert did not preserve the first writer.");
     }
+    await store.setJson("sllr:test:transition", { status: "held" });
+    const supabaseTransitions = await Promise.all([
+      store.setJsonIfFieldEquals("sllr:test:transition", "status", "held", { status: "released" }),
+      store.setJsonIfFieldEquals("sllr:test:transition", "status", "held", { status: "consumed" }),
+    ]);
+    const supabaseTerminal = await store.getJson<{ status?: string }>("sllr:test:transition");
+    if (supabaseTransitions.filter(Boolean).length !== 1 || !["released", "consumed"].includes(supabaseTerminal?.status || "")) {
+      throw new Error(`Supabase conditional transition was not atomic: ${JSON.stringify({ supabaseTransitions, supabaseTerminal })}`);
+    }
+    await store.deleteJson("sllr:test:claim");
+    if (await store.getJson("sllr:test:claim") !== null) {
+      throw new Error("Supabase JSON delete did not remove the key.");
+    }
     await store.addToIndex("sllr:test:index", "ord_supa");
     await store.addToIndex("sllr:test:index", "ord_supa");
     await store.addToIndex("sllr:test:index", "ord_supa_2");
@@ -870,8 +1006,9 @@ async function smokeStoreBackend() {
     if (members.length !== 2 || !members.includes("ord_supa") || !members.includes("ord_supa_2")) {
       throw new Error(`Supabase index insert/select failed: ${JSON.stringify(members)}`);
     }
+    await smokeAtomicDemoMerchantRegistry("supabase");
   });
-  await withFakeRedis(async () => {
+  await withFakeRedis(async (control) => {
     if (storeBackendName() !== "redis_rest") {
       throw new Error(`Store should select redis_rest backend when KV env is set, got ${storeBackendName()}`);
     }
@@ -889,6 +1026,19 @@ async function smokeStoreBackend() {
       || (await store.getJson<{ owner?: string }>("sllr:test:claim"))?.owner !== "first") {
       throw new Error("Redis conditional insert did not preserve the first writer.");
     }
+    await store.setJson("sllr:test:transition", { status: "held" });
+    const redisTransitions = await Promise.all([
+      store.setJsonIfFieldEquals("sllr:test:transition", "status", "held", { status: "released" }),
+      store.setJsonIfFieldEquals("sllr:test:transition", "status", "held", { status: "consumed" }),
+    ]);
+    const redisTerminal = await store.getJson<{ status?: string }>("sllr:test:transition");
+    if (redisTransitions.filter(Boolean).length !== 1 || !["released", "consumed"].includes(redisTerminal?.status || "")) {
+      throw new Error(`Redis conditional transition was not atomic: ${JSON.stringify({ redisTransitions, redisTerminal })}`);
+    }
+    await store.deleteJson("sllr:test:claim");
+    if (await store.getJson("sllr:test:claim") !== null) {
+      throw new Error("Redis JSON delete did not remove the key.");
+    }
     await store.addToIndex("sllr:test:index", "ord_redis");
     await store.addToIndex("sllr:test:index", "ord_redis");
     await store.addToIndex("sllr:test:index", "ord_redis_2");
@@ -896,9 +1046,357 @@ async function smokeStoreBackend() {
     if (members.length !== 2 || !members.includes("ord_redis") || !members.includes("ord_redis_2")) {
       throw new Error(`Redis-backed index (SADD/SMEMBERS) failed: ${JSON.stringify(members)}`);
     }
+
+    await smokeAtomicDemoMerchantRegistry("redis");
   });
   if (storeBackendName() !== "memory") {
     throw new Error("Store should fall back to memory backend after KV env is cleared.");
+  }
+  await smokeAtomicDemoMerchantRegistry("memory");
+  resetDemoMerchantsForTest();
+  resetStoreForTest();
+}
+
+async function smokeCommerceLevels(origin: string) {
+  const previousVerifierSecret = process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+  delete process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+  const windowMs = 15 * 60_000;
+  const pickupAt = new Date(Math.ceil((Date.now() + 24 * 60 * 60_000) / windowMs) * windowMs).toISOString();
+
+  try {
+    const offers = await getJson(origin, "/merchants/raposa-coffee/offers") as {
+      offers?: Array<{
+        id?: string;
+        title?: string;
+        amount?: { amountMinor?: number; currency?: string };
+        lineItems?: Array<{
+          unitAmount?: { amountMinor?: number; currency?: string };
+          subtotal?: { amountMinor?: number; currency?: string };
+          unitAmountUsd?: unknown;
+          subtotalUsd?: unknown;
+        }>;
+        amountUsd?: unknown;
+        perBuyerLimit?: number | null;
+        redemptionWindow?: { mode?: string };
+        terms?: string[];
+        source?: { verificationStatus?: string };
+      }>;
+    };
+    const espressoOffer = offers.offers?.find((offer) => offer.id === "catalog:espresso");
+    if (
+      !espressoOffer
+      || espressoOffer.title !== "Espresso"
+      || espressoOffer.amount?.amountMinor !== 450
+      || espressoOffer.amount.currency !== "USD"
+      || espressoOffer.lineItems?.[0]?.unitAmount?.amountMinor !== 450
+      || espressoOffer.lineItems[0].subtotal?.amountMinor !== 450
+      || "amountUsd" in espressoOffer
+      || "unitAmountUsd" in espressoOffer.lineItems[0]
+      || "subtotalUsd" in espressoOffer.lineItems[0]
+      || espressoOffer.perBuyerLimit !== null
+      || espressoOffer.redemptionWindow?.mode !== "quote_bound"
+      || !espressoOffer.terms?.some((term) => term.includes("fulfillment"))
+      || espressoOffer.source?.verificationStatus !== "configured"
+    ) {
+      throw new Error(`Level 1 fixed offer was not exposed: ${JSON.stringify(offers)}`);
+    }
+    const twdOffers = await getJson(origin, "/merchants/louisa-coffee/offers") as {
+      offers?: Array<{ id?: string; amount?: { amountMinor?: number; currency?: string }; amountUsd?: unknown }>;
+    };
+    const americanoOffer = twdOffers.offers?.find((offer) => offer.id === "catalog:americano");
+    if (!americanoOffer || americanoOffer.amount?.amountMinor !== 55 || americanoOffer.amount.currency !== "TWD" || "amountUsd" in americanoOffer) {
+      throw new Error(`TWD offer did not use currency-neutral Money: ${JSON.stringify(twdOffers)}`);
+    }
+    const anonymousScheduledOrder = await postJsonFailure(origin, "/merchants/raposa-coffee/orders", {
+      userIntent: "espresso",
+      itemId: "espresso",
+      offerId: "catalog:espresso",
+      pickupAt,
+      paymentMode: "counter",
+    });
+    if (anonymousScheduledOrder.status !== 401 || anonymousScheduledOrder.json.code !== "buyer_session_required") {
+      throw new Error(`Anonymous callers must not hold scheduled capacity: ${JSON.stringify(anonymousScheduledOrder)}`);
+    }
+
+    const anonymousPickup = await postJson(origin, "/merchants/raposa-coffee/orders", {
+      userIntent: "espresso now",
+      itemId: "espresso",
+      paymentMode: "counter",
+    }) as { order?: { id?: string; buyerId?: string | null; capacityReservation?: { id?: string; status?: string } } };
+    if (!anonymousPickup.order?.id || anonymousPickup.order.buyerId !== null || anonymousPickup.order.capacityReservation?.status !== "held") {
+      throw new Error(`Anonymous pickup order did not reserve capacity: ${JSON.stringify(anonymousPickup)}`);
+    }
+    const anonymousRejected = await postJson(origin, `/orders/${anonymousPickup.order.id}/reject`, {
+      merchantId: "raposa-coffee",
+      actor: "capacity-smoke",
+      demo: true,
+    }) as { order?: { capacityReservation?: { id?: string; status?: string } } };
+    const anonymousReservationId = anonymousRejected.order?.capacityReservation?.id;
+    if (!anonymousReservationId || anonymousRejected.order?.capacityReservation?.status !== "released") {
+      throw new Error(`Rejected anonymous pickup order did not release capacity: ${JSON.stringify(anonymousRejected)}`);
+    }
+    const releasedRecord = await sllrStore().getJson<Record<string, unknown>>(`sllr:capacity-reservation:${anonymousReservationId}`);
+    const rejectedRecord = await sllrStore().getJson<SellerOrder>(`sllr:order:${anonymousPickup.order.id}`);
+    if (!releasedRecord || !rejectedRecord?.capacityReservation) throw new Error("Rejected capacity records were missing.");
+    const retryAt = new Date().toISOString();
+    await sllrStore().setJson(`sllr:capacity-reservation:${anonymousReservationId}`, { ...releasedRecord, status: "held", updatedAt: retryAt });
+    await sllrStore().setJson(`sllr:order:${anonymousPickup.order.id}`, {
+      ...rejectedRecord,
+      capacityReservation: { ...rejectedRecord.capacityReservation, status: "held", updatedAt: retryAt },
+    });
+    const rejectedReplay = await postJson(origin, `/orders/${anonymousPickup.order.id}/reject`, {
+      merchantId: "raposa-coffee",
+      actor: "capacity-smoke",
+      demo: true,
+    }) as { order?: { capacityReservation?: { status?: string } } };
+    if (rejectedReplay.order?.capacityReservation?.status !== "released") {
+      throw new Error(`Terminal reject retry did not reconcile capacity: ${JSON.stringify(rejectedReplay)}`);
+    }
+
+    const espressoItem = merchantForId("raposa-coffee")?.catalog.find((item) => item.id === "espresso");
+    if (!espressoItem) throw new Error("Capacity race smoke could not find Raposa espresso.");
+    const raceReservation = await reserveCapacity({
+      merchantId: "raposa-coffee",
+      item: espressoItem,
+      quantity: 1,
+      desiredAt: new Date(Date.now() + 3 * 24 * 60 * 60_000),
+      exactWindow: true,
+      orderId: "ord_capacity_race_smoke",
+    });
+    const raceResults = await Promise.all([
+      releaseCapacityReservation(raceReservation.id),
+      consumeCapacityReservation(raceReservation.id),
+    ]);
+    const raceFinal = await sllrStore().getJson<{ status?: string }>(`sllr:capacity-reservation:${raceReservation.id}`);
+    if (
+      !raceFinal
+      || !["released", "consumed"].includes(raceFinal.status || "")
+      || raceResults.some((result) => result?.status !== raceFinal.status)
+    ) {
+      throw new Error(`Release/consume race overwrote its terminal state: ${JSON.stringify({ raceResults, raceFinal })}`);
+    }
+
+    const buyer = await postJson(origin, "/buyer/session", { label: "L1-L3 smoke buyer" }) as { token?: string };
+    if (!buyer.token) throw new Error(`Level 1 buyer session failed: ${JSON.stringify(buyer)}`);
+    const authorization = { authorization: `Bearer ${buyer.token}` };
+    const malformedOfferId = await postJsonFailure(origin, "/merchants/raposa-coffee/offers/%E0%A4%A/quote", {});
+    if (malformedOfferId.status !== 400 || !String(malformedOfferId.json.error || "").includes("percent-encoded")) {
+      throw new Error(`Malformed offer id should return 400: ${JSON.stringify(malformedOfferId)}`);
+    }
+
+    const quote = await postJson(origin, "/merchants/raposa-coffee/offers/catalog%3Aespresso/quote", {
+      pickupAt,
+      maxSpendUsd: "5.00",
+      paymentMode: "counter",
+    }, authorization) as {
+      quoteId?: string;
+      confirmationText?: string;
+      request?: Record<string, unknown>;
+      capacityWindow?: { startsAt?: string; available?: number };
+      offer?: { id?: string };
+    };
+    if (
+      quote.offer?.id !== "catalog:espresso"
+      || !quote.quoteId
+      || !quote.confirmationText
+      || !quote.request
+      || quote.capacityWindow?.startsAt !== pickupAt
+      || quote.capacityWindow.available !== 8
+    ) {
+      throw new Error(`Level 1 offer quote was not consent-ready: ${JSON.stringify(quote)}`);
+    }
+    const consent = await postJson(origin, "/consent", {
+      quoteId: quote.quoteId,
+      confirmationText: quote.confirmationText,
+    }, authorization) as { consent?: { id?: string } };
+    if (!consent.consent?.id) throw new Error(`Level 1 offer consent failed: ${JSON.stringify(consent)}`);
+    const first = await postJson(origin, "/merchants/raposa-coffee/orders", {
+      ...quote.request,
+      quoteId: quote.quoteId,
+      consentId: consent.consent.id,
+      paymentMode: "counter",
+      idempotencyKey: "l1-offer-order",
+    }, authorization) as { order?: { id?: string; offerId?: string; capacityReservation?: { windowId?: string } } };
+    if (!first.order?.id || first.order.offerId !== "catalog:espresso" || !first.order.capacityReservation?.windowId) {
+      throw new Error(`Level 1 offer did not become a capacity-backed order: ${JSON.stringify(first)}`);
+    }
+
+    const mismatch = await postJsonFailure(origin, "/merchants/raposa-coffee/quote", {
+      userIntent: "espresso",
+      itemId: "espresso",
+      offerId: "catalog:cold-brew",
+      pickupAt,
+    }, authorization);
+    if (mismatch.status !== 409 || mismatch.json.code !== "offer_item_mismatch") {
+      throw new Error(`Offer and item mismatch should be rejected: ${JSON.stringify(mismatch)}`);
+    }
+
+    const preparedOrders = await Promise.all(Array.from({ length: 8 }, async (_, index) => {
+      const preparedQuote = await postJson(origin, "/merchants/raposa-coffee/offers/catalog%3Aespresso/quote", {
+        pickupAt,
+        maxSpendUsd: "5.00",
+      }, authorization) as { quoteId?: string; confirmationText?: string; request?: Record<string, unknown> };
+      if (!preparedQuote.quoteId || !preparedQuote.confirmationText || !preparedQuote.request) {
+        throw new Error(`Concurrent capacity quote ${index} was incomplete: ${JSON.stringify(preparedQuote)}`);
+      }
+      const preparedConsent = await postJson(origin, "/consent", {
+        quoteId: preparedQuote.quoteId,
+        confirmationText: preparedQuote.confirmationText,
+      }, authorization) as { consent?: { id?: string } };
+      if (!preparedConsent.consent?.id) {
+        throw new Error(`Concurrent capacity consent ${index} was incomplete: ${JSON.stringify(preparedConsent)}`);
+      }
+      return { index, quote: preparedQuote, consentId: preparedConsent.consent.id };
+    }));
+    const attempts = await Promise.all(preparedOrders.map(async ({ index, quote: preparedQuote, consentId }) => {
+      const response = await fetch(`${origin}/merchants/raposa-coffee/orders`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authorization },
+        body: JSON.stringify({
+          ...preparedQuote.request,
+          quoteId: preparedQuote.quoteId,
+          consentId,
+          paymentMode: "counter",
+          idempotencyKey: `l3-capacity-order-${index}`,
+        }),
+      });
+      return { status: response.status, body: await response.json() as Record<string, unknown> };
+    }));
+    const created = attempts.filter((attempt) => attempt.status === 201) as Array<{
+      status: number;
+      body: { order?: { id?: string; capacityReservation?: { windowId?: string } } };
+    }>;
+    const refused = attempts.filter((attempt) => attempt.status === 409);
+    if (created.length !== 7 || refused.length !== 1) {
+      throw new Error(`Level 3 capacity should admit exactly eight total orders: ${JSON.stringify(attempts)}`);
+    }
+    const capacity = await getJson(origin, `/merchants/raposa-coffee/capacity?productionClass=espresso&from=${encodeURIComponent(pickupAt)}&count=1`) as {
+      windows?: Array<{ startsAt?: string; reserved?: number; available?: number }>;
+    };
+    if (capacity.windows?.[0]?.startsAt !== pickupAt || capacity.windows[0].reserved !== 8 || capacity.windows[0].available !== 0) {
+      throw new Error(`Level 3 capacity snapshot was not atomic: ${JSON.stringify(capacity)}`);
+    }
+    const immediateQuote = await postJson(origin, "/merchants/raposa-coffee/quote", {
+      userIntent: "espresso now",
+      itemId: "espresso",
+    }) as { etaMinutes?: number };
+    if (immediateQuote.etaMinutes !== 4) {
+      throw new Error(`Future scheduled capacity must not inflate the current queue ETA: ${JSON.stringify(immediateQuote)}`);
+    }
+
+    const secondOrderId = created[0]?.body.order?.id;
+    if (!secondOrderId) throw new Error(`Level 2 child order was missing: ${JSON.stringify(created[0])}`);
+    const unpaidBatch = await postJsonFailure(origin, "/merchants/raposa-coffee/batches", {
+      orderIds: [first.order.id, secondOrderId],
+      demo: true,
+      idempotencyKey: "l2-batch-unpaid",
+    });
+    if (unpaidBatch.status !== 409 || unpaidBatch.json.code !== "batch_requires_payment") {
+      throw new Error(`Level 2 batch should reject unpaid child orders: ${JSON.stringify(unpaidBatch)}`);
+    }
+    const paid = await postJson(origin, "/merchants/raposa-coffee/payment", {
+      orderId: first.order.id,
+      provider: "counter",
+      paymentId: "l1-l3-counter-payment",
+      demo: true,
+      idempotencyKey: "l1-l3-payment",
+    }) as { proofLevel?: string; order?: { receipt?: unknown }; mutation?: { terminal?: boolean } };
+    if (paid.proofLevel !== "payment_backed" || paid.order?.receipt !== null || paid.mutation?.terminal !== false) {
+      throw new Error(`Payment proof must not issue final receipt memory: ${JSON.stringify(paid)}`);
+    }
+    await postJson(origin, "/merchants/raposa-coffee/payment", {
+      orderId: secondOrderId,
+      provider: "counter",
+      paymentId: "l2-second-counter-payment",
+      demo: true,
+      idempotencyKey: "l2-second-payment",
+    });
+    const secondStored = await sllrStore().getJson<SellerOrder>(`sllr:order:${secondOrderId}`);
+    if (!secondStored) throw new Error("Level 2 multi-line child order was missing from the store.");
+    await sllrStore().setJson(`sllr:order:${secondOrderId}`, {
+      ...secondStored,
+      lineItems: [
+        secondStored.item,
+        { id: "cold-brew", name: "Cold brew", quantity: 1, amountUsd: "5.50", subtotalUsd: "5.50" },
+      ],
+    });
+    const batchPayload = {
+      orderIds: [first.order.id, secondOrderId],
+      label: "Espresso 15-minute production run",
+      demo: true,
+      idempotencyKey: "l2-batch-create",
+    };
+    const batch = await postJson(origin, "/merchants/raposa-coffee/batches", batchPayload) as {
+      batch?: { id?: string; orderIds?: string[]; pickupWindow?: { startsAt?: string }; totals?: { orders?: number; quantity?: number; amountUsd?: string }; items?: Array<{ itemId?: string }> };
+    };
+    const batchReplay = await postJson(origin, "/merchants/raposa-coffee/batches", batchPayload) as { batch?: { id?: string } };
+    if (
+      !batch.batch?.id
+      || batch.batch.id !== batchReplay.batch?.id
+      || batch.batch.totals?.orders !== 2
+      || batch.batch.totals.quantity !== 3
+      || batch.batch.totals.amountUsd !== "14.50"
+      || !batch.batch.items?.some((item) => item.itemId === "cold-brew")
+      || batch.batch.pickupWindow?.startsAt !== pickupAt
+      || batch.batch.orderIds?.length !== 2
+    ) {
+      throw new Error(`Level 2 independent-order batch was not idempotent: ${JSON.stringify(batch)}`);
+    }
+    const thirdOrderId = created[1]?.body.order?.id;
+    if (!thirdOrderId) throw new Error(`Level 2 duplicate-membership child was missing: ${JSON.stringify(created[1])}`);
+    await postJson(origin, "/merchants/raposa-coffee/payment", {
+      orderId: thirdOrderId,
+      provider: "counter",
+      paymentId: "l2-third-counter-payment",
+      demo: true,
+      idempotencyKey: "l2-third-payment",
+    });
+    const duplicate = await postJsonFailure(origin, "/merchants/raposa-coffee/batches", {
+      orderIds: [first.order.id, thirdOrderId],
+      demo: true,
+      idempotencyKey: "l2-batch-duplicate-membership",
+    });
+    if (duplicate.status !== 409 || duplicate.json.code !== "order_already_batched") {
+      throw new Error(`An order should not enter two Level 2 batches: ${JSON.stringify(duplicate)}`);
+    }
+
+    const fulfilled = await postJson(origin, "/merchants/raposa-coffee/receipt", {
+      orderId: first.order.id,
+      actor: "raposa-staff",
+      note: "Fulfilled L1-L3 smoke order.",
+      demo: true,
+      idempotencyKey: "l1-l3-fulfillment",
+    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string }; capacityReservation?: { id?: string; status?: string } } };
+    if (fulfilled.proofLevel !== "receipt_memory_issued" || !fulfilled.order?.receipt?.receiptHash || fulfilled.order.capacityReservation?.status !== "consumed") {
+      throw new Error(`Fulfillment did not issue final receipt memory: ${JSON.stringify(fulfilled)}`);
+    }
+    const terminalReservationId = fulfilled.order.capacityReservation?.id;
+    const terminalOrder = await sllrStore().getJson<SellerOrder>(`sllr:order:${first.order.id}`);
+    const terminalReservation = terminalReservationId
+      ? await sllrStore().getJson<Record<string, unknown>>(`sllr:capacity-reservation:${terminalReservationId}`)
+      : null;
+    if (!terminalOrder?.capacityReservation || !terminalReservation || !terminalReservationId) {
+      throw new Error("Fulfilled capacity records were missing for retry reconciliation.");
+    }
+    const orphanedAt = new Date().toISOString();
+    await sllrStore().setJson(`sllr:capacity-reservation:${terminalReservationId}`, { ...terminalReservation, status: "held", updatedAt: orphanedAt });
+    await sllrStore().setJson(`sllr:order:${first.order.id}`, {
+      ...terminalOrder,
+      capacityReservation: { ...terminalOrder.capacityReservation, status: "held", updatedAt: orphanedAt },
+    });
+    const fulfilledReplay = await postJson(origin, "/merchants/raposa-coffee/receipt", {
+      orderId: first.order.id,
+      actor: "raposa-staff",
+      note: "Reconcile prior terminal fulfillment.",
+      demo: true,
+      idempotencyKey: "l1-l3-fulfillment-reconcile",
+    }) as { order?: { capacityReservation?: { status?: string } } };
+    if (fulfilledReplay.order?.capacityReservation?.status !== "consumed") {
+      throw new Error(`Terminal fulfillment retry did not reconcile capacity: ${JSON.stringify(fulfilledReplay)}`);
+    }
+  } finally {
+    if (previousVerifierSecret === undefined) delete process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+    else process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET = previousVerifierSecret;
   }
 }
 
@@ -1003,10 +1501,15 @@ async function smokeIdempotentMutationRestart() {
       paymentId: "restart-stripe-payment",
       demo: true,
       idempotencyKey: "restart-payment-1",
-    }) as { order?: { receipt?: { receiptHash?: string } }; mutation?: { terminal?: boolean; receiptRef?: string } };
-    const receiptHash = payment.order?.receipt?.receiptHash;
-    if (!receiptHash || payment.mutation?.terminal !== true || !payment.mutation.receiptRef) {
-      throw new Error(`Initial idempotent payment did not issue terminal receipt metadata: ${JSON.stringify(payment)}`);
+    }) as { proofLevel?: string; order?: { receipt?: null; payment?: { paymentId?: string } }; mutation?: { terminal?: boolean; receiptRef?: string } };
+    if (
+      payment.proofLevel !== "payment_backed"
+      || payment.order?.payment?.paymentId !== "restart-stripe-payment"
+      || payment.order.receipt !== null
+      || payment.mutation?.terminal !== false
+      || payment.mutation.receiptRef !== undefined
+    ) {
+      throw new Error(`Initial idempotent payment did not remain non-terminal: ${JSON.stringify(payment)}`);
     }
     resetStoreForTest();
     const paymentReplay = await attachMerchantPayment("solyd", {}, {
@@ -1015,9 +1518,9 @@ async function smokeIdempotentMutationRestart() {
       paymentId: "restart-stripe-payment",
       demo: true,
       idempotencyKey: "restart-payment-1",
-    }) as { order?: { receipt?: { receiptHash?: string } } };
-    if (paymentReplay.order?.receipt?.receiptHash !== receiptHash) {
-      throw new Error(`Idempotent payment did not replay the same receipt after restart: ${JSON.stringify(paymentReplay)}`);
+    }) as { proofLevel?: string; order?: { receipt?: null; payment?: { paymentId?: string } } };
+    if (paymentReplay.proofLevel !== "payment_backed" || paymentReplay.order?.payment?.paymentId !== "restart-stripe-payment" || paymentReplay.order.receipt !== null) {
+      throw new Error(`Idempotent payment proof did not replay after restart: ${JSON.stringify(paymentReplay)}`);
     }
     const fulfillReplay = await issueMerchantReceipt("solyd", {}, {
       orderId: firstOrderId,
@@ -1026,8 +1529,9 @@ async function smokeIdempotentMutationRestart() {
       demo: true,
       idempotencyKey: "restart-receipt-after-payment",
     }) as { order?: { receipt?: { receiptHash?: string } } };
-    if (fulfillReplay.order?.receipt?.receiptHash !== receiptHash) {
-      throw new Error(`Receipt lifecycle should keep one canonical terminal receipt: ${JSON.stringify(fulfillReplay)}`);
+    const receiptHash = fulfillReplay.order?.receipt?.receiptHash;
+    if (!receiptHash) {
+      throw new Error(`Fulfillment after payment did not issue terminal receipt memory: ${JSON.stringify(fulfillReplay)}`);
     }
 
     const directOrder = await createMerchantOrder("solyd", {
@@ -1049,11 +1553,24 @@ async function smokeIdempotentMutationRestart() {
       paymentId: "restart-direct-stripe-payment",
     };
     const directPaid = await attachPaymentProof(directPayment);
-    const directReceiptHash = directPaid.receipt?.receiptHash;
-    if (!directReceiptHash) throw new Error(`Direct payment did not issue receipt memory: ${JSON.stringify(directPaid)}`);
+    if (directPaid.proofLevel !== "payment_backed" || directPaid.receipt !== null || directPaid.payment.paymentId !== directPayment.paymentId) {
+      throw new Error(`Direct payment did not remain payment-backed: ${JSON.stringify(directPaid)}`);
+    }
+    const verifiedProofConflict = await attachPaymentProof({ ...directPayment, paymentId: "restart-direct-stripe-payment-conflict" })
+      .then(() => null)
+      .catch((error) => error as Error & { code?: string; status?: number });
+    if (!verifiedProofConflict || verifiedProofConflict.status !== 409 || verifiedProofConflict.code !== "payment_proof_conflict") {
+      throw new Error(`Verified order should reject a different payment proof: ${JSON.stringify(verifiedProofConflict)}`);
+    }
+    const verifiedMerchantConflict = await attachPaymentProof({ ...directPayment, merchantId: "raposa-shop" })
+      .then(() => null)
+      .catch((error) => error as Error & { status?: number });
+    if (!verifiedMerchantConflict || verifiedMerchantConflict.status !== 409 || !verifiedMerchantConflict.message.includes("does not match order merchant")) {
+      throw new Error(`Verified replay should validate merchant before returning: ${JSON.stringify(verifiedMerchantConflict)}`);
+    }
     resetStoreForTest();
     const directReplay = await attachPaymentProof(directPayment);
-    if (directReplay.receipt?.receiptHash !== directReceiptHash) {
+    if (directReplay.proofLevel !== "payment_backed" || directReplay.receipt !== null || directReplay.payment.paymentId !== directPayment.paymentId) {
       throw new Error(`Direct payment adapter did not replay after store restart: ${JSON.stringify(directReplay)}`);
     }
     const directConflict = await attachPaymentProof({ ...directPayment, amountUsd: "999.99" })
@@ -1061,6 +1578,23 @@ async function smokeIdempotentMutationRestart() {
       .catch((error) => error as Error & { code?: string });
     if (!directConflict || directConflict.code !== "idempotency_conflict") {
       throw new Error(`Direct payment adapter should reject changed replay data after restart: ${JSON.stringify(directConflict)}`);
+    }
+    await issueMerchantReceipt("solyd", {}, {
+      orderId: directOrderId,
+      actor: "solyd-replay-smoke",
+      note: "Fulfilled before a late payment webhook replay.",
+      demo: true,
+      idempotencyKey: "restart-direct-receipt",
+    });
+    const finalSameProof = await attachPaymentProof(directPayment, { actionKey: "same-proof-after-receipt" });
+    if (finalSameProof.status !== "receipt_issued" || !finalSameProof.receipt?.receiptHash) {
+      throw new Error(`Same payment proof should replay after receipt issuance: ${JSON.stringify(finalSameProof)}`);
+    }
+    const finalProofConflict = await attachPaymentProof({ ...directPayment, paymentId: "late-conflicting-payment" })
+      .then(() => null)
+      .catch((error) => error as Error & { code?: string; status?: number });
+    if (!finalProofConflict || finalProofConflict.status !== 409 || finalProofConflict.code !== "payment_proof_conflict") {
+      throw new Error(`Receipt-issued order should reject a different payment proof: ${JSON.stringify(finalProofConflict)}`);
     }
   });
 }
@@ -1140,7 +1674,7 @@ async function smokeVerifiedReview(origin: string) {
   });
   if (early.status !== 409) throw new Error(`review before proof should be 409, got ${early.status}`);
 
-  // Pay (demo webhook) → payment proof → eligible.
+  // Pay (demo webhook) → payment proof only. It must still be ineligible.
   const prevWh = process.env.STRIPE_WEBHOOK_SECRET;
   delete process.env.STRIPE_WEBHOOK_SECRET;
   try {
@@ -1152,12 +1686,43 @@ async function smokeVerifiedReview(origin: string) {
   } finally {
     if (prevWh === undefined) delete process.env.STRIPE_WEBHOOK_SECRET; else process.env.STRIPE_WEBHOOK_SECRET = prevWh;
   }
+  const paymentOnly = await fetch(`${origin}/orders/${orderId}/review`, {
+    method: "POST", headers: { "content-type": "application/json", ...auth }, body: JSON.stringify({ feedback: { rating: 5 } }),
+  });
+  if (paymentOnly.status !== 409) throw new Error(`review after payment but before fulfillment should be 409, got ${paymentOnly.status}`);
+  const paymentBackedOrder = await getOrder(orderId);
+  if (!paymentBackedOrder) throw new Error("Payment-backed review order disappeared.");
+  const forgedReceiptOrder: SellerOrder = {
+    ...paymentBackedOrder,
+    lifecycle: { ...paymentBackedOrder.lifecycle, receipt: "issued" },
+    receipt: {
+      status: "submitted",
+      receiptMemoryId: "forged-receipt-memory",
+      receiptHash: "forged-receipt-hash",
+      claimUrl: "https://example.invalid/forged",
+      cnftStatus: "pending",
+    },
+  };
+  if (eligibleForReview(forgedReceiptOrder)) {
+    throw new Error("A final-looking receipt without terminal fulfillment must not unlock a verified review.");
+  }
+  await postJson(origin, "/merchants/solyd/receipt", {
+    orderId,
+    actor: "solyd-fulfillment",
+    note: "Shipping fulfillment confirmed for review smoke.",
+    demo: true,
+  });
 
   const reviewed = await postJson(origin, `/orders/${orderId}/review`, {
     feedback: { rating: 5, wouldRepeat: true, note: "fast" },
     agentDecision: { userIntent: "case under $100", whyRecommended: "in budget + fast", alternativesRejected: ["pricier case"] },
   }, auth) as { review?: { verifiedBy?: string[]; agentUsable?: boolean; feedback?: { rating?: number }; agentDecision?: { whyRecommended?: string } } };
-  if (!reviewed.review?.verifiedBy?.includes("stripe_payment") || !reviewed.review.verifiedBy.includes("user_feedback")) {
+  if (
+    !reviewed.review?.verifiedBy?.includes("stripe_payment")
+    || !reviewed.review.verifiedBy.includes("receipt_memory")
+    || !reviewed.review.verifiedBy.includes("user_feedback")
+    || reviewed.review.verifiedBy.length === 0
+  ) {
     throw new Error(`verified review missing proofs: ${JSON.stringify(reviewed.review)}`);
   }
   if (reviewed.review.agentUsable !== true || reviewed.review.feedback?.rating !== 5 || reviewed.review.agentDecision?.whyRecommended !== "in budget + fast") {
@@ -1207,7 +1772,7 @@ async function smokeActionLoop(origin: string) {
     throw new Error(`action-loop: order event not logged: ${JSON.stringify(orderLoop)}`);
   }
 
-  // Pay via the demo Stripe webhook → payment + receipt event on the SAME loop.
+  // Pay via the demo Stripe webhook → non-terminal payment event on the SAME loop.
   const cents = Math.round(Number(o.order?.item?.subtotalUsd) * 100);
   const prevWh = process.env.STRIPE_WEBHOOK_SECRET;
   delete process.env.STRIPE_WEBHOOK_SECRET;
@@ -1221,7 +1786,7 @@ async function smokeActionLoop(origin: string) {
     if (prevWh === undefined) delete process.env.STRIPE_WEBHOOK_SECRET; else process.env.STRIPE_WEBHOOK_SECRET = prevWh;
   }
   const paidLoop = await getLoop(loopIdForOrder(orderId));
-  if (!paidLoop?.events.some((e) => e.eventType === "payment") || paidLoop.currentState !== "receipt_issued") {
+  if (!paidLoop?.events.some((e) => e.eventType === "payment") || paidLoop.currentState !== "payment_backed" || paidLoop.receiptId !== null) {
     throw new Error(`action-loop: payment event not logged: ${JSON.stringify(paidLoop)}`);
   }
 
@@ -1381,7 +1946,7 @@ async function smokeStripePrepay(origin: string) {
       throw new Error(`Stripe prepare-payment did not return a checkout URL: ${JSON.stringify(options.paymentOptions)}`);
     }
 
-    // Webhook demo path (no STRIPE_WEBHOOK_SECRET): demo=true issues receipt.
+    // Webhook demo path (no STRIPE_WEBHOOK_SECRET): demo=true attaches payment proof only.
     delete process.env.STRIPE_WEBHOOK_SECRET;
     const amountCents = Math.round(Number(order.order?.item?.subtotalUsd) * 100);
     const demoEvent = {
@@ -1389,12 +1954,12 @@ async function smokeStripePrepay(origin: string) {
       data: { object: { id: "cs_test_smoke123", payment_status: "paid", amount_total: amountCents, metadata: { sllr_order_id: orderId, sllr_merchant_id: "solyd" } } },
       demo: true,
     };
-    const demoPaid = await postJson(origin, "/webhooks/stripe", demoEvent) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
-    if (demoPaid.proofLevel !== "receipt_memory_issued" || demoPaid.order?.payment?.provider !== "stripe" || !demoPaid.order.receipt?.receiptHash) {
-      throw new Error(`Stripe demo webhook did not issue receipt memory: ${JSON.stringify(demoPaid)}`);
+    const demoPaid = await postJson(origin, "/webhooks/stripe", demoEvent) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: null } };
+    if (demoPaid.proofLevel !== "payment_backed" || demoPaid.order?.payment?.provider !== "stripe" || demoPaid.order.receipt !== null) {
+      throw new Error(`Stripe demo webhook did not remain payment-backed: ${JSON.stringify(demoPaid)}`);
     }
 
-    // An unpaid completed session must NOT issue receipt memory (ignored).
+    // An unpaid completed session must not attach payment proof (ignored).
     const unpaidOrder = await postJson(origin, "/merchants/solyd/orders", {
       userIntent: "Ship me a clear MagSafe iPhone 16 case under $100",
       maxSpendUsd: "100.00", deliverByDays: 7, paymentMode: "checkout",
@@ -1404,8 +1969,8 @@ async function smokeStripePrepay(origin: string) {
       data: { object: { id: "cs_test_unpaid", payment_status: "unpaid", amount_total: Math.round(Number(unpaidOrder.order?.item?.subtotalUsd) * 100), metadata: { sllr_order_id: unpaidOrder.order?.id, sllr_merchant_id: "solyd" } } },
       demo: true,
     }) as { ignored?: string; proofLevel?: string };
-    if (unpaid.ignored !== "checkout.session.completed" || unpaid.proofLevel === "receipt_memory_issued") {
-      throw new Error(`Stripe unpaid session should be ignored, not receipted: ${JSON.stringify(unpaid)}`);
+    if (unpaid.ignored !== "checkout.session.completed" || unpaid.proofLevel === "payment_backed") {
+      throw new Error(`Stripe unpaid session should be ignored, not payment-backed: ${JSON.stringify(unpaid)}`);
     }
 
     // Underpayment must be rejected (fresh order, demo path).
@@ -1447,8 +2012,8 @@ async function smokeStripePrepay(origin: string) {
       body: body2,
     });
     const signed = await signedRes.json() as { proofLevel?: string };
-    if (!signedRes.ok || signed.proofLevel !== "receipt_memory_issued") {
-      throw new Error(`Stripe signed webhook did not issue receipt memory: ${JSON.stringify(signed)}`);
+    if (!signedRes.ok || signed.proofLevel !== "payment_backed") {
+      throw new Error(`Stripe signed webhook did not attach payment proof: ${JSON.stringify(signed)}`);
     }
 
     // Bad signature must be rejected.
@@ -1579,7 +2144,7 @@ async function smokeCardOnFile(origin: string) {
     if (!saved.saved || saved.buyerId !== buyerId) throw new Error(`card save webhook failed: ${JSON.stringify(saved)}`);
   };
   const pay = async (token: string, orderId: string) =>
-    postJson(origin, "/buyer/pay", { orderId }, { authorization: `Bearer ${token}` }) as Promise<{ status?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } }>;
+    postJson(origin, "/buyer/pay", { orderId }, { authorization: `Bearer ${token}` }) as Promise<{ status?: string; order?: { proofLevel?: string; payment?: { provider?: string }; receipt?: null } }>;
 
   try {
     // 1. card/setup requires a buyer token.
@@ -1598,11 +2163,11 @@ async function smokeCardOnFile(origin: string) {
     const beforeCard = await pay(buyerA.token, orderA);
     if (beforeCard.status !== "no_card") throw new Error(`pay before card should be no_card: ${JSON.stringify(beforeCard)}`);
 
-    // 4. save a good card, then off-session charge → paid + receipt memory issued.
+    // 4. save a good card, then off-session charge → paid, still awaiting fulfillment.
     await saveCard(buyerA.buyerId, "pm_good");
     const paid = await pay(buyerA.token, orderA);
-    if (paid.status !== "paid" || paid.order?.payment?.provider !== "stripe" || !paid.order.receipt?.receiptHash) {
-      throw new Error(`pay with saved card did not settle the order: ${JSON.stringify(paid)}`);
+    if (paid.status !== "paid" || paid.order?.proofLevel !== "payment_backed" || paid.order.payment?.provider !== "stripe" || paid.order.receipt !== null) {
+      throw new Error(`pay with saved card did not leave the order payment-backed: ${JSON.stringify(paid)}`);
     }
 
     // 5. idempotent: paying the same order again → already_paid (no double charge).
@@ -1704,14 +2269,14 @@ async function smokeCheckoutSavesCard(origin: string) {
       throw new Error(`buyer-bound checkout did not return a checkout URL: ${JSON.stringify(opts.paymentOptions)}`);
     }
 
-    // The checkout completes → receipt issued AND the card is captured/saved.
+    // The checkout completes → payment proof attached AND the card is captured/saved.
     const cents = Math.round(Number(order1.item?.subtotalUsd) * 100);
     const paid = await postJson(origin, "/webhooks/stripe", {
       type: "checkout.session.completed",
       data: { object: { id: "cs_chk_123", payment_status: "paid", amount_total: cents, customer: "cus_chk_123", payment_intent: "pi_chk_123", metadata: { sllr_order_id: order1.id, sllr_merchant_id: "solyd" } } },
       demo: true,
     }) as { proofLevel?: string };
-    if (paid.proofLevel !== "receipt_memory_issued") throw new Error(`checkout webhook did not issue receipt: ${JSON.stringify(paid)}`);
+    if (paid.proofLevel !== "payment_backed") throw new Error(`checkout webhook did not attach payment proof: ${JSON.stringify(paid)}`);
 
     // Proof the card stuck: a SECOND order charges off-session with NO SetupIntent
     // and NO link — only possible if the first checkout saved the card.
@@ -1837,12 +2402,12 @@ async function smokeRecurring(origin: string) {
     if (!created.length) throw new Error("sweep created no runs for due subscriptions.");
     if (created.some((r) => r.buyerId === e.buyerId)) throw new Error("canceled subscription was swept.");
 
-    // A: confirm → charged + receipt issued; second confirm → already_done.
+    // A: confirm → charged and payment-backed; second confirm → already_done.
     const aRun = await runIdFor(a.buyerId, JUST_AFTER);
     if (!aRun) throw new Error("no pending run for buyer A.");
     const aPaid = await confirmRun(aRun, a.buyerId, JUST_AFTER);
-    if (aPaid.status !== "charged" || aPaid.order?.payment?.provider !== "stripe" || !aPaid.order.receipt?.receiptHash) {
-      throw new Error(`recurring confirm did not charge + receipt: ${JSON.stringify(aPaid)}`);
+    if (aPaid.status !== "charged" || aPaid.order?.proofLevel !== "payment_backed" || aPaid.order.payment?.provider !== "stripe" || aPaid.order.receipt !== null) {
+      throw new Error(`recurring confirm did not leave the order payment-backed: ${JSON.stringify(aPaid)}`);
     }
     const aAgain = await confirmRun(aRun, a.buyerId, JUST_AFTER);
     if (aAgain.status !== "already_done") throw new Error(`re-confirm should be already_done: ${JSON.stringify(aAgain)}`);
@@ -1954,13 +2519,13 @@ async function smokeLinePay(origin: string) {
 
     // Simulate the redirect-back confirm.
     const confirmRes = await fetch(`${origin}/line-pay/confirm?orderId=${encodeURIComponent(orderId)}&transactionId=${encodeURIComponent(lp.transactionId)}`);
-    const confirmed = await confirmRes.json() as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
-    if (!confirmRes.ok || confirmed.proofLevel !== "receipt_memory_issued" || confirmed.order?.payment?.provider !== "line_pay" || !confirmed.order.receipt?.receiptHash) {
-      throw new Error(`LINE Pay confirm did not issue receipt memory: ${JSON.stringify(confirmed)}`);
+    const confirmed = await confirmRes.json() as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: null } };
+    if (!confirmRes.ok || confirmed.proofLevel !== "payment_backed" || confirmed.order?.payment?.provider !== "line_pay" || confirmed.order.receipt !== null) {
+      throw new Error(`LINE Pay confirm did not attach payment proof: ${JSON.stringify(confirmed)}`);
     }
 
     // Anti-forgery: a confirm with an unknown transactionId is rejected upstream
-    // (returnCode != 0000) and must NOT issue receipt memory.
+    // (returnCode != 0000) and must not attach payment proof.
     const forgeOrder = await postJson(origin, "/merchants/louisa-coffee/orders", {
       userIntent: "americano pickup", deadlineMinutes: 10, paymentMode: "counter",
     }) as { order?: { id?: string } };
@@ -2305,7 +2870,16 @@ async function smokePersonalShop(origin: string) {
     amountUsd: completedOrder.order.item?.subtotalUsd,
     demo: true,
   }) as { proofLevel?: string };
-  if (proof.proofLevel !== "receipt_memory_issued") throw new Error(`Taste-memory proof did not issue receipt memory: ${JSON.stringify(proof)}`);
+  if (proof.proofLevel !== "payment_backed") throw new Error(`Taste-memory payment did not remain payment-backed: ${JSON.stringify(proof)}`);
+  const fulfilled = await postJson(origin, "/merchants/raposa-coffee/receipt", {
+    orderId: completedOrder.order.id,
+    actor: "raposa-staff",
+    note: "Taste-memory smoke order was handed to the buyer.",
+    demo: true,
+  }) as { proofLevel?: string };
+  if (fulfilled.proofLevel !== "receipt_memory_issued") {
+    throw new Error(`Taste-memory fulfillment did not issue receipt memory: ${JSON.stringify(fulfilled)}`);
+  }
 
   const tasteResponse = await fetch(`${origin}/buyer/shop`, {
     method: "POST",
@@ -2319,6 +2893,7 @@ async function smokePersonalShop(origin: string) {
 }
 
 async function main() {
+  smokeMoneyBoundaries();
   const server = createSllrServer();
   server.listen(0);
   await once(server, "listening");
@@ -2401,9 +2976,14 @@ async function main() {
       || !mcpManifest.transport.url?.endsWith("/mcp")
       || !mcpManifest.safety?.noAutonomousPayment
       || !mcpManifest.tools?.some((tool) => tool.name === "shop_for_me" && tool.path === "/buyer/shop")
+      || !mcpManifest.tools?.some((tool) => tool.name === "list_offers" && tool.path === "/merchants/{merchantId}/offers")
+      || !mcpManifest.tools?.some((tool) => tool.name === "quote_offer" && tool.path === "/merchants/{merchantId}/offers/{offerId}/quote")
+      || !mcpManifest.tools?.some((tool) => tool.name === "list_capacity_windows" && tool.path === "/merchants/{merchantId}/capacity")
       || !mcpManifest.tools?.some((tool) => tool.name === "quote_order" && tool.path === "/merchants/{merchantId}/quote")
       || !mcpManifest.tools?.some((tool) => tool.name === "request_consent" && tool.path === "/consent")
       || !mcpManifest.tools?.some((tool) => tool.name === "create_order" && tool.path === "/merchants/{merchantId}/orders")
+      || !mcpManifest.tools?.some((tool) => tool.name === "create_fulfillment_batch" && tool.path === "/merchants/{merchantId}/batches")
+      || !mcpManifest.tools?.some((tool) => tool.name === "get_fulfillment_batch" && tool.path === "/merchants/{merchantId}/batches/{batchId}")
       || !mcpManifest.tools?.some((tool) => tool.name === "get_payment_options" && tool.path === "/merchants/{merchantId}/payment-options")
     ) {
       throw new Error(`SLL-R MCP manifest did not expose generic merchant tools: ${JSON.stringify(mcpManifest)}`);
@@ -2413,6 +2993,7 @@ async function main() {
     await smokeConcurrentMutationClaims();
     await smokeCompletionPersistenceFailure();
     await smokeIdempotentMutationRestart();
+    await smokeCommerceLevels(origin);
     await smokePersonalShop(origin);
     await smokeMcp(origin);
     await smokeReceiptGating(origin);
@@ -2439,7 +3020,14 @@ async function main() {
 
     const openapi = await getJson(origin, "/openapi.json") as {
       openapi?: string;
-      paths?: Record<string, unknown>;
+      paths?: Record<string, {
+        get?: { security?: Array<Record<string, unknown>>; responses?: Record<string, { description?: string }> };
+        post?: { security?: Array<Record<string, unknown>>; responses?: Record<string, { description?: string }> };
+      }>;
+      components?: {
+        securitySchemes?: Record<string, { type?: string; in?: string; name?: string }>;
+        schemas?: Record<string, unknown>;
+      };
     };
     if (
       openapi.openapi !== "3.1.0"
@@ -2450,6 +3038,11 @@ async function main() {
       || !openapi.paths?.["/agent/{merchantId}/message"]
       || !openapi.paths?.["/terminal/{merchantId}"]
       || !openapi.paths?.["/merchants/{merchantId}/quote"]
+      || !openapi.paths?.["/merchants/{merchantId}/offers"]
+      || !openapi.paths?.["/merchants/{merchantId}/offers/{offerId}/quote"]
+      || !openapi.paths?.["/merchants/{merchantId}/capacity"]
+      || !openapi.paths?.["/merchants/{merchantId}/batches"]
+      || !openapi.paths?.["/merchants/{merchantId}/batches/{batchId}"]
       || !openapi.paths?.["/merchants/{merchantId}/payment-options"]
       || !openapi.paths?.["/shopify/merchants"]
       || !openapi.paths?.["/webhooks/shopify/orders-paid"]
@@ -2457,6 +3050,41 @@ async function main() {
       || !openapi.paths?.["/.well-known/solana-sllr-plugin.md"]
     ) {
       throw new Error(`OpenAPI schema did not expose required agent tools: ${JSON.stringify(openapi)}`);
+    }
+    const batchList = openapi.paths["/merchants/{merchantId}/batches"]?.get;
+    const batchGet = openapi.paths["/merchants/{merchantId}/batches/{batchId}"]?.get;
+    const optionalBuyerOperations = [
+      openapi.paths["/merchants/{merchantId}/offers/{offerId}/quote"]?.post,
+      openapi.paths["/merchants/{merchantId}/quote"]?.post,
+      openapi.paths["/merchants/{merchantId}/orders"]?.post,
+    ];
+    if (
+      openapi.components?.securitySchemes?.MerchantVerifier?.type !== "apiKey"
+      || openapi.components.securitySchemes.MerchantVerifier.in !== "header"
+      || openapi.components.securitySchemes.MerchantVerifier.name !== "x-sllr-merchant-payment-secret"
+      || openapi.components.securitySchemes.MerchantDemo?.in !== "query"
+      || !batchList?.security?.some((entry) => "MerchantVerifier" in entry)
+      || !batchList.security.some((entry) => "MerchantDemo" in entry)
+      || !batchGet?.security?.some((entry) => "MerchantVerifier" in entry)
+      || !batchGet.security.some((entry) => "MerchantDemo" in entry)
+      || !batchList.responses?.["401"]
+      || !batchGet.responses?.["401"]
+    ) {
+      throw new Error(`OpenAPI merchant batch authorization was incomplete: ${JSON.stringify({ batchList, batchGet, schemes: openapi.components?.securitySchemes })}`);
+    }
+    if (optionalBuyerOperations.some((operation) => (
+      !operation?.security?.some((entry) => "BuyerBearer" in entry)
+      || !operation.security.some((entry) => Object.keys(entry).length === 0)
+    ))) {
+      throw new Error(`OpenAPI merchant quote/order operations did not document optional buyer bearer auth: ${JSON.stringify(optionalBuyerOperations)}`);
+    }
+    const offerSchemaText = JSON.stringify(openapi.components?.schemas?.MerchantOffer || {});
+    if (!offerSchemaText.includes("unitAmount") || !offerSchemaText.includes("subtotal") || offerSchemaText.includes("unitAmountUsd") || offerSchemaText.includes("subtotalUsd")) {
+      throw new Error(`OpenAPI MerchantOffer schema was not currency-neutral: ${offerSchemaText}`);
+    }
+    const baseDemoPayment = openapi.paths["/base-plugin/coffee/record-demo-payment"]?.get?.responses?.["200"]?.description || "";
+    if (!baseDemoPayment.includes("payment proof") || baseDemoPayment.includes("Receipt memory")) {
+      throw new Error(`Base demo payment OpenAPI response overclaimed receipt memory: ${baseDemoPayment}`);
     }
 
     const baseMcpPlugin = await fetch(`${origin}/.well-known/base-mcp-plugin.md`).then((response) => response.text());
@@ -2711,9 +3339,9 @@ async function main() {
       current_total_price: riceOrder.order.item?.subtotalUsd,
       admin_graphql_api_id: "gid://shopify/Order/rice-smoke",
       demo: true,
-    }) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
-    if (ricePaid.proofLevel !== "receipt_memory_issued" || ricePaid.order?.payment?.provider !== "shopify" || !ricePaid.order.receipt?.receiptHash) {
-      throw new Error(`Changbaishan Rice paid webhook did not issue receipt memory: ${JSON.stringify(ricePaid)}`);
+    }) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: null } };
+    if (ricePaid.proofLevel !== "payment_backed" || ricePaid.order?.payment?.provider !== "shopify" || ricePaid.order.receipt !== null) {
+      throw new Error(`Changbaishan Rice paid webhook did not remain payment-backed: ${JSON.stringify(ricePaid)}`);
     }
 
     const baseMerchants = await getJson(origin, "/base-plugin/coffee/merchants") as {
@@ -2787,17 +3415,17 @@ async function main() {
       process.env.SLLR_BASE_COFFEE_RECIPIENT = previousBaseRecipient;
     }
 
-    const nounReceipt = await getJson(origin, `/base-plugin/coffee/record-demo-payment?orderId=${nounOrder.order.id}&paymentId=base_tx_smoke`) as {
+    const nounPayment = await getJson(origin, `/base-plugin/coffee/record-demo-payment?orderId=${nounOrder.order.id}&paymentId=base_tx_smoke`) as {
       proofLevel?: string;
-      order?: { receipt?: { receiptHash?: string }; payment?: { provider?: string; paymentId?: string } };
+      order?: { receipt?: null; payment?: { provider?: string; paymentId?: string } };
     };
     if (
-      nounReceipt.proofLevel !== "receipt_memory_issued"
-      || !nounReceipt.order?.receipt?.receiptHash
-      || nounReceipt.order.payment?.provider !== "base_usdc"
-      || nounReceipt.order.payment.paymentId !== "base_tx_smoke"
+      nounPayment.proofLevel !== "payment_backed"
+      || nounPayment.order?.receipt !== null
+      || nounPayment.order.payment?.provider !== "base_usdc"
+      || nounPayment.order.payment.paymentId !== "base_tx_smoke"
     ) {
-      throw new Error(`Noun Coffee demo payment proof did not issue receipt memory: ${JSON.stringify(nounReceipt)}`);
+      throw new Error(`Noun Coffee demo payment did not remain payment-backed: ${JSON.stringify(nounPayment)}`);
     }
 
     const shopifyOrder = await getJson(origin, `/base-plugin/coffee/order?merchantId=noun-coffee&intent=${nounIntent}&maxSpendUsd=40.00&deliverByDays=7&agentId=shopify-smoke`) as {
@@ -2810,15 +3438,17 @@ async function main() {
       admin_graphql_api_id: "gid://shopify/Order/123",
       demo: true,
     };
-    const shopifyPaid = await postJson(origin, "/webhooks/shopify/orders-paid", shopifyPaidPayload) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
-    const shopifyPaidReplay = await postJson(origin, "/webhooks/shopify/orders-paid", shopifyPaidPayload) as { order?: { receipt?: { receiptHash?: string } } };
+    const shopifyPaid = await postJson(origin, "/webhooks/shopify/orders-paid", shopifyPaidPayload) as { proofLevel?: string; order?: { payment?: { provider?: string; paymentId?: string }; receipt?: null } };
+    const shopifyPaidReplay = await postJson(origin, "/webhooks/shopify/orders-paid", shopifyPaidPayload) as { proofLevel?: string; order?: { payment?: { paymentId?: string }; receipt?: null } };
     if (
-      shopifyPaid.proofLevel !== "receipt_memory_issued"
+      shopifyPaid.proofLevel !== "payment_backed"
+      || shopifyPaidReplay.proofLevel !== "payment_backed"
       || shopifyPaid.order?.payment?.provider !== "shopify"
-      || !shopifyPaid.order.receipt?.receiptHash
-      || shopifyPaid.order.receipt.receiptHash !== shopifyPaidReplay.order?.receipt?.receiptHash
+      || shopifyPaid.order.receipt !== null
+      || shopifyPaidReplay.order?.receipt !== null
+      || shopifyPaid.order.payment.paymentId !== shopifyPaidReplay.order.payment?.paymentId
     ) {
-      throw new Error(`Shopify paid webhook proof did not issue receipt memory: ${JSON.stringify(shopifyPaid)}`);
+      throw new Error(`Shopify paid webhook proof did not replay payment state: ${JSON.stringify(shopifyPaid)}`);
     }
     const shopifyPaidConflict = await postJsonFailure(origin, "/webhooks/shopify/orders-paid", {
       ...shopifyPaidPayload,
@@ -2867,16 +3497,41 @@ async function main() {
       throw new Error(`Unexpected Raposa Coffee quote: ${JSON.stringify(pickupQuote)}`);
     }
 
-    const pickupOrder = await postJson(origin, "/orders", {
+    const pickupBuyer = await postJson(origin, "/buyer/session", { label: "pickup promise smoke buyer" }) as { token?: string };
+    if (!pickupBuyer.token) throw new Error(`Pickup promise buyer session failed: ${JSON.stringify(pickupBuyer)}`);
+    const pickupOrder = await createBuyerOrder(origin, pickupBuyer.token, "raposa-coffee", {
       merchantId: "raposa-coffee",
       agentId: "buy-r-smoke",
       userIntent: "Get me an iced latte under $10 in 15 minutes",
       maxSpendUsd: "10.00",
       deadlineMinutes: 15,
       paymentMode: "counter",
-    }) as { order?: { id?: string; promise?: { status?: string; estimatedWaitMinutes?: number; promisedReadyAt?: string } } };
+    }) as {
+      order?: {
+        id?: string;
+        promise?: {
+          status?: string;
+          estimatedWaitMinutes?: number;
+          promisedReadyAt?: string;
+          capacityWindowId?: string;
+          capacityWindowStartsAt?: string;
+          capacityWindowEndsAt?: string;
+        };
+        capacityReservation?: { status?: string };
+      };
+    };
     if (!pickupOrder.order?.id) throw new Error(`Pickup order was not created: ${JSON.stringify(pickupOrder)}`);
-    if (pickupOrder.order.promise?.status !== "on_time" || !pickupOrder.order.promise.promisedReadyAt) {
+    const pickupPromise = pickupOrder.order.promise;
+    if (
+      !["on_time", "delayed_offer"].includes(pickupPromise?.status || "")
+      || !pickupPromise?.promisedReadyAt
+      || !pickupPromise.capacityWindowId
+      || !pickupPromise.capacityWindowStartsAt
+      || !pickupPromise.capacityWindowEndsAt
+      || !Number.isInteger(pickupPromise.estimatedWaitMinutes)
+      || (pickupPromise.estimatedWaitMinutes || 0) < 1
+      || pickupOrder.order.capacityReservation?.status !== "held"
+    ) {
       throw new Error(`Pickup order did not include a pickup promise: ${JSON.stringify(pickupOrder)}`);
     }
 
@@ -3018,14 +3673,14 @@ async function main() {
       amountUsd: merchantOrder.order.item?.subtotalUsd,
       paymentId: "merchant_pay_smoke",
       demo: true,
-    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string }; payment?: { provider?: string; paymentId?: string } } };
+    }) as { proofLevel?: string; order?: { receipt?: null; payment?: { provider?: string; paymentId?: string } } };
     if (
-      merchantPayment.proofLevel !== "receipt_memory_issued"
-      || !merchantPayment.order?.receipt?.receiptHash
+      merchantPayment.proofLevel !== "payment_backed"
+      || merchantPayment.order?.receipt !== null
       || merchantPayment.order.payment?.provider !== "moonpay"
       || merchantPayment.order.payment.paymentId !== "merchant_pay_smoke"
     ) {
-      throw new Error(`Merchant-scoped payment proof did not issue receipt memory: ${JSON.stringify(merchantPayment)}`);
+      throw new Error(`Merchant-scoped payment proof did not remain payment-backed: ${JSON.stringify(merchantPayment)}`);
     }
 
     const receiptOrder = await postJson(origin, "/merchants/raposa-coffee/orders", {
@@ -3101,9 +3756,9 @@ async function main() {
       paymentId: "solana_tx_smoke",
       reference: solanaPayment.reference,
       demo: true,
-    }) as { proofLevel?: string; order?: { receipt?: { receiptHash?: string }; payment?: { provider?: string } } };
-    if (solanaPaid.proofLevel !== "receipt_memory_issued" || solanaPaid.order?.payment?.provider !== "solana_pay" || !solanaPaid.order.receipt?.receiptHash) {
-      throw new Error(`Solana Pay proof did not issue receipt memory: ${JSON.stringify(solanaPaid)}`);
+    }) as { proofLevel?: string; order?: { receipt?: null; payment?: { provider?: string } } };
+    if (solanaPaid.proofLevel !== "payment_backed" || solanaPaid.order?.payment?.provider !== "solana_pay" || solanaPaid.order.receipt !== null) {
+      throw new Error(`Solana Pay proof did not remain payment-backed: ${JSON.stringify(solanaPaid)}`);
     }
     if (previousSolanaRecipient === undefined) {
       delete process.env.SLLR_SOLANA_PAY_RECIPIENT;
@@ -3139,9 +3794,9 @@ async function main() {
       amountUsd: helioOrder.order.item?.subtotalUsd,
       paymentId: "helio_tx_smoke",
       demo: true,
-    }) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: { receiptHash?: string } } };
-    if (helioPaid.proofLevel !== "receipt_memory_issued" || helioPaid.order?.payment?.provider !== "helio" || !helioPaid.order.receipt?.receiptHash) {
-      throw new Error(`Helio webhook proof did not issue receipt memory: ${JSON.stringify(helioPaid)}`);
+    }) as { proofLevel?: string; order?: { payment?: { provider?: string }; receipt?: null } };
+    if (helioPaid.proofLevel !== "payment_backed" || helioPaid.order?.payment?.provider !== "helio" || helioPaid.order.receipt !== null) {
+      throw new Error(`Helio webhook proof did not remain payment-backed: ${JSON.stringify(helioPaid)}`);
     }
     if (previousHelioUrl === undefined) {
       delete process.env.SLLR_HELIO_CHECKOUT_BASE_URL;
@@ -3159,18 +3814,20 @@ async function main() {
     };
     const paid = await postJson(origin, "/webhooks/payment", paymentWebhookPayload) as {
       proofLevel?: string;
-      order?: { receipt?: { receiptHash?: string; cnftStatus?: string } };
+      order?: { receipt?: null; payment?: { paymentId?: string } };
       mutation?: { terminal?: boolean; receiptRef?: string };
     };
-    const paidReplay = await postJson(origin, "/webhooks/payment", paymentWebhookPayload) as { order?: { receipt?: { receiptHash?: string } } };
+    const paidReplay = await postJson(origin, "/webhooks/payment", paymentWebhookPayload) as { proofLevel?: string; order?: { receipt?: null; payment?: { paymentId?: string } } };
     if (
-      paid.proofLevel !== "receipt_memory_issued"
-      || !paid.order?.receipt?.receiptHash
-      || paid.order.receipt.receiptHash !== paidReplay.order?.receipt?.receiptHash
-      || paid.mutation?.terminal !== true
-      || !paid.mutation.receiptRef
+      paid.proofLevel !== "payment_backed"
+      || paidReplay.proofLevel !== "payment_backed"
+      || paid.order?.receipt !== null
+      || paidReplay.order?.receipt !== null
+      || paid.order.payment?.paymentId !== paidReplay.order.payment?.paymentId
+      || paid.mutation?.terminal !== false
+      || paid.mutation.receiptRef !== undefined
     ) {
-      throw new Error(`Payment proof did not issue receipt handoff: ${JSON.stringify(paid)}`);
+      throw new Error(`Payment proof did not replay non-terminal payment state: ${JSON.stringify(paid)}`);
     }
     const paidConflict = await postJsonFailure(origin, "/webhooks/payment", {
       ...paymentWebhookPayload,

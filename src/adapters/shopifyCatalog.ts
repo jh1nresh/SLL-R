@@ -294,7 +294,7 @@ export async function createDemoMerchant(headers: Record<string, string | string
     notes: [
       "Prices come from the public products.json feed and are assumed to be USD.",
       "Payment rails default to counter + shopify checkout handoff; crypto rails are opt-in per merchant.",
-      "Demo merchants live in memory and reset on server restart.",
+      "Demo merchants persist through the configured SLL-R store; the memory backend resets with the process.",
     ],
   };
 }
