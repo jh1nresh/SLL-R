@@ -12,8 +12,8 @@ GET /solana-pay/merchants
 
 ## Goal
 
-Show a buyer agent creating an order, preparing Solana payment, and turning
-payment proof into SLL-R receipt memory.
+Show a buyer agent creating an order, preparing Solana payment, attaching
+payment proof, and receiving SLL-R receipt memory after merchant fulfillment.
 
 ```text
 agent intent
@@ -21,6 +21,7 @@ agent intent
 -> SLL-R order
 -> Solana Pay URL or Helio checkout handoff
 -> payment proof
+-> merchant fulfillment or customer claim
 -> SLL-R receipt memory
 ```
 
@@ -51,7 +52,8 @@ endpoint as production payment verification.
 Buy me a SOLYD black MagSafe iPhone 16 case under $100.
 Use SLL-R to quote, create the order, prepare Solana Pay, and show the merchant,
 item, amount, Solana recipient, and reference before payment.
-After payment proof is attached, show the SLL-R receipt memory.
+After payment proof is attached, show the payment-backed state. Then record
+merchant fulfillment and show the final SLL-R receipt memory.
 ```
 
 For Raposa beans:

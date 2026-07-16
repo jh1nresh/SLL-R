@@ -63,6 +63,7 @@ buyer agent asks for a phone case
 -> buyer agent creates order
 -> checkout handoff uses existing SOLYD checkout
 -> payment webhook confirms proof
+-> merchant fulfillment confirms the outcome
 -> SLL-R issues receipt memory
 ```
 
@@ -70,7 +71,7 @@ What SOLYD gets:
 
 - agent-readable product catalog
 - quote/order API without rebuilding checkout
-- payment-backed receipt memory
+- payment proof kept separate from fulfillment-backed receipt memory
 - future AgentShack distribution as an agent-ready merchant
 
 Initial config:
@@ -90,7 +91,7 @@ Ask for:
 - stock or availability rules
 - pickup prep time or shipping estimate
 - current checkout/payment provider
-- webhook access if they want payment-backed receipts
+- webhook access if they want verified payment state before fulfillment
 - preferred staff notification channel
 - Solana Pay recipient wallet or Helio / MoonPay Commerce pay link if they want
   a Solana-native rail

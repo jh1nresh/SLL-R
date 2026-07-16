@@ -1,4 +1,5 @@
 export type FulfillmentMode = "pickup" | "shipping";
+export type ProductionClass = "espresso" | "cold" | "pastry" | "general";
 export type PaymentRail =
   | "counter"
   | "telegram_staff"
@@ -15,8 +16,8 @@ export type AgentShackListingType = "merchant_agent";
 export type AgentShackMode = "one_time_call" | "subscription" | "fork";
 
 export type Money = {
-  amountUsd: string;
-  currency: "USD";
+  amountMinor: number;
+  currency: "USD" | "TWD";
 };
 
 export type CatalogItem = {
@@ -24,7 +25,7 @@ export type CatalogItem = {
   name: string;
   amountUsd: string;
   fulfillment: FulfillmentMode[];
-  productionClass?: "espresso" | "cold" | "pastry" | "general";
+  productionClass?: ProductionClass;
   prepMinutes?: number;
   shippingDays?: number;
   inventory?: number;
@@ -75,6 +76,8 @@ export type QuoteRequest = {
   deadlineMinutes?: number;
   deliverByDays?: number;
   quantity?: number;
+  offerId?: string;
+  pickupAt?: string;
 };
 
 export type QuoteResult = {
@@ -108,6 +111,99 @@ export type OrderRequest = QuoteRequest & {
   buyerId?: string;
 };
 
+export type OrderLifecycle = {
+  order: "open" | "rejected" | "completed";
+  payment: "required" | "verified";
+  fulfillment: "requested" | "accepted" | "rejected" | "ready" | "claimed" | "fulfilled";
+  receipt: "none" | "issued";
+};
+
+export type CapacityWindowSnapshot = {
+  id: string;
+  merchantId: string;
+  productionClass: ProductionClass;
+  startsAt: string;
+  endsAt: string;
+  capacity: number;
+  reserved: number;
+  available: number;
+};
+
+export type CapacityReservation = {
+  id: string;
+  windowId: string;
+  merchantId: string;
+  productionClass: ProductionClass;
+  quantity: number;
+  startsAt: string;
+  endsAt: string;
+  status: "held" | "consumed" | "released";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MerchantOffer = {
+  id: string;
+  merchantId: string;
+  level: 1;
+  kind: "instant_offer";
+  title: string;
+  lineItems: Array<{
+    itemId: string;
+    name: string;
+    quantity: number;
+    unitAmountUsd: string;
+    subtotalUsd: string;
+  }>;
+  amount: Money;
+  amountUsd: string;
+  fulfillment: FulfillmentMode[];
+  productionClass: ProductionClass;
+  status: "active";
+  startsAt: string | null;
+  expiresAt: string | null;
+  redemptionWindow: {
+    mode: "quote_bound";
+    startsAt: string | null;
+    endsAt: string | null;
+  };
+  perBuyerLimit: number | null;
+  inventoryLimit: number | null;
+  terms: string[];
+  source: {
+    type: "merchant_catalog";
+    reference: string;
+    lastVerifiedAt: string | null;
+    verificationStatus: "configured";
+  };
+};
+
+export type FulfillmentBatch = {
+  id: string;
+  merchantId: string;
+  label: string;
+  level: 2;
+  orderIds: string[];
+  status: "open" | "in_progress" | "ready" | "completed";
+  pickupWindow: {
+    id: string;
+    startsAt: string;
+    endsAt: string;
+  } | null;
+  totals: {
+    orders: number;
+    quantity: number;
+    amountUsd: string;
+  };
+  items: Array<{
+    itemId: string;
+    name: string;
+    quantity: number;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type SellerOrder = {
   id: string;
   merchantId: string;
@@ -115,12 +211,16 @@ export type SellerOrder = {
   agentId: string;
   customerLabel: string;
   buyerId: string | null;
+  offerId: string | null;
+  batchId: string | null;
+  lifecycle: OrderLifecycle;
   status: "pending_payment" | "accepted" | "rejected" | "payment_backed" | "ready" | "claimed" | "fulfilled" | "receipt_issued";
   proofLevel: ProofLevel;
   item: NonNullable<QuoteResult["item"]>;
+  lineItems: Array<NonNullable<QuoteResult["item"]>>;
   promise: {
     status: "on_time" | "delayed_offer" | "not_applicable";
-    productionClass: "espresso" | "cold" | "pastry" | "general" | "shipping";
+    productionClass: ProductionClass | "shipping";
     requestedReadyAt: string | null;
     promisedReadyAt: string | null;
     estimatedWaitMinutes: number | null;
@@ -128,7 +228,11 @@ export type SellerOrder = {
     readyAt: string | null;
     claimedAt: string | null;
     delayMinutes: number | null;
+    capacityWindowId: string | null;
+    capacityWindowStartsAt: string | null;
+    capacityWindowEndsAt: string | null;
   };
+  capacityReservation: CapacityReservation | null;
   payment: {
     mode: "counter" | "checkout" | "crypto";
     status: "required" | "verified";

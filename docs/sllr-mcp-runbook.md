@@ -100,7 +100,7 @@ ordering still works unless the server sets `SLLR_REQUIRE_BUYER_AUTH=true`.
    GET /orders/{orderId}
    ```
 
-7. Issue receipt memory after payment proof or fulfillment proof.
+7. Record merchant fulfillment, then issue receipt memory.
 
    ```text
    POST /merchants/{merchantId}/receipt
@@ -112,16 +112,17 @@ ordering still works unless the server sets `SLLR_REQUIRE_BUYER_AUTH=true`.
 
 ## Receipt Memory Requires Proof
 
-Receipt memory is only issued after one of:
+Receipt memory is only issued after merchant fulfillment or customer claim:
 
 - **Verified payment proof** — `attach_payment_proof` with a configured verifier
-  secret (or `demo=true` locally) issues receipt memory automatically.
+  secret (or `demo=true` locally) moves the order to `payment_backed`; it does
+  not issue final receipt memory.
 - **Merchant fulfillment proof** — a staff terminal action (claim/fulfill) or
-  `issue_receipt`. These are gated by the merchant verifier secret
+  `issue_receipt` creates final receipt memory. These are gated by the merchant verifier secret
   (`SLLR_MERCHANT_PAYMENT_VERIFY_SECRET`): the caller must supply it as the
   `x-sllr-merchant-payment-secret` header or `verificationToken`, and `demo=true`
   is only accepted when no secret is configured. Buyer agents cannot mint receipt
-  memory — their path to a receipt is to pay.
+  memory. Payment and fulfillment remain separate transitions.
 
 Set `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` for any real pilot.
 
@@ -165,4 +166,3 @@ Changbaishan Rice:
 ```text
 Use SLL-R MCP. Find natural unpolished fresh-milled rice under $25 and prepare checkout.
 ```
-

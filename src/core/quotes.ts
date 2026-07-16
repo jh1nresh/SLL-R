@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { sllrStore } from "./store.js";
 import { merchantForId } from "../merchants/profiles.js";
-import type { QuoteResult } from "../types.js";
+import type { CapacityWindowSnapshot, QuoteResult } from "../types.js";
 
 // Persisted quotes — the binding target for consent (spec: bounded-action rail).
 // A quote pins a price for a merchant+item+buyer with a short TTL; consent and
@@ -18,6 +18,9 @@ export type StoredQuote = {
   quantity: number;
   amountUsd: string; // subtotal — the amount consent/order must match
   etaMinutes: number | null; // queue-aware wait quoted to the buyer (pickup only)
+  offerId: string | null;
+  pickupAt: string | null;
+  capacityWindow: CapacityWindowSnapshot | null;
   intent: string;
   createdAt: string;
   expiresAt: string;
@@ -31,7 +34,12 @@ export async function persistQuote(
   quote: QuoteResult,
   buyerId: string | null,
   intent: string,
-  etaMinutes: number | null = null,
+  options: {
+    etaMinutes?: number | null;
+    offerId?: string | null;
+    pickupAt?: string | null;
+    capacityWindow?: CapacityWindowSnapshot | null;
+  } = {},
   nowIso: string = new Date().toISOString(),
 ): Promise<StoredQuote | null> {
   if (!quote.feasible || !quote.item) return null;
@@ -45,7 +53,10 @@ export async function persistQuote(
     itemName: quote.item.name,
     quantity: quote.item.quantity,
     amountUsd: quote.item.subtotalUsd,
-    etaMinutes,
+    etaMinutes: options.etaMinutes ?? null,
+    offerId: options.offerId ?? null,
+    pickupAt: options.pickupAt ?? null,
+    capacityWindow: options.capacityWindow ?? null,
     intent,
     createdAt: nowIso,
     expiresAt: new Date(new Date(nowIso).getTime() + DEFAULT_TTL_MS).toISOString(),

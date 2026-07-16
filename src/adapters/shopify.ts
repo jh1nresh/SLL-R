@@ -101,7 +101,7 @@ function connectPlan(merchant: MerchantProfile, origin: string) {
       "Let Shopify checkout handle Base Pay / card / crypto payment methods.",
       "Use Shopify orders/paid webhook as payment proof.",
       "Use Shopify fulfillment webhook as fulfillment proof when available.",
-      "Issue SLL-R receipt memory after verified payment or fulfillment proof.",
+      "Keep orders payment_backed after orders/paid; issue final SLL-R receipt memory only after verified fulfillment.",
     ],
     requiredMerchantSetup: [
       "Confirm Shopify storefront domain.",

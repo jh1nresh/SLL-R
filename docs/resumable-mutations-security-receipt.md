@@ -46,12 +46,12 @@ Coverage added:
 
 - MCP `create_order` retry returns the same order id.
 - MCP same action key with different order payload returns `idempotency_conflict`.
-- MCP `attach_payment_proof` retry returns the same terminal receipt.
+- MCP `attach_payment_proof` retry returns the same nonterminal payment-backed state.
 - MCP `issue_receipt` retry returns the same terminal receipt.
 - MCP `merchant_fulfill_order` retry returns the same terminal receipt and rejects key reuse for another order.
 - HTTP `POST /orders/:id/fulfill` retry returns the same terminal receipt and rejects changed replay data.
-- Shopify and generic payment webhook retries return the same receipt and reject changed amounts for the same provider event.
-- Redis-backed restart smoke replays the same order and payment receipt after store reinitialization.
+- Shopify and generic payment webhook retries return the same payment-backed state and reject changed amounts for the same provider event.
+- Redis-backed restart smoke replays the same order and payment-backed state after store reinitialization; fulfillment then issues one canonical receipt.
 - A direct payment adapter replays the same provider event after Redis-backed store reinitialization without requiring a caller-supplied key.
 - Concurrent first delivery executes once and replays one result on memory, Redis, and Supabase store paths.
 - A completion-ledger write failure after successful business execution leaves the claim pending instead of overwriting it with a false failed result.

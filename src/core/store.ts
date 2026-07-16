@@ -16,6 +16,7 @@ export interface SllrStore {
   getJson<T>(key: string): Promise<T | null>;
   setJson(key: string, value: unknown): Promise<void>;
   setJsonIfAbsent(key: string, value: unknown): Promise<boolean>;
+  deleteJson(key: string): Promise<void>;
   addToIndex(indexKey: string, member: string): Promise<void>;
   indexMembers(indexKey: string): Promise<string[]>;
 }
@@ -37,6 +38,10 @@ class MemoryStore implements SllrStore {
     if (this.values.has(key)) return false;
     this.values.set(key, JSON.stringify(value));
     return true;
+  }
+
+  async deleteJson(key: string): Promise<void> {
+    this.values.delete(key);
   }
 
   async addToIndex(indexKey: string, member: string): Promise<void> {
@@ -99,6 +104,10 @@ class RedisRestStore implements SllrStore {
 
   async setJsonIfAbsent(key: string, value: unknown): Promise<boolean> {
     return (await this.command<string | null>(["SET", key, JSON.stringify(value), "NX"])) === "OK";
+  }
+
+  async deleteJson(key: string): Promise<void> {
+    await this.command(["DEL", key]);
   }
 
   async addToIndex(indexKey: string, member: string): Promise<void> {
@@ -189,6 +198,13 @@ class SupabaseStore implements SllrStore {
       body: JSON.stringify([{ key, value }]),
     });
     return (rows || []).some((row) => row.key === key);
+  }
+
+  async deleteJson(key: string): Promise<void> {
+    await this.request(`/sllr_kv?key=eq.${encodeURIComponent(key)}`, {
+      method: "DELETE",
+      prefer: "return=minimal",
+    });
   }
 
   async addToIndex(indexKey: string, member: string): Promise<void> {

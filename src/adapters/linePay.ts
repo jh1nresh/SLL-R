@@ -4,7 +4,7 @@ import { merchantForId } from "../merchants/profiles.js";
 import type { SellerOrder } from "../types.js";
 
 // LINE Pay prepay-in-flow (v0) — the Taiwan counterpart of the Stripe rail.
-// Same shape (buyer pays in-flow, merchant only fulfills, proof issues receipt),
+// Same shape (buyer pays in-flow, merchant fulfills, then final receipt issues),
 // but LINE Pay's Online API is request -> redirect -> confirm rather than a
 // webhook: we Reserve a payment (request) to get a payment URL, the buyer
 // authorizes in LINE, LINE redirects to our confirmUrl, and we then Confirm

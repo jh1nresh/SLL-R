@@ -56,8 +56,9 @@ Base USDC call and submit it with Base MCP `send_calls`. If the response mode is
    GET /base-plugin/coffee/record-demo-payment?orderId=ord_...&paymentId=0x...
    ```
 
-This upgrades the order into receipt memory. Production integrations must verify
-the Base transaction before calling a receipt issuance path.
+This upgrades only the payment state to `payment_backed`. Production integrations
+must verify the Base transaction, then wait for merchant fulfillment or customer
+claim before calling a final receipt issuance path.
 
 ## send_calls Mapping
 
@@ -93,13 +94,13 @@ Coffee's wallet. Real production onboarding should configure:
 - merchant-owned receiving address or checkout provider webhook
 - order ID to payment reference mapping
 - webhook signature verification
-- SLL-R receipt issuance after payment proof
+- SLL-R payment proof attachment followed by fulfillment-backed receipt issuance
 
 ## Receipt Memory
 
 After payment proof is attached through `POST /webhooks/payment`, SLL-R upgrades
-the order to SLL-R receipt memory. The receipt memory can later be represented
-as a Solana cNFT by SLL-R.
+the order to `payment_backed`. Merchant fulfillment or customer claim then issues
+receipt memory, which can later be represented as a Solana cNFT by SLL-R.
 
 For Base MCP demos, `GET /base-plugin/coffee/record-demo-payment` is the
 lightweight proof handoff. It is intentionally named as a demo endpoint because

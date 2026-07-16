@@ -16,8 +16,9 @@ Personal agent / Hermes / ChatGPT
 -> compare merchant-backed quotes
 -> explicit buyer consent
 -> POS / checkout adapters
--> payment or fulfillment proof
--> SLL-R receipt memory / Solana cNFT
+-> payment proof
+-> merchant fulfillment or customer claim
+-> final SLL-R receipt memory / Solana cNFT
 ```
 
 ## Product Boundary
@@ -38,14 +39,14 @@ building a custom agent stack from scratch.
 Target users:
 
 - Raposa Coffee: pickup promise, event queue, and online coffee product orders.
-- SOLYD: online product quotes, checkout handoff, and payment-backed receipts.
+- SOLYD: online product quotes, checkout handoff, payment proof, and fulfillment-backed receipts.
 - Noun Coffee: Base/USDC coffee storefront quote and checkout handoff.
 - Shopify merchants: Noun Coffee, Raposa Shop, and SOLYD can expose Storefront
   MCP / cart handoff / paid-order webhook proof without replacing checkout.
 - Content-commerce merchants: Changbaishan Rice-style grocery sellers can map
   product stories to Shopify SKUs, checkout, and receipt memory.
-- Raposa / SOLYD Solana rail: Solana Pay URL or Helio checkout handoff with
-  payment proof promoted into SLL-R receipt memory.
+- Raposa / SOLYD Solana rail: Solana Pay URL or Helio checkout handoff, with
+  payment proof kept separate from final fulfillment-backed receipt memory.
 - AgentShack builders: reusable seller-agent template for their own merchants.
 
 MVP success means:
@@ -56,7 +57,8 @@ MVP success means:
 - A buyer agent can ask for a quote and create an order through the API.
 - The merchant can use a simple terminal or existing checkout flow to accept,
   ready, claim, or complete the order.
-- A payment or fulfillment proof can become SLL-R receipt memory.
+- Payment proof moves an order to `payment_backed`; fulfillment or customer
+  claim issues final SLL-R receipt memory.
 - Raposa / SOLYD can understand what they need to configure in less than one
   meeting.
 
@@ -77,6 +79,20 @@ The standalone merchant agent remains available for QR/web pilots. MCP,
 OpenAPI, and ChatGPT Actions expose the same commerce rail to personal agents.
 The consumer agent also has iMessage and LINE Messaging transports; both reuse
 the same quote-bound consent, order, payment-option, status, and receipt state.
+
+## Commerce Levels L1-L3
+
+- **L1 offers**: `GET /merchants/{merchantId}/offers` exposes fixed,
+  merchant-backed offers. `POST /merchants/{merchantId}/offers/{offerId}/quote`
+  turns one into the existing quote, exact confirmation, consent, and order path.
+- **L2 fulfillment batches**: authorized merchants can group independently paid
+  orders assigned to the same pickup window. Every child keeps its own buyer
+  consent, payment proof, fulfillment state, and receipt.
+- **L3 capacity windows**: pickup inventory is expressed as atomic 15-minute
+  capacity by production class. Quotes can inspect capacity, but only order
+  creation with a buyer session and quote-bound consent holds seats, so
+  concurrent orders cannot overbook a window and anonymous legacy orders cannot
+  exhaust hard capacity.
 
 ## Adapter Contract
 
@@ -121,7 +137,8 @@ SLL-R is packaged as an AgentShack `merchant_agent`:
 customer intent
 -> structured order
 -> merchant accept / reject / fulfill
--> payment or fulfillment proof
+-> payment proof
+-> merchant fulfillment proof
 -> receipt memory
 -> reputation update
 ```
@@ -183,9 +200,11 @@ SLL-R exposes a real MCP server (stateless Streamable HTTP) at `/mcp`:
 claude mcp add --transport http sllr http://localhost:3100/mcp
 ```
 
-Tools: `list_merchants`, `get_merchant`, `get_menu`, `shop_for_me`, `quote_order`,
-`create_order`, `list_orders`, `check_order_status`, `get_payment_options`,
-`attach_payment_proof`, `issue_receipt`, `create_demo_merchant`.
+Tools include `list_merchants`, `get_merchant`, `get_menu`, `list_offers`,
+`quote_offer`, `list_capacity_windows`, `shop_for_me`, `quote_order`,
+`create_order`, `list_orders`, `create_fulfillment_batch`,
+`list_fulfillment_batches`, `get_fulfillment_batch`, `check_order_status`, `get_payment_options`,
+`attach_payment_proof`, `issue_receipt`, and `create_demo_merchant`.
 
 Payment safety is enforced server-side: `attach_payment_proof` requires the
 merchant verifier secret (`verificationToken`) in production and only accepts
@@ -214,6 +233,12 @@ GET  /terminal/{merchantId}
 GET  /merchants
 GET  /merchants/{merchantId}
 GET  /merchants/{merchantId}/menu
+GET  /merchants/{merchantId}/offers
+POST /merchants/{merchantId}/offers/{offerId}/quote
+GET  /merchants/{merchantId}/capacity
+GET  /merchants/{merchantId}/batches
+POST /merchants/{merchantId}/batches
+GET  /merchants/{merchantId}/batches/{batchId}
 POST /merchants/{merchantId}/quote
 POST /merchants/{merchantId}/orders
 GET  /merchants/{merchantId}/orders
@@ -513,8 +538,8 @@ curl -X POST http://localhost:3100/orders/ord_.../fulfill \
   }'
 ```
 
-`fulfill`, `claim`, and `POST /merchants/{merchantId}/receipt` issue receipt
-memory, so they require the same verifier as payment proof: configure
+`fulfill`, `claim`, and `POST /merchants/{merchantId}/receipt` issue final
+receipt memory, so they require the merchant verifier: configure
 `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` and pass it in
 `x-sllr-merchant-payment-secret` (the terminal pages read it from
 `localStorage.sllrStaffSecret`); `demo: true` is only accepted when no secret

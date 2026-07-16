@@ -9,7 +9,7 @@ export function baseMcpPluginSpec(origin: string) {
 >
 > The payer address used in \`prepare-payment?from=<address>\` must come from the detected wallet, not from a guessed prompt value.
 
-SLL-R is a seller-side agent runtime for merchants. This plugin lets a Base-aware agent discover Noun Coffee, quote a real product, create an order, prepare Base USDC calldata, and attach payment proof as SLL-R receipt memory.
+SLL-R is a seller-side agent runtime for merchants. This plugin lets a Base-aware agent discover Noun Coffee, quote a real product, create an order, prepare Base USDC calldata, and attach payment proof. Payment alone does not prove fulfillment or issue final receipt memory.
 
 **SLL-R API:** ${origin}
 **Supported chain:** Base mainnet (\`8453\` / \`base\`)
@@ -97,13 +97,13 @@ Then read status:
 GET ${origin}/base-plugin/coffee/status?orderId=<ORDER_ID>
 \`\`\`
 
-The order is complete when \`proofLevel\` or \`order.proofLevel\` is \`receipt_memory_issued\`.
+After payment, the order should be \`payment_backed\`. It is complete only after merchant fulfillment or customer claim moves \`proofLevel\` to \`receipt_memory_issued\`.
 
 ## Safety rules
 
 - Never invent a payer address. Use the wallet address from \`get_wallets\`.
 - Show merchant, item, amount, recipient, token, and calldata summary before \`send_calls\`.
 - Do not call \`send_calls\` until the user explicitly approves.
-- Treat \`record-demo-payment\` as demo proof. Production must verify transaction hash, token, recipient, amount, and reference before issuing receipt memory.
+- Treat \`record-demo-payment\` as demo payment proof. Production must verify transaction hash, token, recipient, amount, and reference; merchant fulfillment or customer claim is still required for final receipt memory.
 `;
 }

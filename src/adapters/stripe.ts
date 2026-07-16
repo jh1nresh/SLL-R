@@ -7,7 +7,7 @@ import type { SellerOrder } from "../types.js";
 
 // Stripe prepay-in-flow (v0): the buyer pays inside the agent flow via a Stripe
 // hosted Checkout Session; a signed webhook then attaches payment proof, which
-// issues receipt memory. The merchant only fulfills and never handles payment.
+// attaches payment proof. The merchant still fulfills before final receipt memory.
 //
 // v0 uses a single platform Stripe account, no platform fee. The flow is
 // fee-ready: Stripe Connect destination charges + application_fee_amount (the
@@ -149,7 +149,7 @@ export async function stripePreparePayment(order: SellerOrder, origin: string) {
     amountUsd: order.item.subtotalUsd,
     checkoutSessionId: session.id,
     url: session.url,
-    proof: "Stripe checkout.session.completed webhook attaches payment proof before receipt memory.",
+    proof: "Stripe checkout.session.completed attaches payment proof; merchant fulfillment is still required for final receipt memory.",
     next: "Open the Stripe checkout, pay with card or Apple/Google Pay, then return after payment proof.",
   };
 }

@@ -6,7 +6,7 @@ import type { SellerOrder } from "../types.js";
 
 // Verified Review / Outcome Layer (spec: local-commerce-os-for-agents §5). Not
 // Yelp text-first — it is verified decision → action → outcome memory: a review
-// only exists if the order carries real proof (payment / merchant-ready / claim),
+// only exists after merchant fulfillment or pickup claim produced final receipt,
 // and it records the agent's decision + promised-vs-actual ETA + the buyer's
 // feedback. It feeds taste memory, merchant ETA reliability, and future ranking.
 //
@@ -61,9 +61,9 @@ export function reviewProofs(order: SellerOrder, hasFeedback: boolean): ReviewVe
   return proofs;
 }
 
-// Eligible iff the order carries a non-user proof (payment or merchant/claim).
+// A payment proves funds moved, not that the buyer received the product.
 export function eligibleForReview(order: SellerOrder): boolean {
-  return reviewProofs(order, false).length > 0;
+  return order.lifecycle.receipt === "issued" && order.receipt !== null;
 }
 
 function minutesBetween(fromIso: string, toIso: string): number {
@@ -80,7 +80,7 @@ export async function createVerifiedReview(orderId: string, input: CreateReviewI
   }
   // Invariant: no verified review without a proof.
   if (!eligibleForReview(order)) {
-    throw Object.assign(new Error("Order has no payment/fulfillment proof yet — not eligible for a verified review."), { status: 409, requiredNextStep: "pay_or_fulfill" });
+    throw Object.assign(new Error("Order has no completed fulfillment receipt yet — not eligible for a verified review."), { status: 409, requiredNextStep: "fulfill_or_claim" });
   }
   const feedback = input.feedback ?? {};
   const hasFeedback = Object.keys(feedback).length > 0;
