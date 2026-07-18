@@ -1,181 +1,171 @@
 # SLL-R
 
-SLL-R is a merchant-backed commerce rail that personal agents can call.
+**Merchant-backed order execution for AI agents.**
 
-It lets a buyer's own agent compare real merchant capabilities, obtain exact
-quotes, ask for consent, place and track orders through existing checkout
-systems, and turn completed outcomes into verified receipt memory.
-
-The current product goal is not a hackathon-only demo. The goal is to list SLL-R
-on AgentShack as a reusable merchant-agent service and onboard Raposa / SOLYD as
-the first merchant pilots.
+SLL-R lets a buyer's agent move from natural-language intent to a real merchant
+order without inventing the SKU, price, availability, or pickup promise. It
+binds an exact quote to buyer consent, reserves merchant capacity, creates one
+idempotent order, streams live queue state through short polling, and issues a
+canonical receipt only after fulfillment or customer claim.
 
 ```text
-Personal agent / Hermes / ChatGPT
--> SLL-R
--> compare merchant-backed quotes
--> explicit buyer consent
--> POS / checkout adapters
--> payment proof
--> merchant fulfillment or customer claim
--> final SLL-R receipt memory / Solana cNFT
+buyer agent
+→ merchant-backed catalog and exact quote
+→ quote-bound buyer consent
+→ idempotent order and capacity reservation
+→ existing checkout or staff terminal
+→ live queue and order status
+→ payment proof ≠ fulfillment proof
+→ canonical fulfillment-backed receipt
 ```
 
-## Product Boundary
+SLL-R is an MCP and HTTP commerce rail, not a replacement POS and not a
+hackathon-only chatbot. Merchants keep their existing checkout and staff
+workflow; personal agents get one bounded interface for quoting, ordering, and
+tracking the outcome.
 
-- **SLL-R**: merchant runtime plus the safe cross-merchant interface personal agents call.
-- **Receipt memory**: proof-backed order, payment, and fulfillment record.
-- **POS adapters**: internal SLL-R tools for Shopify, MoonPay, Binance Pay, Telegram staff flow, Browser Use, Stripe, or future POS systems.
-- **Personal agent**: buyer-side caller. This can be Hermes, ChatGPT, Telegram, AgentShack, or another user-owned agent.
+## The Problem
 
-SLL-R is not a full POS replacement. It operates the merchant's existing checkout
-and staff workflows.
+AI agents can recommend products, but they cannot safely promise that a real
+merchant can fulfill an order now. A static menu does not answer:
 
-## Current MVP Goal
+- Is this SKU real and currently available?
+- Is the price and pickup ETA still valid?
+- Did the buyer approve this exact quote?
+- Will a retry create a duplicate order?
+- How many orders are ahead in the merchant's production queue?
+- Does a payment event prove payment only, or actual fulfillment?
+- Can the buyer verify the final outcome without seeing another buyer's order?
 
-SLL-R should be useful when a merchant wants agents to order from them without
-building a custom agent stack from scratch.
+SLL-R turns those questions into explicit server-side state and authorization
+boundaries instead of leaving them to an agent prompt.
 
-Target users:
+## What Works Today
 
-- Raposa Coffee: pickup promise, event queue, and online coffee product orders.
-- SOLYD: online product quotes, checkout handoff, payment proof, and fulfillment-backed receipts.
-- Noun Coffee: Base/USDC coffee storefront quote and checkout handoff.
-- Shopify merchants: Noun Coffee, Raposa Shop, and SOLYD can expose Storefront
-  MCP / cart handoff / paid-order webhook proof without replacing checkout.
-- Content-commerce merchants: Changbaishan Rice-style grocery sellers can map
-  product stories to Shopify SKUs, checkout, and receipt memory.
-- Raposa / SOLYD Solana rail: Solana Pay URL or Helio checkout handoff, with
-  payment proof kept separate from final fulfillment-backed receipt memory.
-- AgentShack builders: reusable seller-agent template for their own merchants.
+- **Grounded commerce:** merchant-backed catalogs, fixed offers, exact quotes,
+  availability checks, and bounded cross-merchant recommendations.
+- **Safe execution:** buyer sessions, quote-bound consent, idempotency keys, and
+  atomic 15-minute capacity reservations by production class.
+- **Live local fulfillment:** queue position, orders ahead, promised pickup time,
+  merchant accept/reject/ready actions, and buyer status updates every two seconds.
+- **Notifications:** in-page updates are guaranteed while the page is open;
+  browser notifications are optional and require user permission. iMessage and
+  LINE transports reuse the same canonical order state.
+- **Proof separation:** payment proof advances payment state only. Merchant
+  fulfillment or customer claim is required for the final receipt.
+- **Tenant boundaries:** buyer-owned reads are scoped to the buyer session;
+  merchant order feeds and mutations require operator or merchant-scoped auth.
+- **Replaceable adapters:** staff terminal, Shopify/hosted checkout handoff,
+  Stripe, Solana Pay, Base USDC, Helio/MoonPay Commerce, and Binance Pay surfaces.
 
-MVP success means:
+The repository ships example Raposa, SOLYD, and Noun Coffee profiles. They are
+demo/pilot configurations, not claims of live commercial partnerships.
 
-- SLL-R has a stable agent manifest that AgentShack can index.
-- ChatGPT, Hermes, Base MCP, and similar agents can discover the API through
-  OpenAPI and tool manifests.
-- A buyer agent can ask for a quote and create an order through the API.
-- The merchant can use a simple terminal or existing checkout flow to accept,
-  ready, claim, or complete the order.
-- Payment proof moves an order to `payment_backed`; fulfillment or customer
-  claim issues final SLL-R receipt memory.
-- Raposa / SOLYD can understand what they need to configure in less than one
-  meeting.
+## Try the End-to-End Demo
 
-The primary agent flow is:
+Run SLL-R, then open two browser windows:
+
+| Role | URL | What to do |
+| --- | --- | --- |
+| Buyer | `http://localhost:3100/raposa/order` | Quote, consent, order, watch queue/status, receive ready update, view receipt |
+| Merchant | `http://localhost:3100/raposa` | See the order, accept it, mark it ready, then record claim/fulfillment |
+
+The visible flow is:
 
 ```text
-personal agent receives natural-language intent
--> SLL-R shop_for_me compares bounded merchant candidates
--> merchant-backed quotes ranked by intent, receipt memory, location, time, and price
--> user confirms one exact quote
--> SLL-R consent + idempotent order
--> existing checkout or staff fulfillment
--> cross-merchant tracking
--> verified receipt memory improves the next recommendation
+quote → consent → order → Queue #N → accepted → ready → claimed → receipt_issued
 ```
 
-The standalone merchant agent remains available for QR/web pilots. MCP,
-OpenAPI, and ChatGPT Actions expose the same commerce rail to personal agents.
-The consumer agent also has iMessage and LINE Messaging transports; both reuse
-the same quote-bound consent, order, payment-option, status, and receipt state.
+For a no-secret localhost demo, merchant proof actions accept `demo: true` only
+when `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` is not configured. Any shared or
+public deployment must configure that secret or issue merchant-scoped tokens.
 
-## Commerce Levels L1-L3
+## Connect an Agent over MCP
 
-- **L1 offers**: `GET /merchants/{merchantId}/offers` exposes fixed,
-  merchant-backed offers. `POST /merchants/{merchantId}/offers/{offerId}/quote`
-  turns one into the existing quote, exact confirmation, consent, and order path.
-- **L2 fulfillment batches**: authorized merchants can group independently paid
-  orders assigned to the same pickup window. Every child keeps its own buyer
-  consent, payment proof, fulfillment state, and receipt.
-- **L3 capacity windows**: pickup inventory is expressed as atomic 15-minute
-  capacity by production class. Quotes can inspect capacity, but only order
-  creation with a buyer session and quote-bound consent holds seats, so
-  concurrent orders cannot overbook a window and anonymous legacy orders cannot
-  exhaust hard capacity.
+SLL-R exposes a stateless Streamable HTTP MCP server at `/mcp`:
 
-## Adapter Contract
+```bash
+claude mcp add --transport http sllr http://localhost:3100/mcp
+```
 
-SLL-R exposes a small seller-agent runtime and keeps POS / checkout systems as
-replaceable adapters:
-
-- `staff_terminal`: Telegram or a merchant terminal that confirms fulfillment.
-- `checkout_handoff`: Shopify, MoonPay Commerce, Binance Pay, or a hosted checkout link.
-- `payment_proof`: webhook, Query Order, Solana Pay reference, Helio, or on-chain verification.
-- `receipt_memory`: SLL-R receipt memory and Solana cNFT handoff.
-
-The current scaffold ships Raposa and SOLYD example profiles plus adapter
-metadata in `GET /.well-known/sllr-agent.json`. Real merchant integrations can
-replace the mock catalog and stubbed adapters without changing the quote/order
-API contract.
-
-## BNB / Binance Pay Rail
-
-Binance Pay is a strong SLL-R target because it gives merchants a checkout rail,
-webhooks, and an order query API that can become payment proof:
+The intended buyer flow is:
 
 ```text
-SLL-R order
--> Binance Pay checkout with merchantTradeNo
--> PAY webhook
--> Query Order confirms PAID
--> fulfillment or refund proof
--> SLL-R receipt memory
+list_merchants / shop_for_me
+→ quote_order
+→ request_consent
+→ create_order
+→ get_payment_options
+→ check_order_status
 ```
 
-Travala is the reference merchant vertical for this path. Travel bookings have
-clear quote, checkout, confirmation, cancellation, and refund states, so they are
-a good example of how SLL-R can clear real merchant work beyond cafes and
-ecommerce. This repo does not claim a live Travala integration yet; it documents
-the path in [Binance Pay / Travala fit](./docs/binance-pay-travala.md).
+`list_orders` and merchant mutations are not public buyer tools. They require
+the operator verifier secret or a token scoped to the target merchant.
 
-## AgentShack Listing Shape
-
-SLL-R is packaged as an AgentShack `merchant_agent`:
+## Architecture
 
 ```text
-customer intent
--> structured order
--> merchant accept / reject / fulfill
--> payment proof
--> merchant fulfillment proof
--> receipt memory
--> reputation update
+Hermes / ChatGPT / OKX.AI / another personal agent
+                         │
+                  MCP + OpenAPI
+                         │
+              ┌──────────▼──────────┐
+              │    SLL-R runtime    │
+              │ quote / consent     │
+              │ capacity / order    │
+              │ payment / receipt   │
+              └──────┬────────┬─────┘
+                     │        │
+             buyer status   merchant terminal
+                     │        │
+                     └── checkout / POS adapters
 ```
 
-The public manifest includes:
+The same canonical order record drives MCP, REST, buyer pages, merchant
+terminals, webhooks, and messaging transports. The UI does not maintain a
+second queue or fulfillment state.
 
-- `type`: `merchant_agent`
-- `category`: `local_commerce`
-- `modes`: `one_time_call`, `subscription`, `fork`
-- `evaluator.policy`: `order-fulfillment-v0`
-- `reputation.subjects`: `merchant`, `customer`, `agent`, `evaluator`
+## Safety Invariants
 
-Use `GET /pilot-kit?merchantId=raposa-coffee` or
-`GET /pilot-kit?merchantId=solyd` to generate a merchant-specific onboarding
-package for the first pilot meeting.
+1. Catalog items and prices come from merchant-authorized data.
+2. Consent is bound to the exact quote and its freshness window.
+3. Reusing an idempotency key cannot create a second semantic order.
+4. Capacity reservation is atomic; quote inspection alone does not hold seats.
+5. Payment proof never implies fulfillment.
+6. A terminal receipt is issued only once after proof-backed completion.
+7. Buyer A cannot read Buyer B's buyer-bound order.
+8. Public agents cannot list merchant queues or perform merchant mutations.
 
-## State & Persistence
+See [the MCP runbook](./docs/sllr-mcp-runbook.md) for the full execution and
+authorization contract.
 
-SLL-R stores orders and runtime demo merchants through a small key-value
-abstraction with three backends (selection order: Supabase → Redis/KV → memory):
+## Product Boundary and Current Status
 
-- **memory** (default): in-process. Survives for the process lifetime only.
-  Fine for local dev, a single long-running process (Railway/Render/Fly), and
-  demo recordings.
-- **supabase**: Supabase Postgres via the PostgREST HTTP API (zero SDK
-  dependency). Create two tables then set `SUPABASE_URL` +
-  `SUPABASE_SERVICE_ROLE_KEY` — see [Supabase store runbook](./docs/supabase-store-runbook.md).
-- **redis_rest**: Vercel KV / Upstash Redis over the REST API (zero SDK
-  dependency). Configure `KV_REST_API_URL` + `KV_REST_API_TOKEN` (or the
-  `UPSTASH_REDIS_REST_*` equivalents).
+SLL-R currently proves the technical workflow locally and through automated
+smoke tests. It does **not** yet claim:
 
-Either durable backend is required for **serverless** (Vercel), where each
-invocation is a fresh instance, and for horizontal scale.
-`GET /health` reports the active backend: `{ "ok": true, "store": "supabase" }`.
+- a public production deployment or OKX.AI ASP listing;
+- validated merchant willingness to pay;
+- production partnerships with the bundled example merchants;
+- that a checkout or payment event alone proves fulfillment;
+- production-ready scale on the default in-memory store.
 
-Receipt memory is gated: set `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET` so only the
-merchant can issue receipts (and verify payment proof). See [env.example](./env.example).
+The next product proof is one permissioned merchant completing real orders
+through the same quote → queue → fulfillment → receipt path.
+
+## State and Persistence
+
+Storage backend selection is Supabase → Redis REST/KV → memory:
+
+- **memory** is the default and is suitable for local development or one
+  long-running demo process. It resets on restart.
+- **Supabase** uses PostgREST without an SDK. See the
+  [Supabase store runbook](./docs/supabase-store-runbook.md).
+- **Redis REST/KV** supports Vercel KV and Upstash-compatible credentials.
+
+A durable backend is required for serverless or horizontally scaled deployment.
+`GET /health` reports the selected store. Production must also set
+`SLLR_MERCHANT_PAYMENT_VERIFY_SECRET`; see [env.example](./env.example).
 
 ## Run Locally
 
@@ -192,19 +182,14 @@ Default server:
 http://localhost:3100
 ```
 
-## Connect As MCP
+## MCP Tool Reference
 
-SLL-R exposes a real MCP server (stateless Streamable HTTP) at `/mcp`:
-
-```bash
-claude mcp add --transport http sllr http://localhost:3100/mcp
-```
-
-Tools include `list_merchants`, `get_merchant`, `get_menu`, `list_offers`,
+Buyer tools include `list_merchants`, `get_merchant`, `get_menu`, `list_offers`,
 `quote_offer`, `list_capacity_windows`, `shop_for_me`, `quote_order`,
-`create_order`, `list_orders`, `create_fulfillment_batch`,
-`list_fulfillment_batches`, `get_fulfillment_batch`, `check_order_status`, `get_payment_options`,
-`attach_payment_proof`, `issue_receipt`, and `create_demo_merchant`.
+`request_consent`, `create_order`, `check_order_status`, and
+`get_payment_options`. Merchant-authorized tools include `list_orders`,
+fulfillment batches, payment-proof attachment, availability changes, and final
+receipt issuance.
 
 Payment safety is enforced server-side: `attach_payment_proof` requires the
 merchant verifier secret (`verificationToken`) in production and only accepts
@@ -614,15 +599,16 @@ SLL-R
 Short description:
 
 ```text
-Seller agents for merchants in the agent economy.
+Merchant-backed order execution for AI agents.
 ```
 
 What it does:
 
 ```text
-SLL-R gives merchants an installable seller agent that buyer agents can quote,
-order, and pay through. After payment or fulfillment proof, SLL-R issues
-verified receipt memory.
+SLL-R lets buyer agents obtain exact merchant-backed quotes, bind buyer consent,
+reserve capacity, create idempotent orders, and track fulfillment through the
+merchant's existing checkout and staff workflow. Payment proof advances payment
+state only; a canonical receipt requires merchant fulfillment or customer claim.
 ```
 
 ## Pilot Docs
