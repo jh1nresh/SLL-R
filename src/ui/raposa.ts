@@ -163,6 +163,8 @@ export function raposaTerminalPage(origin: string) {
   <div class="row">
     <a class="button secondary" href="/raposa/order">Customer order page</a>
     <button id="staffKeyBtn" class="secondary" title="Set the staff key used to confirm orders">🔑 <span id="keyStatus">key not set</span></button>
+    <button id="notifyStaff" class="secondary">Enable notifications</button>
+    <span class="pill" id="liveConnection">connecting</span>
     <button id="refresh">Refresh</button>
   </div>
 </header>
@@ -186,7 +188,7 @@ export function raposaTerminalPage(origin: string) {
       <p><strong>Customer QR URL</strong></p>
       <pre>${origin}/raposa/order</pre>
       <p><strong>API queue</strong></p>
-      <pre>${origin}/orders?merchantId=raposa-coffee</pre>
+      <pre>${origin}/merchants/raposa-coffee/orders</pre>
       <p><strong>Proof level</strong></p>
       <pre>pickup_promise + ready_signal + customer_claim</pre>
     </div>
@@ -199,6 +201,9 @@ const countEl = document.getElementById("count");
 const refreshButton = document.getElementById("refresh");
 const staffKeyButton = document.getElementById("staffKeyBtn");
 const keyStatusEl = document.getElementById("keyStatus");
+const notifyStaffButton = document.getElementById("notifyStaff");
+const liveConnectionEl = document.getElementById("liveConnection");
+let knownOrderIds = null;
 
 // Staff key bootstrap: a one-time ?staffKey=... link saves the key to this
 // browser and is then stripped from the URL so it is not left in history.
@@ -272,6 +277,7 @@ function renderOrder(order) {
   const canReady = order.status === "accepted" || order.status === "payment_backed";
   const canClaim = order.status === "ready";
   const promise = order.promise || {};
+  const tracking = order.tracking || {};
   return \`
     <article class="order">
       <div class="order-title">
@@ -291,6 +297,7 @@ function renderOrder(order) {
         <span class="muted">Est. wait: \${escapeText(promise.estimatedWaitMinutes ?? "n/a")} min</span>
         <span class="muted">Promised: \${escapeText(timeText(promise.promisedReadyAt))}</span>
         <span class="muted">Ready: \${escapeText(timeText(promise.readyAt))}</span>
+        \${tracking.queuePosition ? \`<span class="muted">Queue #\${escapeText(tracking.queuePosition)} · \${escapeText(tracking.ordersAhead)} ahead</span>\` : ""}
         \${promise.delayMinutes ? \`<span class="muted">Delay: \${escapeText(promise.delayMinutes)} min</span>\` : ""}
       </div>
       \${order.receipt ? \`<pre>Receipt: \${escapeText(order.receipt.receiptHash)}\\nClaim: \${escapeText(order.receipt.claimUrl)}</pre>\` : ""}
@@ -307,9 +314,29 @@ function renderOrder(order) {
 async function loadOrders() {
   refreshButton.disabled = true;
   try {
-    const response = await fetch("/orders?merchantId=" + merchantId);
+    const staffSecret = window.localStorage.getItem("sllrStaffSecret");
+    const response = await fetch("/merchants/" + merchantId + "/orders?demo=true", {
+      headers: staffSecret ? { "x-sllr-merchant-payment-secret": staffSecret } : {}
+    });
+    if (!response.ok) {
+      liveConnectionEl.textContent = "auth required";
+      if (response.status === 401) promptStaffKey();
+      return;
+    }
     const payload = await response.json();
     const orders = payload.orders || [];
+    if (knownOrderIds) {
+      orders.filter((order) => !knownOrderIds.has(order.id)).forEach((order) => {
+        if ("Notification" in window && Notification.permission === "granted") {
+          new Notification("New SLL-R order", {
+            body: order.item.name + " · " + order.id.slice(-6),
+            tag: "sllr-merchant-" + order.id
+          });
+        }
+      });
+    }
+    knownOrderIds = new Set(orders.map((order) => order.id));
+    liveConnectionEl.textContent = "live · 2s";
     countEl.textContent = orders.length + (orders.length === 1 ? " order" : " orders");
     ordersEl.innerHTML = orders.length
       ? orders.map(renderOrder).join("")
@@ -320,8 +347,13 @@ async function loadOrders() {
 }
 
 refreshButton.addEventListener("click", loadOrders);
+notifyStaffButton.addEventListener("click", async () => {
+  if (!("Notification" in window)) return;
+  const permission = await Notification.requestPermission();
+  notifyStaffButton.textContent = permission === "granted" ? "Notifications enabled" : "Notifications unavailable";
+});
 loadOrders();
-setInterval(loadOrders, 5000);
+setInterval(loadOrders, 2000);
 </script>`);
 }
 
@@ -355,8 +387,12 @@ export function raposaOrderPage() {
         I can pick up in this many minutes
         <input id="deadlineMinutes" type="number" min="5" max="60" value="15">
       </label>
-      <button type="submit">Ask Raposa for pickup promise</button>
+      <div class="row">
+        <button type="submit">Ask Raposa for pickup promise</button>
+        <button id="notifyButton" class="secondary" type="button">Enable status notifications</button>
+      </div>
     </form>
+    <div id="liveStatus" class="notice">Live tracking starts after an order is confirmed.</div>
     <div id="result" class="stack"></div>
   </section>
   <aside class="panel stack">
@@ -369,6 +405,13 @@ export function raposaOrderPage() {
 const catalog = ${JSON.stringify(merchant?.catalog || [])};
 const form = document.getElementById("orderForm");
 const result = document.getElementById("result");
+const liveStatus = document.getElementById("liveStatus");
+const notifyButton = document.getElementById("notifyButton");
+const buyerTokenKey = "sllrRaposaBuyerToken";
+const activeOrderKey = "sllrRaposaActiveOrder";
+let activeOrderId = window.sessionStorage.getItem(activeOrderKey);
+let lastStatus = null;
+let pollTimer = null;
 
 function escapeText(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -380,46 +423,174 @@ function escapeText(value) {
   })[char]);
 }
 
+function authHeaders(token, json = false) {
+  return {
+    ...(json ? { "content-type": "application/json" } : {}),
+    "authorization": "Bearer " + token
+  };
+}
+
+async function issueBuyerSession(label) {
+  const response = await fetch("/buyer/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ label })
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.token) throw new Error(payload.error || "Could not create buyer session");
+  window.sessionStorage.setItem(buyerTokenKey, payload.token);
+  return payload.token;
+}
+
+async function buyerToken(label) {
+  return window.sessionStorage.getItem(buyerTokenKey) || issueBuyerSession(label);
+}
+
+function statusLabel(status) {
+  return ({
+    pending_payment: "Order sent — waiting for merchant",
+    accepted: "Merchant accepted your order",
+    payment_backed: "Payment confirmed — merchant is preparing it",
+    ready: "Ready for pickup",
+    rejected: "Merchant could not accept this order",
+    receipt_issued: "Picked up — verified receipt issued"
+  })[status] || status;
+}
+
+function notifyStatus(order) {
+  if (!lastStatus || lastStatus === order.status) return;
+  if ("Notification" in window && Notification.permission === "granted") {
+    new Notification("SLL-R order update", {
+      body: statusLabel(order.status) + " · " + order.item.name,
+      tag: "sllr-order-" + order.id
+    });
+  }
+}
+
+function renderTrackedOrder(order) {
+  const promise = order.promise || {};
+  const tracking = order.tracking || {};
+  const queueText = tracking.queuePosition
+    ? "Queue position " + tracking.queuePosition + " (" + tracking.ordersAhead + " ahead)"
+    : order.status === "ready" || order.status === "receipt_issued"
+      ? "No longer waiting in the production queue"
+      : "Queue position unavailable";
+  liveStatus.textContent = "Live · " + statusLabel(order.status) + " · " + queueText;
+  document.title = statusLabel(order.status) + " · Raposa";
+  result.innerHTML = \`
+    <div class="order">
+      <div class="order-title">
+        <div>
+          <h3>\${escapeText(order.item.quantity)}x \${escapeText(order.item.name)}</h3>
+          <p>Pass: \${escapeText(order.id)}</p>
+        </div>
+        <span class="pill">\${escapeText(order.status)}</span>
+      </div>
+      <p>\${escapeText(queueText)} · live wait \${escapeText(tracking.estimatedWaitMinutes ?? 0)} min.</p>
+      <p>Promised pickup: \${escapeText(promise.promisedReadyAt ? new Date(promise.promisedReadyAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "not set")}.</p>
+      <p>\${escapeText(statusLabel(order.status))}. This page refreshes automatically.</p>
+      \${order.receipt ? \`<pre>Verified receipt: \${escapeText(order.receipt.receiptHash)}</pre>\` : ""}
+    </div>
+  \`;
+}
+
+async function loadActiveOrder() {
+  if (!activeOrderId) return;
+  const token = window.sessionStorage.getItem(buyerTokenKey);
+  if (!token) return;
+  const response = await fetch("/buyer/orders", { headers: authHeaders(token) });
+  if (response.status === 401) {
+    window.sessionStorage.removeItem(buyerTokenKey);
+    liveStatus.textContent = "Buyer session expired. Create a new order to continue.";
+    return;
+  }
+  const payload = await response.json();
+  const order = (payload.orders || []).find((candidate) => candidate.id === activeOrderId);
+  if (!order) return;
+  notifyStatus(order);
+  renderTrackedOrder(order);
+  lastStatus = order.status;
+  if (["rejected", "receipt_issued"].includes(order.status) && pollTimer) {
+    window.clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function startPolling() {
+  if (pollTimer) window.clearInterval(pollTimer);
+  loadActiveOrder();
+  pollTimer = window.setInterval(loadActiveOrder, 2000);
+}
+
+notifyButton.addEventListener("click", async () => {
+  if (!("Notification" in window)) {
+    liveStatus.textContent = "Browser notifications are unavailable; in-page live updates remain enabled.";
+    return;
+  }
+  const permission = await Notification.requestPermission();
+  notifyButton.textContent = permission === "granted" ? "Notifications enabled" : "Notifications unavailable";
+});
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const item = catalog.find((entry) => entry.id === document.getElementById("itemId").value);
   const deadlineMinutes = Number(document.getElementById("deadlineMinutes").value || 15);
   const customerLabel = document.getElementById("customerLabel").value || "Raposa guest";
   if (!item) return;
-  result.innerHTML = '<p>Sending order...</p>';
-  const response = await fetch("/orders", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      merchantId: "raposa-coffee",
-      agentId: "raposa-qr",
-      customerLabel,
+  const submitButton = form.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
+  result.innerHTML = '<p>Getting a merchant-backed quote...</p>';
+  try {
+    const token = await buyerToken(customerLabel);
+    const orderRequest = {
       userIntent: "Order " + item.name + " from Raposa Coffee within " + deadlineMinutes + " minutes",
+      itemId: item.id,
       maxSpendUsd: "25.00",
       deadlineMinutes,
       paymentMode: "counter"
-    })
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    result.innerHTML = '<div class="notice">' + escapeText(payload.error || "Order failed") + '</div>';
-    return;
+    };
+    const quoteResponse = await fetch("/merchants/raposa-coffee/quote", {
+      method: "POST",
+      headers: authHeaders(token, true),
+      body: JSON.stringify(orderRequest)
+    });
+    const quote = await quoteResponse.json();
+    if (!quoteResponse.ok || !quote.quoteId) throw new Error(quote.error || "Quote failed");
+
+    const consentResponse = await fetch("/consent", {
+      method: "POST",
+      headers: authHeaders(token, true),
+      body: JSON.stringify({ quoteId: quote.quoteId, confirmationText: quote.confirmationText })
+    });
+    const consent = await consentResponse.json();
+    if (!consentResponse.ok || !consent.consent?.id) throw new Error(consent.error || "Consent failed");
+
+    const orderResponse = await fetch("/merchants/raposa-coffee/orders", {
+      method: "POST",
+      headers: authHeaders(token, true),
+      body: JSON.stringify({
+        ...orderRequest,
+        quoteId: quote.quoteId,
+        consentId: consent.consent.id,
+        agentId: "raposa-live-demo",
+        customerLabel,
+        idempotencyKey: "raposa-demo-" + quote.quoteId
+      })
+    });
+    const payload = await orderResponse.json();
+    if (!orderResponse.ok || !payload.order) throw new Error(payload.error || "Order failed");
+    activeOrderId = payload.order.id;
+    lastStatus = payload.order.status;
+    window.sessionStorage.setItem(activeOrderKey, activeOrderId);
+    liveStatus.textContent = "Live tracking connected. Waiting for merchant updates...";
+    startPolling();
+  } catch (error) {
+    result.innerHTML = '<div class="notice">' + escapeText(error instanceof Error ? error.message : "Order failed") + '</div>';
+  } finally {
+    submitButton.disabled = false;
   }
-  const promise = payload.order.promise || {};
-  result.innerHTML = \`
-    <div class="order">
-      <div class="order-title">
-        <div>
-          <h3>\${escapeText(payload.order.item.quantity)}x \${escapeText(payload.order.item.name)}</h3>
-          <p>Pass: \${escapeText(payload.order.id)}</p>
-        </div>
-        <span class="pill">\${escapeText(payload.order.status)}</span>
-      </div>
-      <p>Estimated wait: \${escapeText(promise.estimatedWaitMinutes ?? "n/a")} min. Promised pickup: \${escapeText(promise.promisedReadyAt ? new Date(promise.promisedReadyAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "not set")}.</p>
-      <p>Show this at Raposa. Pay at the counter as usual. Staff will mark ready, then claimed after handoff.</p>
-      <pre>\${escapeText(JSON.stringify(payload.order, null, 2))}</pre>
-    </div>
-  \`;
 });
+
+if (activeOrderId) startPolling();
 </script>`);
 }

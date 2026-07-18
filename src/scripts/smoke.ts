@@ -1621,14 +1621,17 @@ async function smokeEtaReconfirm(origin: string) {
     if (!r.ok) throw new Error(`saturation order ${i} failed: ${r.status}`);
   }
 
-  // Quote is HONEST about the queue now: 2 + 15 = 17 min, not prep-only.
+  // Quote is HONEST about the queue now: at least the 17-minute queue floor,
+  // plus at most the alignment to the next 15-minute capacity window.
   const q1 = await postJson(origin, "/merchants/game-day-boba/quote", fruitTea) as { etaMinutes?: number };
-  if (q1.etaMinutes !== 17) throw new Error(`queue-aware quote ETA should be 17, got ${q1.etaMinutes}`);
+  if (!q1.etaMinutes || q1.etaMinutes < 17 || q1.etaMinutes > 20) {
+    throw new Error(`queue-aware quote ETA should be 17-20 min, got ${q1.etaMinutes}`);
+  }
 
   const prev = process.env.SLLR_ETA_RECONFIRM;
   process.env.SLLR_ETA_RECONFIRM = "true";
   try {
-    // Wait (17) exceeds the buyer's 10-min deadline → 409 reconfirm, no order.
+    // Wait exceeds the buyer's 10-min deadline → 409 reconfirm, no order.
     const blocked = await fetch(`${origin}/merchants/game-day-boba/orders`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fruitTea),
     });
@@ -1639,8 +1642,9 @@ async function smokeEtaReconfirm(origin: string) {
     // Buyer re-confirms the longer wait → order created, promise matches the
     // same queue-aware formula (no contradiction).
     const ok = await postJson(origin, "/merchants/game-day-boba/orders", { ...fruitTea, acceptDelay: true }) as { order?: { promise?: { estimatedWaitMinutes?: number } } };
-    if (ok.order?.promise?.estimatedWaitMinutes !== 17) {
-      throw new Error(`reconfirmed order promise should be 17 min, got ${JSON.stringify(ok.order?.promise?.estimatedWaitMinutes)}`);
+    const orderEta = ok.order?.promise?.estimatedWaitMinutes;
+    if (!orderEta || orderEta < 17 || orderEta > 20 || Math.abs(orderEta - q1.etaMinutes) > 1) {
+      throw new Error(`reconfirmed order promise should match the fresh queue ETA, got ${JSON.stringify(orderEta)}`);
     }
     // No deadline + no stale quote → unaffected by the gate.
     const free = await fetch(`${origin}/merchants/game-day-boba/orders`, {
@@ -2584,9 +2588,16 @@ async function smokeBuyerAuth(origin: string) {
 
   // GET /buyer/orders with the token lists it.
   const myOrdersRes = await fetch(`${origin}/buyer/orders`, { headers: { authorization: `Bearer ${token}` } });
-  const myOrders = await myOrdersRes.json() as { buyerId?: string; orders?: Array<{ id?: string }> };
-  if (!myOrdersRes.ok || myOrders.buyerId !== session.buyerId || !myOrders.orders?.some((o) => o.id === authed.order?.id)) {
+  const myOrders = await myOrdersRes.json() as {
+    buyerId?: string;
+    orders?: Array<{ id?: string; tracking?: { live?: boolean; queuePosition?: number | null; ordersAhead?: number | null } }>;
+  };
+  const myTrackedOrder = myOrders.orders?.find((order) => order.id === authed.order?.id);
+  if (!myOrdersRes.ok || myOrders.buyerId !== session.buyerId || !myTrackedOrder) {
     throw new Error(`/buyer/orders did not list the authed order: ${JSON.stringify(myOrders)}`);
+  }
+  if (!myTrackedOrder.tracking?.live || !myTrackedOrder.tracking.queuePosition) {
+    throw new Error(`/buyer/orders did not include live queue tracking: ${JSON.stringify(myTrackedOrder)}`);
   }
 
   // /buyer/orders without a token is rejected.
@@ -2682,6 +2693,13 @@ async function smokeBuyerAuth(origin: string) {
       paymentMode: "counter",
     }) as { order?: { buyerId?: string } };
     if (stillOk.order?.buyerId !== session.buyerId) throw new Error(`Authed consented order under require-auth should succeed: ${JSON.stringify(stillOk)}`);
+    const ownOrderRead = await fetch(`${origin}/orders/${authed.order?.id}`, { headers: { authorization: `Bearer ${token}` } });
+    if (ownOrderRead.status !== 200) throw new Error(`Buyer should read own order, got ${ownOrderRead.status}`);
+    const strangerSession = await postJson(origin, "/buyer/session", { label: "stranger buyer" }) as { token?: string };
+    const strangerRead = await fetch(`${origin}/orders/${authed.order?.id}`, {
+      headers: { authorization: `Bearer ${strangerSession.token}` },
+    });
+    if (strangerRead.status !== 403) throw new Error(`Buyer A must not read Buyer B order, got ${strangerRead.status}`);
   } finally {
     if (prev === undefined) delete process.env.SLLR_REQUIRE_BUYER_AUTH; else process.env.SLLR_REQUIRE_BUYER_AUTH = prev;
   }
@@ -3459,12 +3477,25 @@ async function main() {
     }
 
     const raposaTerminal = await fetch(`${origin}/raposa`).then((response) => response.text());
-    if (!raposaTerminal.includes("Raposa Promise Terminal") || !raposaTerminal.includes("/raposa/order")) {
+    if (
+      !raposaTerminal.includes("Raposa Promise Terminal")
+      || !raposaTerminal.includes("/raposa/order")
+      || !raposaTerminal.includes("/merchants/\" + merchantId + \"/orders?demo=true")
+      || !raposaTerminal.includes("Enable notifications")
+    ) {
       throw new Error("Raposa terminal page did not render expected staff controls.");
     }
 
     const raposaOrderPage = await fetch(`${origin}/raposa/order`).then((response) => response.text());
-    if (!raposaOrderPage.includes("Order from Raposa") || !raposaOrderPage.includes("Ask Raposa for pickup promise")) {
+    if (
+      !raposaOrderPage.includes("Order from Raposa")
+      || !raposaOrderPage.includes("Ask Raposa for pickup promise")
+      || !raposaOrderPage.includes("/buyer/session")
+      || !raposaOrderPage.includes("/buyer/orders")
+      || !raposaOrderPage.includes("window.sessionStorage")
+      || !raposaOrderPage.includes("Enable status notifications")
+      || raposaOrderPage.includes("window.localStorage.setItem(buyerTokenKey")
+    ) {
       throw new Error("Raposa customer order page did not render expected order form.");
     }
 
@@ -3535,9 +3566,23 @@ async function main() {
       throw new Error(`Pickup order did not include a pickup promise: ${JSON.stringify(pickupOrder)}`);
     }
 
-    const terminalList = await fetch(`${origin}/orders?merchantId=raposa-coffee`).then((response) => response.json()) as { orders?: Array<{ id?: string }> };
-    if (!terminalList.orders?.some((order) => order.id === pickupOrder.order?.id)) {
+    const protectedList = await fetch(`${origin}/merchants/raposa-coffee/orders`);
+    if (protectedList.status !== 401) {
+      throw new Error(`Merchant order listing without auth should be 401, got ${protectedList.status}`);
+    }
+    const terminalList = await fetch(`${origin}/orders?merchantId=raposa-coffee&demo=true`).then((response) => response.json()) as {
+      orders?: Array<{ id?: string; tracking?: { live?: boolean; queuePosition?: number | null; ordersAhead?: number | null } }>;
+    };
+    const trackedPickup = terminalList.orders?.find((order) => order.id === pickupOrder.order?.id);
+    if (!trackedPickup) {
       throw new Error(`Merchant terminal did not list pickup order: ${JSON.stringify(terminalList)}`);
+    }
+    const trackedMerchantList = await getJson(origin, "/merchants/raposa-coffee/orders?demo=true") as {
+      orders?: Array<{ id?: string; tracking?: { live?: boolean; queuePosition?: number | null; ordersAhead?: number | null } }>;
+    };
+    const trackedMerchantOrder = trackedMerchantList.orders?.find((order) => order.id === pickupOrder.order?.id);
+    if (!trackedMerchantOrder?.tracking?.live || !trackedMerchantOrder.tracking.queuePosition) {
+      throw new Error(`Pickup order did not expose live queue tracking: ${JSON.stringify(trackedMerchantOrder)}`);
     }
 
     const accepted = await postJson(origin, `/orders/${pickupOrder.order.id}/accept`, {
@@ -3558,6 +3603,13 @@ async function main() {
     }) as { status?: string; order?: { promise?: { readyAt?: string } } };
     if (ready.status !== "ready" || !ready.order?.promise?.readyAt) {
       throw new Error(`Merchant ready signal failed: ${JSON.stringify(ready)}`);
+    }
+    const afterReady = await getJson(origin, "/merchants/raposa-coffee/orders?demo=true") as {
+      orders?: Array<{ id?: string; tracking?: { queuePosition?: number | null; ordersAhead?: number | null } }>;
+    };
+    const readyTracking = afterReady.orders?.find((order) => order.id === pickupOrder.order?.id)?.tracking;
+    if (!readyTracking || readyTracking.queuePosition !== null || readyTracking.ordersAhead !== 0) {
+      throw new Error(`Ready order should leave the production queue: ${JSON.stringify(readyTracking)}`);
     }
 
     const claimed = await postJson(origin, `/orders/${pickupOrder.order.id}/claim`, {
@@ -3641,7 +3693,7 @@ async function main() {
       throw new Error(`Merchant-scoped SOLYD order was not created: ${JSON.stringify(merchantOrder)}`);
     }
 
-    const merchantOrders = await getJson(origin, "/merchants/solyd/orders") as { orders?: Array<{ id?: string }> };
+    const merchantOrders = await getJson(origin, "/merchants/solyd/orders?demo=true") as { orders?: Array<{ id?: string }> };
     if (!merchantOrders.orders?.some((order) => order.id === merchantOrder.order?.id)) {
       throw new Error(`Merchant-scoped orders did not include SOLYD order: ${JSON.stringify(merchantOrders)}`);
     }

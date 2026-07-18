@@ -681,6 +681,11 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
           return json(response, 201, await createMerchantOrder(merchantId, await bindBuyer(request, await body(request))));
         }
         if (request.method === "GET" && action === "orders") {
+          await requireMerchantAuth(
+            request.headers,
+            { demo: url.searchParams.get("demo") === "true" },
+            merchantId,
+          );
           return json(response, 200, await listMerchantOrders(merchantId, url.searchParams.get("status")));
         }
         if (request.method === "POST" && action === "payment") {
@@ -836,10 +841,17 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         });
       }
       if (request.method === "GET" && url.pathname === "/orders") {
+        const merchantId = url.searchParams.get("merchantId") || "";
+        if (!merchantId) return json(response, 400, { error: "merchantId is required for merchant order listing." });
+        await requireMerchantAuth(
+          request.headers,
+          { demo: url.searchParams.get("demo") === "true" },
+          merchantId,
+        );
         return json(response, 200, {
           product: "SLL-R merchant terminal",
           orders: await listOrders({
-            merchantId: url.searchParams.get("merchantId") || undefined,
+            merchantId,
             status: url.searchParams.get("status") as never || undefined,
           }),
         });
@@ -869,6 +881,11 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
             || String(request.headers.accept || "").includes("text/html");
           if (wantsHtml) {
             return html(response, order ? 200 : 404, orderLandingPage(order, url.searchParams));
+          }
+          if (order?.buyerId && process.env.SLLR_REQUIRE_BUYER_AUTH === "true") {
+            const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+            if (!session) return json(response, 401, { error: "Buyer authentication is required to read this order." });
+            if (session.buyerId !== order.buyerId) return json(response, 403, { error: "This order belongs to another buyer." });
           }
           return json(response, order ? 200 : 404, order ? { product: "SLL-R merchant terminal", order } : { error: `Unknown order: ${orderId}` });
         }

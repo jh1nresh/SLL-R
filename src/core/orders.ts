@@ -95,7 +95,8 @@ async function allOrders(): Promise<SellerOrder[]> {
 export async function listOrdersForBuyer(buyerId: string, limit?: number): Promise<SellerOrder[]> {
   const ids = await sllrStore().indexMembers(buyerOrdersIndex(buyerId));
   const boundedIds = limit === undefined ? ids : ids.slice(-Math.max(1, Math.min(limit, 500)));
-  return (await loadOrdersByIds(boundedIds)).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const orders = (await loadOrdersByIds(boundedIds)).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return withLiveOrderTrackingBatch(orders);
 }
 
 function addMinutes(date: Date, minutes: number) {
@@ -109,7 +110,7 @@ async function activePickupOrders(merchantId: string, productionClass: string) {
     // Scheduled pickups already occupy their target capacity window and must
     // not inflate the queue for an order placed right now.
     && order.promise.scheduledPickup !== true
-    && !["rejected", "claimed", "fulfilled", "receipt_issued"].includes(order.status)
+    && !["rejected", "ready", "claimed", "fulfilled", "receipt_issued"].includes(order.status)
   ));
 }
 
@@ -117,23 +118,89 @@ async function activePickupOrders(merchantId: string, productionClass: string) {
 // by quotes and order promises, so a quote can never show "~7 min" while the
 // created order silently computes 52 (the trust bug the pilot audit caught).
 // null for non-pickup items.
-export async function estimatedPickupWaitMinutes(merchantId: string, item: CatalogItem, quantity = 1): Promise<number | null> {
+export async function estimatedPickupWaitMinutes(
+  merchantId: string,
+  item: CatalogItem,
+  quantity = 1,
+  now = new Date(),
+): Promise<number | null> {
   if (!item.fulfillment.includes("pickup")) return null;
   const productionClass = productionClassFor(item);
   const activeAhead = (await activePickupOrders(merchantId, productionClass)).length;
   const capacity = CAPACITY_BY_PRODUCTION_CLASS[productionClass];
   const prepMinutes = Math.max(item.prepMinutes || 5, 1);
   const baseWait = prepMinutes + Math.floor(activeAhead / capacity) * CAPACITY_WINDOW_MINUTES;
-  const now = new Date();
   const desiredReadyAt = addMinutes(now, baseWait);
   for (let offset = 0; offset < 32; offset += 1) {
     const probeAt = addMinutes(desiredReadyAt, offset * CAPACITY_WINDOW_MINUTES);
     const window = await capacityWindowAt(merchantId, productionClass, probeAt);
     if (window.available >= quantity) {
-      return baseWait + offset * CAPACITY_WINDOW_MINUTES;
+      const windowStartWait = Math.ceil((new Date(window.startsAt).getTime() - now.getTime()) / 60_000);
+      return Math.max(baseWait, windowStartWait);
     }
   }
   return baseWait + 32 * CAPACITY_WINDOW_MINUTES;
+}
+
+function queueKey(order: SellerOrder) {
+  return `${order.merchantId}:${order.promise.productionClass}`;
+}
+
+function trackingSnapshot(order: SellerOrder, queue: SellerOrder[]) {
+  const isPickup = order.promise.productionClass !== "shipping";
+  const terminal = ["rejected", "ready", "claimed", "fulfilled", "receipt_issued"].includes(order.status);
+  if (!isPickup) {
+    return {
+      ...order,
+      tracking: {
+        live: true,
+        queuePosition: null,
+        ordersAhead: null,
+        estimatedWaitMinutes: null,
+        promisedReadyAt: order.promise.promisedReadyAt,
+        updatedAt: order.updatedAt,
+      },
+    };
+  }
+
+  const index = terminal ? -1 : queue.findIndex((candidate) => candidate.id === order.id);
+  const promised = order.promise.promisedReadyAt ? new Date(order.promise.promisedReadyAt).getTime() : Number.NaN;
+  const remaining = terminal
+    ? 0
+    : Number.isFinite(promised)
+      ? Math.max(0, Math.ceil((promised - Date.now()) / 60_000))
+      : order.promise.estimatedWaitMinutes;
+
+  return {
+    ...order,
+    tracking: {
+      live: true,
+      queuePosition: index >= 0 ? index + 1 : null,
+      ordersAhead: index >= 0 ? index : 0,
+      estimatedWaitMinutes: remaining,
+      promisedReadyAt: order.promise.promisedReadyAt,
+      updatedAt: order.updatedAt,
+    },
+  };
+}
+
+export async function withLiveOrderTrackingBatch(orders: SellerOrder[]) {
+  const queues = new Map<string, SellerOrder[]>();
+  for (const candidate of await allOrders()) {
+    if (
+      candidate.promise.productionClass === "shipping"
+      || candidate.promise.scheduledPickup === true
+      || ["rejected", "ready", "claimed", "fulfilled", "receipt_issued"].includes(candidate.status)
+    ) continue;
+    const key = queueKey(candidate);
+    const queue = queues.get(key) || [];
+    queue.push(candidate);
+    queues.set(key, queue);
+  }
+  for (const queue of queues.values()) {
+    queue.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+  return orders.map((order) => trackingSnapshot(order, queues.get(queueKey(order)) || []));
 }
 
 async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: OrderRequest, now: Date, quantity: number): Promise<SellerOrder["promise"]> {

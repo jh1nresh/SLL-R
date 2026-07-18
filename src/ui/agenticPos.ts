@@ -284,6 +284,8 @@ export function merchantTerminalPage(merchantId: string, origin: string) {
     <div class="row">
       <a class="button secondary" href="/agent/${escapeHtml(merchant.id)}">Customer agent</a>
       <button id="staffKeyBtn" class="secondary" title="Set the staff key used to confirm orders">🔑 <span id="keyStatus">key not set</span></button>
+      <button id="notifyStaff" class="secondary">Enable notifications</button>
+      <span class="pill" id="liveConnection">connecting</span>
       <button id="refresh">Refresh</button>
     </div>
   </div>
@@ -326,6 +328,8 @@ const countEl = document.getElementById("count");
 const refreshButton = document.getElementById("refresh");
 const staffKeyButton = document.getElementById("staffKeyBtn");
 const keyStatusEl = document.getElementById("keyStatus");
+const notifyStaffButton = document.getElementById("notifyStaff");
+const liveConnectionEl = document.getElementById("liveConnection");
 
 // One-time ?staffKey=... link saves the staff key to this browser then strips
 // it from the URL; staff can also set/update it via the 🔑 button. The key is
@@ -399,6 +403,7 @@ function renderOrder(order) {
   const canClaim = order.status === "ready";
   const canFulfill = order.status === "accepted" || order.status === "payment_backed" || order.status === "pending_payment";
   const promise = order.promise || {};
+  const tracking = order.tracking || {};
   return \`
     <article class="card">
       <div class="card-title">
@@ -418,6 +423,7 @@ function renderOrder(order) {
         <span class="muted">Wait: \${escapeText(promise.estimatedWaitMinutes ?? "n/a")} min</span>
         <span class="muted">Promised: \${escapeText(timeText(promise.promisedReadyAt))}</span>
         <span class="muted">Ready: \${escapeText(timeText(promise.readyAt))}</span>
+        \${tracking.queuePosition ? \`<span class="muted">Queue #\${escapeText(tracking.queuePosition)} · \${escapeText(tracking.ordersAhead)} ahead</span>\` : ""}
       </div>
       \${order.receipt ? \`<pre>Receipt: \${escapeText(order.receipt.receiptHash)}\\nClaim: \${escapeText(order.receipt.claimUrl)}</pre>\` : ""}
       <div class="row">
@@ -444,11 +450,29 @@ function beep() {
 }
 
 async function loadOrders() {
-  const response = await fetch("/orders?merchantId=" + encodeURIComponent(merchantId));
+  const staffSecret = window.localStorage.getItem("sllrStaffSecret");
+  const response = await fetch("/merchants/" + encodeURIComponent(merchantId) + "/orders?demo=true", {
+    headers: staffSecret ? { "x-sllr-merchant-payment-secret": staffSecret } : {}
+  });
+  if (!response.ok) {
+    liveConnectionEl.textContent = "auth required";
+    if (response.status === 401) promptStaffKey();
+    return;
+  }
   const json = await response.json();
   const orders = json.orders || [];
-  if (prevCount !== null && orders.length > prevCount) beep();  // new order arrived
+  if (prevCount !== null && orders.length > prevCount) {
+    beep();
+    if ("Notification" in window && Notification.permission === "granted") {
+      const newest = orders[0];
+      new Notification("New SLL-R order", {
+        body: newest.item.name + " · " + newest.id.slice(-6),
+        tag: "sllr-merchant-" + newest.id
+      });
+    }
+  }
   prevCount = orders.length;
+  liveConnectionEl.textContent = "live · 2s";
   countEl.textContent = orders.length + (orders.length === 1 ? " order" : " orders");
   ordersEl.innerHTML = orders.length ? orders.map(renderOrder).join("") : '<div class="notice">No orders yet. Open the customer agent page to create one.</div>';
 }
@@ -483,8 +507,13 @@ async function toggle86(itemId, btn) {
 }
 
 refreshButton.addEventListener("click", loadOrders);
+notifyStaffButton.addEventListener("click", async () => {
+  if (!("Notification" in window)) return;
+  const permission = await Notification.requestPermission();
+  notifyStaffButton.textContent = permission === "granted" ? "Notifications enabled" : "Notifications unavailable";
+});
 loadOrders();
 loadAvailability();
-setInterval(loadOrders, 5000);
+setInterval(loadOrders, 2000);
 </script>`);
 }

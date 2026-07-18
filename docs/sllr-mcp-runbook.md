@@ -94,11 +94,24 @@ ordering still works unless the server sets `SLLR_REQUIRE_BUYER_AUTH=true`.
    - `solana_pay`: prepare Solana Pay URL with a unique reference.
    - `helio` / `moonpay`: open checkout handoff and verify webhook.
 
-6. Check order status.
+6. Check order status from the buyer-scoped surface.
 
    ```text
-   GET /orders/{orderId}
+   GET /buyer/orders
+   Authorization: Bearer ***
    ```
+
+   Each order includes a derived `tracking` snapshot with `queuePosition`,
+   `ordersAhead`, live estimated wait, promised ready time, and last update. Use
+   this buyer-scoped endpoint for public clients; `GET /orders/{orderId}` is also
+   buyer-gated when `SLLR_REQUIRE_BUYER_AUTH=true`.
+
+   The Raposa demo page short-polls this buyer-owned feed every two seconds,
+   always updates its in-page status, and can emit an optional browser
+   notification after the user grants permission. It stops polling after a
+   rejected order or canonical receipt. Merchant boards poll the protected
+   merchant order feed with merchant authorization; do not expose that feed to
+   public buyer agents.
 
 7. Record merchant fulfillment, then issue receipt memory.
 
