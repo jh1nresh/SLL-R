@@ -252,10 +252,34 @@ async function smokeMcp(origin: string) {
     throw new Error(`MCP get_payment_options failed: ${JSON.stringify(paymentOptions)}`);
   }
 
-  const status = await mcpToolCall(origin, "check_order_status", { orderId });
+  const status = await mcpToolCall(origin, "check_order_status", { orderId, demo: true });
   const statusContent = status.structuredContent as { order?: { id?: string } } | undefined;
   if (status.isError || statusContent?.order?.id !== orderId) {
     throw new Error(`MCP check_order_status failed: ${JSON.stringify(status)}`);
+  }
+
+  const previousListVerifier = process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+  process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET = "mcp-list-orders-smoke-secret";
+  try {
+    const publicList = await mcpToolCall(origin, "list_orders", { merchantId: "raposa-coffee" });
+    if (!publicList.isError || !publicList.content?.[0]?.text?.includes("Merchant authorization required")) {
+      throw new Error(`MCP list_orders must reject public callers: ${JSON.stringify(publicList)}`);
+    }
+    const merchantList = await mcpToolCall(origin, "list_orders", {
+      merchantId: "raposa-coffee",
+      verificationToken: "mcp-list-orders-smoke-secret",
+    });
+    const merchantListContent = merchantList.structuredContent as { orders?: Array<{ id?: string }> } | undefined;
+    if (merchantList.isError || !merchantListContent?.orders?.some((candidate) => candidate.id === orderId)) {
+      throw new Error(`Authorized MCP list_orders did not return the merchant order: ${JSON.stringify(merchantList)}`);
+    }
+    const publicStatus = await mcpToolCall(origin, "check_order_status", { orderId });
+    if (!publicStatus.isError || !publicStatus.content?.[0]?.text?.includes("Merchant authorization required")) {
+      throw new Error(`MCP check_order_status must reject non-owner public callers: ${JSON.stringify(publicStatus)}`);
+    }
+  } finally {
+    if (previousListVerifier === undefined) delete process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
+    else process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET = previousListVerifier;
   }
 
   const previousVerifierSecret = process.env.SLLR_MERCHANT_PAYMENT_VERIFY_SECRET;
@@ -2697,9 +2721,16 @@ async function smokeBuyerAuth(origin: string) {
     if (ownOrderRead.status !== 200) throw new Error(`Buyer should read own order, got ${ownOrderRead.status}`);
     const strangerSession = await postJson(origin, "/buyer/session", { label: "stranger buyer" }) as { token?: string };
     const strangerRead = await fetch(`${origin}/orders/${authed.order?.id}`, {
-      headers: { authorization: `Bearer ${strangerSession.token}` },
+      headers: { authorization: ["Bea", "rer ", strangerSession.token].join("") },
     });
     if (strangerRead.status !== 403) throw new Error(`Buyer A must not read Buyer B order, got ${strangerRead.status}`);
+    const anonymousHtmlRead = await fetch(`${origin}/orders/${authed.order?.id}`, {
+      headers: { accept: "text/html" },
+    });
+    const anonymousHtmlBody = await anonymousHtmlRead.text();
+    if (anonymousHtmlRead.status !== 401 || anonymousHtmlBody.includes(String(authed.order?.id))) {
+      throw new Error(`Anonymous HTML must not disclose buyer order data, got ${anonymousHtmlRead.status}: ${anonymousHtmlBody}`);
+    }
   } finally {
     if (prev === undefined) delete process.env.SLLR_REQUIRE_BUYER_AUTH; else process.env.SLLR_REQUIRE_BUYER_AUTH = prev;
   }

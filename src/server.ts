@@ -875,17 +875,17 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         const [, orderId, action] = orderRoute;
         if (request.method === "GET" && !action) {
           const order = await getOrder(orderId);
+          if (order?.buyerId && process.env.SLLR_REQUIRE_BUYER_AUTH === "true") {
+            const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
+            if (!session) return json(response, 401, { error: "Buyer authentication is required to read this order." });
+            if (session.buyerId !== order.buyerId) return json(response, 403, { error: "This order belongs to another buyer." });
+          }
           // Stripe redirects the customer's browser here (?paid=1 / ?canceled=1).
           // Serve a friendly page for browsers; keep JSON for API/tool callers.
           const wantsHtml = url.searchParams.has("paid") || url.searchParams.has("canceled")
             || String(request.headers.accept || "").includes("text/html");
           if (wantsHtml) {
             return html(response, order ? 200 : 404, orderLandingPage(order, url.searchParams));
-          }
-          if (order?.buyerId && process.env.SLLR_REQUIRE_BUYER_AUTH === "true") {
-            const session = await resolveBuyer(buyerTokenFrom(request.headers), new Date().toISOString());
-            if (!session) return json(response, 401, { error: "Buyer authentication is required to read this order." });
-            if (session.buyerId !== order.buyerId) return json(response, 403, { error: "This order belongs to another buyer." });
           }
           return json(response, order ? 200 : 404, order ? { product: "SLL-R merchant terminal", order } : { error: `Unknown order: ${orderId}` });
         }

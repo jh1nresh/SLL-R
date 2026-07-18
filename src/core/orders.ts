@@ -154,6 +154,8 @@ function trackingSnapshot(order: SellerOrder, queue: SellerOrder[]) {
       ...order,
       tracking: {
         live: true,
+        status: order.status,
+        receiptState: order.receipt ? "issued" : "not_issued",
         queuePosition: null,
         ordersAhead: null,
         estimatedWaitMinutes: null,
@@ -175,6 +177,8 @@ function trackingSnapshot(order: SellerOrder, queue: SellerOrder[]) {
     ...order,
     tracking: {
       live: true,
+      status: order.status,
+      receiptState: order.receipt ? "issued" : "not_issued",
       queuePosition: index >= 0 ? index + 1 : null,
       ordersAhead: index >= 0 ? index : 0,
       estimatedWaitMinutes: remaining,

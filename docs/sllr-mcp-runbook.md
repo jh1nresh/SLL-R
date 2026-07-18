@@ -113,6 +113,12 @@ ordering still works unless the server sets `SLLR_REQUIRE_BUYER_AUTH=true`.
    merchant order feed with merchant authorization; do not expose that feed to
    public buyer agents.
 
+   MCP `list_orders` is merchant-only and requires `verificationToken` containing
+   the operator verifier secret or a merchant-scoped token. MCP
+   `check_order_status` is available to the owning buyer session; other callers
+   must provide the same merchant authorization. Do not use either tool as an
+   anonymous public status feed.
+
 7. Record merchant fulfillment, then issue receipt memory.
 
    ```text

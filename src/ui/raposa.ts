@@ -498,21 +498,29 @@ async function loadActiveOrder() {
   if (!activeOrderId) return;
   const token = window.sessionStorage.getItem(buyerTokenKey);
   if (!token) return;
-  const response = await fetch("/buyer/orders", { headers: authHeaders(token) });
-  if (response.status === 401) {
-    window.sessionStorage.removeItem(buyerTokenKey);
-    liveStatus.textContent = "Buyer session expired. Create a new order to continue.";
-    return;
-  }
-  const payload = await response.json();
-  const order = (payload.orders || []).find((candidate) => candidate.id === activeOrderId);
-  if (!order) return;
-  notifyStatus(order);
-  renderTrackedOrder(order);
-  lastStatus = order.status;
-  if (["rejected", "receipt_issued"].includes(order.status) && pollTimer) {
-    window.clearInterval(pollTimer);
-    pollTimer = null;
+  try {
+    const response = await fetch("/buyer/orders", { headers: authHeaders(token) });
+    if (response.status === 401) {
+      window.sessionStorage.removeItem(buyerTokenKey);
+      if (pollTimer) window.clearInterval(pollTimer);
+      pollTimer = null;
+      liveStatus.textContent = "Buyer session expired. Create a new order to continue.";
+      return;
+    }
+    if (!response.ok) throw new Error("Order status request failed with " + response.status + ".");
+    const payload = await response.json();
+    const order = (payload.orders || []).find((candidate) => candidate.id === activeOrderId);
+    if (!order) return;
+    notifyStatus(order);
+    renderTrackedOrder(order);
+    lastStatus = order.status;
+    if (["rejected", "receipt_issued"].includes(order.status) && pollTimer) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  } catch (error) {
+    liveStatus.textContent = "Live update temporarily unavailable; retrying safely.";
+    console.warn("SLL-R buyer order polling failed", error);
   }
 }
 
