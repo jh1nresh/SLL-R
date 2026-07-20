@@ -123,17 +123,18 @@ export async function estimatedPickupWaitMinutes(merchantId: string, item: Catal
   const activeAhead = (await activePickupOrders(merchantId, productionClass)).length;
   const capacity = CAPACITY_BY_PRODUCTION_CLASS[productionClass];
   const prepMinutes = Math.max(item.prepMinutes || 5, 1);
-  const baseWait = prepMinutes + Math.floor(activeAhead / capacity) * CAPACITY_WINDOW_MINUTES;
+  const queueWait = prepMinutes + Math.floor(activeAhead / capacity) * CAPACITY_WINDOW_MINUTES;
   const now = new Date();
-  const desiredReadyAt = addMinutes(now, baseWait);
+  const desiredReadyAt = addMinutes(now, prepMinutes);
   for (let offset = 0; offset < 32; offset += 1) {
     const probeAt = addMinutes(desiredReadyAt, offset * CAPACITY_WINDOW_MINUTES);
     const window = await capacityWindowAt(merchantId, productionClass, probeAt);
     if (window.available >= quantity) {
-      return baseWait + offset * CAPACITY_WINDOW_MINUTES;
+      const capacityWait = prepMinutes + offset * CAPACITY_WINDOW_MINUTES;
+      return Math.max(queueWait, capacityWait);
     }
   }
-  return baseWait + 32 * CAPACITY_WINDOW_MINUTES;
+  return Math.max(queueWait, prepMinutes + 32 * CAPACITY_WINDOW_MINUTES);
 }
 
 async function pickupPromise(merchant: MerchantProfile, item: CatalogItem, input: OrderRequest, now: Date, quantity: number): Promise<SellerOrder["promise"]> {
