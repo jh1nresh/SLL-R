@@ -634,29 +634,42 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "list_orders",
-    description: "Agent POS feed: list SLL-R orders for a merchant, optionally filtered by status (e.g. pending_payment, accepted, ready).",
+    description: "Authorized Agent POS feed: list SLL-R orders for a merchant, optionally filtered by status (e.g. pending_payment, accepted, ready). Requires the merchant verifier secret or merchant-scoped token.",
     inputSchema: {
       type: "object",
       required: ["merchantId"],
       properties: {
         merchantId: quoteProperties.merchantId,
         status: { type: "string", description: "Optional order status filter, for example pending_payment or ready." },
+        verificationToken: { type: "string", description: "Merchant verifier secret or merchant-scoped token." },
+        demo: { type: "boolean", description: "Local demo only, accepted only when no verifier secret is configured." },
       },
     },
-    handler: (args) => listMerchantOrders(requireString(args, "merchantId"), typeof args.status === "string" ? args.status : null),
+    handler: async (args) => {
+      const merchantId = requireString(args, "merchantId");
+      await requireMerchantAuth({}, args, merchantId);
+      return listMerchantOrders(merchantId, typeof args.status === "string" ? args.status : null);
+    },
   },
   {
     name: "check_order_status",
-    description: "Read current order state, payment status, fulfillment state, pickup promise, and receipt handoff.",
+    description: "Read current order state, payment status, fulfillment state, pickup promise, and receipt handoff. Buyer-bound orders require the matching buyer session; merchant access requires the verifier secret or merchant-scoped token.",
     inputSchema: {
       type: "object",
       required: ["orderId"],
-      properties: { orderId: { type: "string", description: "SLL-R order id, for example ord_..." } },
+      properties: {
+        orderId: { type: "string", description: "SLL-R order id, for example ord_..." },
+        verificationToken: { type: "string", description: "Merchant verifier secret or merchant-scoped token when the caller is not the owning buyer." },
+        demo: { type: "boolean", description: "Local demo only, accepted only when no verifier secret is configured." },
+      },
     },
-    handler: async (args) => {
+    handler: async (args, _origin, buyerId) => {
       const orderId = requireString(args, "orderId");
       const order = await getOrder(orderId);
       if (!order) throw Object.assign(new Error(`Unknown order: ${orderId}`), { status: 404 });
+      if (!order.buyerId || order.buyerId !== buyerId) {
+        await requireMerchantAuth({}, args, order.merchantId);
+      }
       return { product: "SLL-R merchant terminal", order };
     },
   },

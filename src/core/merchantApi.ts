@@ -1,4 +1,4 @@
-import { attachPaymentProofMutation, createOrder, fulfillOrderMutation, getOrder, listOrders } from "./orders.js";
+import { attachPaymentProofMutation, createOrder, fulfillOrderMutation, getOrder, listOrders, withLiveOrderTrackingBatch } from "./orders.js";
 import { quoteOrder } from "./quote.js";
 import { allMerchantProfiles, merchantForId } from "../merchants/profiles.js";
 import { recurringSuggestion } from "./recurring.js";
@@ -415,12 +415,13 @@ export async function createMerchantOrder(merchantId: string, payload: Record<st
 
 export async function listMerchantOrders(merchantId: string, status?: string | null) {
   requireMerchant(merchantId);
+  const orders = await listOrders({
+    merchantId,
+    status: status as never || undefined,
+  });
   return {
     product: "SLL-R merchant orders",
-    orders: await listOrders({
-      merchantId,
-      status: status as never || undefined,
-    }),
+    orders: await withLiveOrderTrackingBatch(orders),
   };
 }
 
