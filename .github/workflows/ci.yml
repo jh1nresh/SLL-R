@@ -9,27 +9,15 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install pnpm
-        run: npm install --global pnpm@9.15.9
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build and smoke test
-        run: pnpm check
+    uses: jh1nresh/.github/.github/workflows/node-ci.yml@0cb6fd5b730ced897c767d1c9979aba4e49d201d
+    with:
+      node-version: "20"
+      package-manager: pnpm
+      pnpm-version: "9.15.9"
+      lockfile: pnpm-lock.yaml
+      check-script: check
+      audit-production: true
+      job-key: sllr-commerce-kernel
+      timeout-minutes: 15
