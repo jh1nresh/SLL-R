@@ -164,7 +164,10 @@ Storage backend selection is Supabase → Redis REST/KV → memory:
 - **Redis REST/KV** supports Vercel KV and Upstash-compatible credentials.
 
 A durable backend is required for serverless or horizontally scaled deployment.
-`GET /health` reports the selected store. Production must also set
+`GET /health` reports the selected store and the deployment revision supplied by
+Vercel, Railway, or another supported runtime. The post-CI delivery workflow
+requires an exact main-commit match and rejects the in-memory store without
+performing any commerce mutation. Production must also set
 `SLLR_MERCHANT_PAYMENT_VERIFY_SECRET`; see [env.example](./env.example).
 
 ## Run Locally

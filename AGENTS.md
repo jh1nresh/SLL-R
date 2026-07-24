@@ -1,39 +1,76 @@
-# AGENTS.md - sll-r
+# SLL-R Agent Contract
 
-Repo rails for coding agents working in this project.
+SLL-R is the merchant-side execution rail:
 
-## Before Editing
+```text
+merchant-backed offer
+-> exact quote
+-> quote-bound consent
+-> idempotent order
+-> payment proof
+-> fulfillment proof
+-> canonical receipt
+```
 
-- Confirm the current branch and dirty state with `git status --short --branch`.
-- Read repo-local docs first: `README*`, package/config files, app entrypoints, and nearby tests.
-- Preserve unrelated user changes. Do not revert, reformat, or clean files outside the task scope.
-- Keep changes surgical. Prefer the existing stack and local patterns over new abstractions.
+Payment proof is never fulfillment proof. Demo merchants are fixtures, not
+partnership claims.
+
+## Required Brief
+
+Before editing, record:
+
+- merchant or buyer failure being solved
+- acceptance criteria and failure fixture
+- feature, repeated loop, or maintenance classification
+- demand proof, pricing hypothesis, and first distribution format, or `N/A`
+- affected state transitions and authorization boundary
+- verification commands
+- actions that remain human-controlled
+
+Ambiguous payment, merchant authority, consent, or receipt semantics block
+implementation.
+
+## Engineering Loop
+
+- Trigger: one scoped brief or GitHub issue.
+- Durable state: issue/PR, tests, and the production delivery receipt.
+- Input boundary: repo files plus redacted deterministic fixtures; no customer
+  messages, payment credentials, or production payload dumps.
+- Maker: engineering agent on an isolated branch.
+- Checker: `pnpm check`, dependency audit, review, and post-deploy health check.
+- Feedback: a deterministic test, security review, or commit-aware production
+  check.
+- Artifact: one atomic PR and one `sllr-delivery-receipt.json`.
+- Convergence: tests pass and production reports the exact merged commit on a
+  durable store.
+- Human approval: merge, Vercel settings/deploy changes, merchant onboarding,
+  production secrets, payment mode changes, cron activation, live transaction,
+  refund, and external messaging.
+- Stop: unverifiable merchant data, missing consent, non-idempotent mutation,
+  payment/fulfillment conflation, tenant leak, production `memory` store,
+  revision mismatch, or three failed repair iterations.
 
 ## Verification
 
-Use the smallest meaningful check for the changed surface:
+Run:
 
-- JavaScript/TypeScript: prefer existing `check`, `test`, `lint`, `typecheck`, or `build` scripts from `package.json`.
-- Swift/Xcode: identify project/workspace, scheme, simulator/device, deployment target, then run the narrow `xcodebuild` build/test command.
-- Solidity/EVM: run the local Foundry/Hardhat tests relevant to touched contracts or scripts.
-- Python: run targeted tests or `python -m py_compile` for touched scripts when no test suite exists.
-- Docs/config only: run formatting/link/containment checks if the repo provides them; otherwise state why runtime verification is not applicable.
+```bash
+pnpm install --frozen-lockfile
+pnpm check
+pnpm audit --prod --audit-level high
+```
 
-Never claim verification passed if the command was not run. Report skipped checks with the exact reason.
+For payment, auth, webhook, merchant mutation, or externally exposed changes,
+include a focused security receipt. Raw scanner output is not a confirmed bug
+until the reachable path is reproduced or regraded.
 
-## Boundaries
+## Delivery Boundary
 
-- Do not commit secrets, private keys, tokens, credentials, customer data, or local machine dumps.
-- Do not deploy, publish, submit forms, send messages, merge PRs, change permissions, create credentials, or make financial/auth/security changes without explicit action-time approval.
-- Do not delete meaningful local or cloud data unless explicitly asked for that exact action.
-- For auth, payment, wallet, parser/import, dependency, or externally exposed changes, include a security review note or explain why it is not applicable.
+Vercel may deploy merged `main`. GitHub Actions does not initiate that deploy.
+After CI succeeds, the delivery workflow polls only `GET /health` until it
+observes the exact main commit on `supabase` or `redis_rest`, then uploads a
+receipt. The checker must never create sessions, orders, payment attempts,
+receipts, cron runs, or merchant mutations.
 
-## Done Criteria
-
-A handoff is complete only when it includes:
-
-- changed files
-- verification command and result
-- skipped checks, if any
-- risks or follow-up work
-- commit/PR status, if shipping was requested
+Never run a production deploy, activate live payments, send outreach, or merge
+a PR without explicit user approval at action time.

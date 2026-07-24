@@ -1,0 +1,69 @@
+name: Production delivery receipt
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      expected_commit:
+        description: "Full main commit SHA; blank uses current main"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sllr-production-delivery
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      EXPECTED_COMMIT: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_commit }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'main' }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+
+      - name: Resolve expected commit
+        id: expected
+        run: |
+          expected="$EXPECTED_COMMIT"
+          if [[ -z "$expected" ]]; then
+            expected="$(git rev-parse HEAD)"
+          fi
+          if [[ ! "$expected" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "expected_commit must be a full lowercase 40-character SHA" >&2
+            exit 1
+          fi
+          echo "value=$expected" >> "$GITHUB_OUTPUT"
+
+      - name: Verify production revision and durable store
+        env:
+          EXPECTED_COMMIT_RESOLVED: ${{ steps.expected.outputs.value }}
+        run: |
+          node scripts/verify-sllr-delivery.mjs \
+            --url https://sll-r.vercel.app \
+            --expected-commit "$EXPECTED_COMMIT_RESOLVED" \
+            --output "$RUNNER_TEMP/sllr-delivery-receipt.json"
+
+      - name: Upload delivery receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sllr-delivery-${{ steps.expected.outputs.value }}
+          path: ${{ runner.temp }}/sllr-delivery-receipt.json
+          if-no-files-found: error
+          retention-days: 14

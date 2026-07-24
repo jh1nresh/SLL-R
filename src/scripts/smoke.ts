@@ -2943,6 +2943,9 @@ async function smokePersonalShop(origin: string) {
 
 async function main() {
   smokeMoneyBoundaries();
+  const previousRevision = process.env.VERCEL_GIT_COMMIT_SHA;
+  const smokeRevision = "0123456789abcdef0123456789abcdef01234567";
+  process.env.VERCEL_GIT_COMMIT_SHA = smokeRevision;
   const server = createSllrServer();
   server.listen(0);
   await once(server, "listening");
@@ -2951,6 +2954,21 @@ async function main() {
   const origin = `http://127.0.0.1:${address.port}`;
 
   try {
+    const health = await getJson(origin, "/health") as {
+      ok?: boolean;
+      product?: string;
+      store?: string;
+      revision?: string | null;
+    };
+    if (
+      health.ok !== true
+      || health.product !== "SLL-R"
+      || health.store !== "memory"
+      || health.revision !== smokeRevision
+    ) {
+      throw new Error(`Health did not expose delivery identity: ${JSON.stringify(health)}`);
+    }
+
     const world = await getText(origin, "/world");
     if (
       !world.response.headers.get("content-type")?.includes("text/html")
@@ -3922,6 +3940,11 @@ async function main() {
 
     console.log("SLL-R smoke passed");
   } finally {
+    if (previousRevision === undefined) {
+      delete process.env.VERCEL_GIT_COMMIT_SHA;
+    } else {
+      process.env.VERCEL_GIT_COMMIT_SHA = previousRevision;
+    }
     server.close();
   }
 }
