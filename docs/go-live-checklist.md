@@ -27,6 +27,17 @@ Everything below is **configuration**, not code.
 
 ---
 
+## Delivery receipt
+
+After main CI passes, `.github/workflows/delivery.yml` waits for
+`https://sll-r.vercel.app/health` to report the exact merged commit and a
+durable `supabase` or `redis_rest` store. It uploads
+`sllr-delivery-receipt.json` and performs no buyer, merchant, cron, payment, or
+receipt mutation. A missing revision or `memory` store is a failed delivery,
+not a reason to weaken the check.
+
+---
+
 ## Phase 1 — SLL-R env (Vercel · TEST mode)
 
 Vercel → Project (sll-r) → Settings → Environment Variables (scope: Production).

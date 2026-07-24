@@ -52,6 +52,16 @@ function json(response: ServerResponse, status: number, payload: unknown) {
   response.end(JSON.stringify(payload, null, 2));
 }
 
+function deploymentRevision() {
+  const candidates = [
+    process.env.VERCEL_GIT_COMMIT_SHA,
+    process.env.RAILWAY_GIT_COMMIT_SHA,
+    process.env.SOURCE_VERSION,
+    process.env.GIT_COMMIT_SHA,
+  ];
+  return candidates.find((candidate) => candidate && /^[0-9a-f]{40}$/.test(candidate)) ?? null;
+}
+
 function html(response: ServerResponse, status: number, payload: string) {
   response.writeHead(status, { "content-type": "text/html; charset=utf-8" });
   response.end(payload);
@@ -364,7 +374,12 @@ export async function handleSllrRequest(request: IncomingMessage, response: Serv
         return json(response, 200, rootDiscovery(originFrom(request)));
       }
     if (request.method === "GET" && url.pathname === "/health") {
-        return json(response, 200, { ok: true, product: "SLL-R", store: storeBackendName() });
+        return json(response, 200, {
+          ok: true,
+          product: "SLL-R",
+          store: storeBackendName(),
+          revision: deploymentRevision(),
+        });
       }
       if (request.method === "GET" && url.pathname === "/sllr-logo.svg") {
         return svg(response, 200, `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="SLL-R"><rect width="512" height="512" rx="96" fill="#163b2b"/><path d="M120 132h272v248H120z" fill="#f8f4ea"/><path d="M164 318c28 18 70 18 98-1 24-16 36-43 36-80v-72h-52v75c0 21-6 35-17 43-13 9-32 8-48-3l-17 38z" fill="#163b2b"/><path d="M356 164a36 36 0 1 1-72 0 36 36 0 0 1 72 0z" fill="#111"/><path d="m305 164 12 13 25-29" fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><path d="M159 365h194" stroke="#163b2b" stroke-width="12" stroke-linecap="round" stroke-dasharray="1 28"/></svg>`);
